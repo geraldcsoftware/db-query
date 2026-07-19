@@ -61,7 +61,11 @@ func (sqlserverAdapter) Build(host config.HostConfig, q Query) (executor.Invocat
 		"-s", mssqlSep,
 		"-W",          // trim trailing whitespace
 		"-w", "65535", // defeat line wrapping at default screen width
-		"-y", "0",     // 0 = unlimited: defeat variable-length column truncation
+		// go-sqlcmd quirk: -y 0 suppresses the header line entirely
+		// (verified against the actual binary), so pin the legacy
+		// maximum instead; variable-length values beyond 8000 chars
+		// truncate on such builds.
+		"-y", "8000",
 		"-Y", "0",
 	}
 	for _, k := range sortedKeys(q.Params) {
@@ -111,7 +115,9 @@ func (sqlserverAdapter) Parse(r executor.RawResult) (Rows, error) {
 	return rows, nil
 }
 
-var mssqlSchemaErr = regexp.MustCompile(`\bMsg 20[78]\b`)
+// Legacy sqlcmd prefixes engine errors with "Msg 207/208"; go-sqlcmd
+// prints only the message text, so match both shapes.
+var mssqlSchemaErr = regexp.MustCompile(`\bMsg 20[78]\b|Invalid column name|Invalid object name`)
 
 func (sqlserverAdapter) IsSchemaError(r executor.RawResult) bool {
 	return r.ExitCode != 0 && (mssqlSchemaErr.Match(r.Stderr) || mssqlSchemaErr.Match(r.Stdout))

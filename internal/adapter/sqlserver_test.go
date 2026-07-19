@@ -50,7 +50,7 @@ func TestSqlserverBuild(t *testing.T) {
 			t.Fatal(err)
 		}
 		argv := strings.Join(inv.Argv, " ")
-		for _, needed := range []string{"-b", "-r 1", "-s \x1f", "-W", "-y 0", "-Y 0"} {
+		for _, needed := range []string{"-b", "-r 1", "-s \x1f", "-W", "-y 8000", "-Y 0"} {
 			if !strings.Contains(argv, needed) {
 				t.Fatalf("argv %q missing %q", argv, needed)
 			}
@@ -183,6 +183,8 @@ func TestSqlserverIsSchemaError(t *testing.T) {
 	}{
 		{"Msg 207, Level 16, State 1, Server x\nInvalid column name 'nope'.", 1, true},
 		{"Msg 208, Level 16, State 1\nInvalid object name 'ghosts'.", 1, true},
+		{"Invalid column name 'nope'.", 1, true},  // go-sqlcmd: no Msg prefix
+		{"Invalid object name 'ghosts'.", 1, true},
 		{"Msg 102, Level 15, State 1\nIncorrect syntax near 'SELEC'.", 1, false},
 		{"Msg 207, ...", 0, false},
 	}

@@ -238,7 +238,13 @@ func execute(c commonFlags, q adapter.Query, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if res.ExitCode != 0 {
-		msg := fmt.Sprintf("%s exited %d: %s", inv.Argv[0], res.ExitCode, strings.TrimSpace(string(res.Stderr)))
+		// go-sqlcmd prints login/connection errors to stdout even with
+		// -r 1, so fall back to stdout when stderr is empty.
+		detail := strings.TrimSpace(string(res.Stderr))
+		if detail == "" {
+			detail = strings.TrimSpace(string(res.Stdout))
+		}
+		msg := fmt.Sprintf("%s exited %d: %s", inv.Argv[0], res.ExitCode, detail)
 		if a.IsSchemaError(res) {
 			msg += "\nhint: the schema may differ from what the query assumes — run `db-query introspect --host " + c.host + "`"
 		}
