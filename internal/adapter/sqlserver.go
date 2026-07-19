@@ -1,7 +1,6 @@
 package adapter
 
 import (
-	"bytes"
 	"fmt"
 	"regexp"
 	"strings"
@@ -56,8 +55,8 @@ func (sqlserverAdapter) Build(host config.HostConfig, q Query) (executor.Invocat
 	}
 	argv := []string{
 		"sqlcmd",
-		"-b",          // batch errors exit nonzero; without it error detection silently breaks
-		"-r", "1",     // error messages to stderr, not mixed into stdout rows
+		"-b",      // batch errors exit nonzero; without it error detection silently breaks
+		"-r", "1", // error messages to stderr, not mixed into stdout rows
 		"-s", mssqlSep,
 		"-W",          // trim trailing whitespace
 		"-w", "65535", // defeat line wrapping at default screen width
@@ -88,11 +87,23 @@ func (sqlserverAdapter) Parse(r executor.RawResult) (Rows, error) {
 	if r.ExitCode != 0 {
 		return Rows{}, fmt.Errorf("sqlcmd exited %d: %s", r.ExitCode, strings.TrimSpace(string(r.Stderr)))
 	}
-	out := strings.ReplaceAll(string(bytes.TrimRight(r.Stdout, "\r\n ")), "\r\n", "\n")
+	out := strings.ReplaceAll(string(r.Stdout), "\r\n", "\n")
 	if strings.TrimSpace(out) == "" {
 		return Rows{}, nil // statement with no result set
 	}
 	lines := strings.Split(out, "\n")
+	// A blank line is a real data row — a single-column result whose value
+	// is the empty string prints as nothing under -W — so empties cannot
+	// be blanket-skipped. Drop only the two end artifacts: the empty
+	// segment Split yields after the final newline, and the one blank
+	// trailer line sqlcmd prints after each result set (verified against
+	// the actual binary: output is header, rule, data rows, blank line).
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	if n := len(lines); n > 0 && strings.TrimRight(lines[n-1], " ") == "" {
+		lines = lines[:n-1]
+	}
 	if len(lines) < 2 {
 		return Rows{}, fmt.Errorf("unexpected sqlcmd output (no header rule): %q", lines[0])
 	}
@@ -101,9 +112,6 @@ func (sqlserverAdapter) Parse(r executor.RawResult) (Rows, error) {
 	}
 	rows := Rows{Columns: strings.Split(lines[0], mssqlSep)}
 	for _, line := range lines[2:] {
-		if line == "" {
-			continue
-		}
 		fields := strings.Split(line, mssqlSep)
 		row := make([]*string, len(fields))
 		for i, f := range fields {

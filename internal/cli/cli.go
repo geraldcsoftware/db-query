@@ -157,6 +157,9 @@ func readSQL(positional []string, file string) (string, error) {
 	case len(positional) > 1:
 		return "", fmt.Errorf("expected one SQL argument, got %d (quote the query)", len(positional))
 	case len(positional) == 1:
+		if strings.TrimSpace(positional[0]) == "" {
+			return "", fmt.Errorf("SQL argument is empty")
+		}
 		return positional[0], nil
 	case file == "-" || file == "":
 		b, err := io.ReadAll(os.Stdin)
@@ -171,6 +174,9 @@ func readSQL(positional []string, file string) (string, error) {
 		b, err := os.ReadFile(file)
 		if err != nil {
 			return "", fmt.Errorf("reading SQL file: %w", err)
+		}
+		if strings.TrimSpace(string(b)) == "" {
+			return "", fmt.Errorf("SQL file %s is empty", file)
 		}
 		return string(b), nil
 	}

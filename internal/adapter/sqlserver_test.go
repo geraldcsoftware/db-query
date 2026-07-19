@@ -150,6 +150,51 @@ func TestSqlserverParse(t *testing.T) {
 		}
 	})
 
+	t.Run("single-column empty-string rows survive", func(t *testing.T) {
+		// Real go-sqlcmd shape: header, rule, data rows (an empty-string
+		// value in a single-column result prints as a blank line under
+		// -W), then one blank trailer line after the result set.
+		out := "a\n-\n\nx\n\n"
+		rows, err := a.Parse(executor.RawResult{Stdout: []byte(out)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows.Rows) != 2 {
+			t.Fatalf("rows = %d, want 2 (empty-string row must not vanish)", len(rows.Rows))
+		}
+		if rows.Rows[0][0] == nil || *rows.Rows[0][0] != "" {
+			t.Fatalf("cell = %v, want non-nil empty string", rows.Rows[0][0])
+		}
+		if *rows.Rows[1][0] != "x" {
+			t.Fatalf("cell = %q", *rows.Rows[1][0])
+		}
+	})
+
+	t.Run("trailing empty-string row survives trailer strip", func(t *testing.T) {
+		out := "a\n-\nx\n\n\n" // rows "x", ""; then trailer blank line
+		rows, err := a.Parse(executor.RawResult{Stdout: []byte(out)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows.Rows) != 2 {
+			t.Fatalf("rows = %d, want 2", len(rows.Rows))
+		}
+		if rows.Rows[1][0] == nil || *rows.Rows[1][0] != "" {
+			t.Fatalf("cell = %v, want non-nil empty string", rows.Rows[1][0])
+		}
+	})
+
+	t.Run("zero-row result set is empty", func(t *testing.T) {
+		out := "a\n-\n\n" // header, rule, trailer blank line, no data
+		rows, err := a.Parse(executor.RawResult{Stdout: []byte(out)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows.Rows) != 0 {
+			t.Fatalf("rows = %d, want 0", len(rows.Rows))
+		}
+	})
+
 	t.Run("empty output is empty rows", func(t *testing.T) {
 		rows, err := a.Parse(executor.RawResult{Stdout: []byte("\n")})
 		if err != nil {
@@ -183,7 +228,7 @@ func TestSqlserverIsSchemaError(t *testing.T) {
 	}{
 		{"Msg 207, Level 16, State 1, Server x\nInvalid column name 'nope'.", 1, true},
 		{"Msg 208, Level 16, State 1\nInvalid object name 'ghosts'.", 1, true},
-		{"Invalid column name 'nope'.", 1, true},  // go-sqlcmd: no Msg prefix
+		{"Invalid column name 'nope'.", 1, true}, // go-sqlcmd: no Msg prefix
 		{"Invalid object name 'ghosts'.", 1, true},
 		{"Msg 102, Level 15, State 1\nIncorrect syntax near 'SELEC'.", 1, false},
 		{"Msg 207, ...", 0, false},

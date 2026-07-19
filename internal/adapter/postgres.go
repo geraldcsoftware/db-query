@@ -47,9 +47,15 @@ func (postgresAdapter) Env(cred credential.Credential, host config.HostConfig) m
 		"PGPASSWORD": cred.Password,
 		"PGAPPNAME":  "db-query",
 	}
-	if ssl := host.Extra["sslmode"]; ssl != "" {
-		env["PGSSLMODE"] = ssl
+	// sslmode is a provider var this adapter cares about, so pin it even
+	// when host config omits it — otherwise an inherited shell PGSSLMODE
+	// would silently change connection behavior (e.g. downgrade or force
+	// SSL). "prefer" is libpq's own default, made explicit.
+	ssl := host.Extra["sslmode"]
+	if ssl == "" {
+		ssl = "prefer"
 	}
+	env["PGSSLMODE"] = ssl
 	return env
 }
 
@@ -81,7 +87,7 @@ func (postgresAdapter) Parse(r executor.RawResult) (Rows, error) {
 	if len(bytes.TrimSpace(r.Stdout)) == 0 {
 		return Rows{}, nil // statement with no result set
 	}
-	reader := csv.NewReader(bytes.NewReader(r.Stdout))
+	reader := csv.NewReader(bytes.NewReader(restoreEmptyRows(r.Stdout)))
 	reader.FieldsPerRecord = -1
 	records, err := reader.ReadAll()
 	if err != nil {
@@ -104,6 +110,34 @@ func (postgresAdapter) Parse(r executor.RawResult) (Rows, error) {
 		rows.Rows = append(rows.Rows, row)
 	}
 	return rows, nil
+}
+
+// restoreEmptyRows rewrites each fully blank line — how psql --csv prints
+// a single-column row whose value is the empty string — as a quoted empty
+// field (`""`). encoding/csv documents that a blank line is not a record,
+// so without this the row would silently vanish, breaking the locked
+// &""-empty-string fidelity (§8). Blank lines inside a quoted multi-line
+// field are left untouched: quote state is tracked across the scan.
+func restoreEmptyRows(in []byte) []byte {
+	out := make([]byte, 0, len(in))
+	inQuote := false
+	lineLen := 0
+	for _, c := range in {
+		if c == '"' {
+			inQuote = !inQuote
+		}
+		if c == '\n' && !inQuote {
+			if lineLen == 0 {
+				out = append(out, '"', '"')
+			}
+			out = append(out, '\n')
+			lineLen = 0
+			continue
+		}
+		out = append(out, c)
+		lineLen++
+	}
+	return out
 }
 
 var pgSchemaErr = regexp.MustCompile(`\b42703\b|\b42P01\b|column .* does not exist|relation .* does not exist`)

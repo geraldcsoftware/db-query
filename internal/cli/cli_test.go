@@ -244,6 +244,17 @@ func TestReadSQLSources(t *testing.T) {
 			t.Fatal("want error")
 		}
 	})
+	t.Run("empty positional is an error, not an introspect run", func(t *testing.T) {
+		if _, err := readSQL([]string{"  "}, ""); err == nil {
+			t.Fatal("want error")
+		}
+	})
+	t.Run("empty file is an error, not an introspect run", func(t *testing.T) {
+		path := writeFile(t, t.TempDir(), "empty.sql", "\n", 0o600)
+		if _, err := readSQL(nil, path); err == nil {
+			t.Fatal("want error")
+		}
+	})
 }
 
 func TestParamFlagParsing(t *testing.T) {

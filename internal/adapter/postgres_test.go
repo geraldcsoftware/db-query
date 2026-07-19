@@ -20,6 +20,7 @@ func TestPostgresEnvExplicitDefaults(t *testing.T) {
 		want := map[string]string{
 			"PGHOST": "localhost", "PGPORT": "5432", "PGDATABASE": "app",
 			"PGUSER": "app", "PGPASSWORD": "pw", "PGAPPNAME": "db-query",
+			"PGSSLMODE": "prefer", // libpq default, pinned so an inherited PGSSLMODE can't leak in
 		}
 		if !reflect.DeepEqual(env, want) {
 			t.Fatalf("env = %v, want %v (every var explicit blocks inherited leakage)", env, want)
@@ -107,6 +108,39 @@ func TestPostgresParse(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got := *rows.Rows[0][0]; got != `a, "quoted" value` {
+			t.Fatalf("cell = %q", got)
+		}
+	})
+
+	t.Run("single-column empty-string row survives", func(t *testing.T) {
+		// psql --csv prints a single-column empty-string value as a fully
+		// blank line; encoding/csv would silently drop it as a non-record.
+		out := "a\n\nx\n"
+		rows, err := a.Parse(executor.RawResult{Stdout: []byte(out)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows.Rows) != 2 {
+			t.Fatalf("rows = %d, want 2 (empty-string row must not vanish)", len(rows.Rows))
+		}
+		if rows.Rows[0][0] == nil || *rows.Rows[0][0] != "" {
+			t.Fatalf("cell = %v, want non-nil empty string", rows.Rows[0][0])
+		}
+		if *rows.Rows[1][0] != "x" {
+			t.Fatalf("cell = %q", *rows.Rows[1][0])
+		}
+	})
+
+	t.Run("blank line inside quoted multi-line field untouched", func(t *testing.T) {
+		out := "a\n\"line1\n\nline2\"\n"
+		rows, err := a.Parse(executor.RawResult{Stdout: []byte(out)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows.Rows) != 1 {
+			t.Fatalf("rows = %d, want 1", len(rows.Rows))
+		}
+		if got := *rows.Rows[0][0]; got != "line1\n\nline2" {
 			t.Fatalf("cell = %q", got)
 		}
 	})
