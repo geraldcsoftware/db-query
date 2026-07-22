@@ -16,13 +16,14 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/credential"
 	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/render"
+	"github.com/geraldcsoftware/db-query/internal/schema"
 )
 
 const usage = `db-query — run SQL against configured hosts via native clients
 
 Usage:
   db-query query      --host <name> [flags] [SQL]   run ad-hoc SQL (positional, -f file, or stdin)
-  db-query introspect --host <name> [flags]         list tables and columns
+  db-query introspect --host <name> [flags]         list tables and columns, rebuild the schema cache
   db-query hosts      [flags]                       list configured hosts
 
 Flags:
@@ -32,11 +33,21 @@ Flags:
   --param k=v         bind a query parameter (repeatable); psql: :'k', sqlcmd: $(k)
   -f <path>           read SQL from file ("-" for stdin)
   --timeout <dur>     per-invocation deadline (default 30s)
+  --refresh-schema    rebuild the cached schema first (query, introspect)
+  --no-headers        text output only: omit the header line, tab-separate rows (query)
+
+Exit codes:
+  0  success
+  1  config, usage, or credential error
+  2  client binary could not start
+  3  schema error — the query references an unknown table or column; re-run with --refresh-schema
+  4  other SQL error — the client ran and exited nonzero
 `
 
-// Exit codes: 0 success, 1 config/usage/credential errors, 2 client
-// failed to start; a client that ran and exited nonzero propagates its
-// own exit code.
+// Exit codes: 0 success; 1 config/usage/credential error; 2 client binary
+// failed to start; 3 schema error (unknown table/column) — the
+// reintrospect-worthy signal; 4 other SQL error (client ran, exited
+// nonzero, but not a schema error).
 func Run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
@@ -90,11 +101,14 @@ func runQuery(args []string, stdout, stderr io.Writer) int {
 	var c commonFlags
 	params := paramFlags{}
 	var sqlFile string
+	var refreshSchema, noHeaders bool
 	fs := flag.NewFlagSet("query", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	addCommon(fs, &c)
 	fs.Var(params, "param", "bind a query parameter (repeatable)")
 	fs.StringVar(&sqlFile, "f", "", `read SQL from file ("-" for stdin)`)
+	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache before running")
+	fs.BoolVar(&noHeaders, "no-headers", false, "text output: omit the header line")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -103,20 +117,59 @@ func runQuery(args []string, stdout, stderr io.Writer) int {
 		render.Error(stderr, c.output, err.Error())
 		return 1
 	}
-	return execute(c, adapter.Query{SQL: sql, Params: params}, stdout, stderr)
+
+	r, code := setup(c, stderr)
+	if code != 0 {
+		return code
+	}
+
+	// The schema cache is a silent side effect: build it the first time a
+	// host+database is seen, or when --refresh-schema forces a rebuild,
+	// before the user query runs. A build failure stops here — the user
+	// query never runs against a schema we could not introspect.
+	cachePath := schema.CachePath(r.host.Host, r.host.Database)
+	if refreshSchema || !schema.Exists(cachePath) {
+		if code := buildSchema(r, cachePath, c, stderr); code != 0 {
+			return code
+		}
+	}
+
+	rows, code := runOnce(r, adapter.Query{SQL: sql, Params: params}, c, true, stderr)
+	if code != 0 {
+		return code
+	}
+	return renderRows(rows, c.output, noHeaders, stdout, stderr)
 }
 
 func runIntrospect(args []string, stdout, stderr io.Writer) int {
 	var c commonFlags
+	// --refresh-schema is accepted for symmetry with query; introspect
+	// always rebuilds the cache regardless, so the flag is a no-op here.
+	var refreshSchema bool
 	fs := flag.NewFlagSet("introspect", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	addCommon(fs, &c)
+	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache (introspect always rebuilds)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	// The introspection SQL is provider-specific, so it is looked up
-	// after the host's adapter is known; empty SQL marks that request.
-	return execute(c, adapter.Query{}, stdout, stderr)
+
+	r, code := setup(c, stderr)
+	if code != 0 {
+		return code
+	}
+
+	// introspect always rebuilds: run the provider catalog query, persist
+	// it to the cache, then print it.
+	rows, code := runOnce(r, adapter.Query{SQL: r.adapter.IntrospectSQL()}, c, false, stderr)
+	if code != 0 {
+		return code
+	}
+	if err := schema.Write(schema.CachePath(r.host.Host, r.host.Database), rows); err != nil {
+		render.Error(stderr, c.output, err.Error())
+		return 1
+	}
+	return renderRows(rows, c.output, false, stdout, stderr)
 }
 
 func runHosts(args []string, stdout, stderr io.Writer) int {
@@ -138,16 +191,7 @@ func runHosts(args []string, stdout, stderr io.Writer) int {
 		n, p, d := name, h.Provider, h.Database
 		rows.Rows = append(rows.Rows, []*string{&n, &p, &d})
 	}
-	r, err := render.For(c.output)
-	if err != nil {
-		render.Error(stderr, c.output, err.Error())
-		return 1
-	}
-	if err := r.Render(stdout, rows); err != nil {
-		render.Error(stderr, c.output, err.Error())
-		return 1
-	}
-	return 0
+	return renderRows(rows, c.output, false, stdout, stderr)
 }
 
 func readSQL(positional []string, file string) (string, error) {
@@ -192,56 +236,71 @@ func loadConfig(path string) (config.Config, error) {
 	return config.Load(path)
 }
 
-func execute(c commonFlags, q adapter.Query, stdout, stderr io.Writer) int {
-	renderer, err := render.For(c.output)
-	if err != nil {
+// resolved bundles a host's adapter, its resolved credential, and the
+// merged host config — the setup shared by the query and introspect paths.
+type resolved struct {
+	adapter adapter.Adapter
+	cred    credential.Credential
+	host    config.HostConfig // after MergeCredential; Host/Database are final
+}
+
+// setup validates the output format and host flag, loads config, selects
+// the adapter, resolves the credential lazily (only this host's secret is
+// touched), and merges it into the host config. On any failure it renders
+// the error and returns exit code 1.
+func setup(c commonFlags, stderr io.Writer) (resolved, int) {
+	if _, err := render.For(c.output); err != nil {
 		render.Error(stderr, c.output, err.Error())
-		return 1
+		return resolved{}, 1
 	}
 	if c.host == "" {
 		render.Error(stderr, c.output, "--host is required")
-		return 1
+		return resolved{}, 1
 	}
 	cfg, err := loadConfig(c.config)
 	if err != nil {
 		render.Error(stderr, c.output, err.Error())
-		return 1
+		return resolved{}, 1
 	}
 	host, err := cfg.Host(c.host)
 	if err != nil {
 		render.Error(stderr, c.output, err.Error())
-		return 1
+		return resolved{}, 1
 	}
 	a, err := adapter.For(host.Provider)
 	if err != nil {
 		render.Error(stderr, c.output, err.Error())
-		return 1
+		return resolved{}, 1
 	}
-	if q.SQL == "" {
-		q.SQL = a.IntrospectSQL()
-	}
-
-	// Lazy, per-invocation resolution: only this host's secret is touched.
 	cred, err := resolveCredential(host)
 	if err != nil {
 		render.Error(stderr, c.output, err.Error())
-		return 1
+		return resolved{}, 1
 	}
 	host = config.MergeCredential(host, cred)
+	return resolved{adapter: a, cred: cred, host: host}, 0
+}
 
-	inv, err := a.Build(host, q)
+// runOnce builds, runs, and parses a single invocation against a resolved
+// host, applying the exit-code contract: 1 (build/parse failure), 2 (client
+// could not start), 3 (schema error), 4 (other SQL error), 0 (rows valid).
+// It renders any error itself. When hintRefresh is set a schema error also
+// hints at --refresh-schema; the internal schema build passes false, since
+// that hint only makes sense for the user's query.
+func runOnce(r resolved, q adapter.Query, c commonFlags, hintRefresh bool, stderr io.Writer) (adapter.Rows, int) {
+	inv, err := r.adapter.Build(r.host, q)
 	if err != nil {
 		render.Error(stderr, c.output, err.Error())
-		return 1
+		return adapter.Rows{}, 1
 	}
-	inv.Env = a.Env(cred, host)
+	inv.Env = r.adapter.Env(r.cred, r.host)
 
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 	res, err := executor.Run(ctx, inv)
 	if err != nil {
 		render.Error(stderr, c.output, err.Error())
-		return 2
+		return adapter.Rows{}, 2
 	}
 	if res.ExitCode != 0 {
 		// go-sqlcmd prints login/connection errors to stdout even with
@@ -251,19 +310,45 @@ func execute(c commonFlags, q adapter.Query, stdout, stderr io.Writer) int {
 			detail = strings.TrimSpace(string(res.Stdout))
 		}
 		msg := fmt.Sprintf("%s exited %d: %s", inv.Argv[0], res.ExitCode, detail)
-		if a.IsSchemaError(res) {
-			msg += "\nhint: the schema may differ from what the query assumes — run `db-query introspect --host " + c.host + "`"
+		if r.adapter.IsSchemaError(res) {
+			if hintRefresh {
+				msg += "\nhint: the schema may have changed — re-run with --refresh-schema to rebuild the schema cache"
+			}
+			render.Error(stderr, c.output, msg)
+			return adapter.Rows{}, 3
 		}
 		render.Error(stderr, c.output, msg)
-		return res.ExitCode
+		return adapter.Rows{}, 4
 	}
-	rows, err := a.Parse(res)
+	rows, err := r.adapter.Parse(res)
 	if err != nil {
+		render.Error(stderr, c.output, err.Error())
+		return adapter.Rows{}, 1
+	}
+	return rows, 0
+}
+
+// buildSchema runs the provider introspection and persists the result to
+// the schema cache. It is a silent side effect of the query path: the rows
+// are cached, never rendered. It returns 0 on success or the runOnce exit
+// code on failure.
+func buildSchema(r resolved, cachePath string, c commonFlags, stderr io.Writer) int {
+	rows, code := runOnce(r, adapter.Query{SQL: r.adapter.IntrospectSQL()}, c, false, stderr)
+	if code != 0 {
+		return code
+	}
+	if err := schema.Write(cachePath, rows); err != nil {
 		render.Error(stderr, c.output, err.Error())
 		return 1
 	}
-	if err := renderer.Render(stdout, rows); err != nil {
-		render.Error(stderr, c.output, err.Error())
+	return 0
+}
+
+// renderRows writes rows through the single render pivot, honouring the
+// output format and cross-format options. It returns 0 or exit code 1.
+func renderRows(rows adapter.Rows, output string, noHeaders bool, stdout, stderr io.Writer) int {
+	if err := render.Render(stdout, output, rows, render.Options{NoHeaders: noHeaders}); err != nil {
+		render.Error(stderr, output, err.Error())
 		return 1
 	}
 	return 0

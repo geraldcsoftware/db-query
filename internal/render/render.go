@@ -12,9 +12,18 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 )
 
+// Options carries cross-format rendering choices. They are applied at the
+// single pivot point (Render), so no adapter needs to know about them.
+type Options struct {
+	// NoHeaders omits the header line in text output and prints every row
+	// tab-separated for any shape, so a 1×1 result is just the bare value.
+	// JSON ignores it — its objects are already self-describing.
+	NoHeaders bool
+}
+
 // Renderer renders a neutral rowset to a writer.
 type Renderer interface {
-	Render(w io.Writer, rows adapter.Rows) error
+	Render(w io.Writer, rows adapter.Rows, opts Options) error
 }
 
 var renderers = map[string]Renderer{
@@ -31,16 +40,29 @@ func For(format string) (Renderer, error) {
 	return r, nil
 }
 
+// Render writes rows to w in the named format. This is the single pivot
+// where the output format is selected and cross-format options are applied,
+// so the choice is not duplicated per adapter.
+func Render(w io.Writer, format string, rows adapter.Rows, opts Options) error {
+	r, err := For(format)
+	if err != nil {
+		return err
+	}
+	return r.Render(w, rows, opts)
+}
+
 // textRenderer prints a tab-separated header + rows. NULL renders as an
 // empty cell (text mode is for human eyes; JSON carries fidelity).
 type textRenderer struct{}
 
-func (textRenderer) Render(w io.Writer, rows adapter.Rows) error {
+func (textRenderer) Render(w io.Writer, rows adapter.Rows, opts Options) error {
 	if len(rows.Columns) == 0 {
 		return nil
 	}
-	if _, err := fmt.Fprintln(w, strings.Join(rows.Columns, "\t")); err != nil {
-		return err
+	if !opts.NoHeaders {
+		if _, err := fmt.Fprintln(w, strings.Join(rows.Columns, "\t")); err != nil {
+			return err
+		}
 	}
 	for _, row := range rows.Rows {
 		cells := make([]string, len(row))
@@ -60,7 +82,7 @@ func (textRenderer) Render(w io.Writer, rows adapter.Rows) error {
 // column order. nil *string renders as JSON null, &"" as "".
 type jsonRenderer struct{}
 
-func (jsonRenderer) Render(w io.Writer, rows adapter.Rows) error {
+func (jsonRenderer) Render(w io.Writer, rows adapter.Rows, _ Options) error {
 	var b strings.Builder
 	b.WriteString("[")
 	for ri, row := range rows.Rows {

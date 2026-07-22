@@ -34,7 +34,7 @@ func TestForUnknownFormat(t *testing.T) {
 func TestTextRenderer(t *testing.T) {
 	r, _ := For("text")
 	var b strings.Builder
-	if err := r.Render(&b, sampleRows()); err != nil {
+	if err := r.Render(&b, sampleRows(), Options{}); err != nil {
 		t.Fatal(err)
 	}
 	want := "id\tname\tnickname\n1\tAda\t\n2\tGrace\t\n"
@@ -46,7 +46,7 @@ func TestTextRenderer(t *testing.T) {
 func TestTextRendererEmpty(t *testing.T) {
 	r, _ := For("text")
 	var b strings.Builder
-	if err := r.Render(&b, adapter.Rows{}); err != nil {
+	if err := r.Render(&b, adapter.Rows{}, Options{}); err != nil {
 		t.Fatal(err)
 	}
 	if b.String() != "" {
@@ -54,10 +54,37 @@ func TestTextRendererEmpty(t *testing.T) {
 	}
 }
 
+func TestTextRendererNoHeaders(t *testing.T) {
+	r, _ := For("text")
+	var b strings.Builder
+	if err := r.Render(&b, sampleRows(), Options{NoHeaders: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Header line dropped; rows stay tab-separated.
+	want := "1\tAda\t\n2\tGrace\t\n"
+	if b.String() != want {
+		t.Fatalf("no-headers text = %q, want %q", b.String(), want)
+	}
+}
+
+// TestTextRendererNoHeaders1x1 pins the locked shape: a single-cell result
+// under --no-headers is just the bare value plus a newline.
+func TestTextRendererNoHeaders1x1(t *testing.T) {
+	r, _ := For("text")
+	var b strings.Builder
+	rows := adapter.Rows{Columns: []string{"count"}, Rows: [][]*string{{ptr("42")}}}
+	if err := r.Render(&b, rows, Options{NoHeaders: true}); err != nil {
+		t.Fatal(err)
+	}
+	if b.String() != "42\n" {
+		t.Fatalf("1×1 no-headers = %q, want %q", b.String(), "42\n")
+	}
+}
+
 func TestJSONRenderer(t *testing.T) {
 	r, _ := For("json")
 	var b strings.Builder
-	if err := r.Render(&b, sampleRows()); err != nil {
+	if err := r.Render(&b, sampleRows(), Options{}); err != nil {
 		t.Fatal(err)
 	}
 	var got []map[string]*string
@@ -82,12 +109,28 @@ func TestJSONRenderer(t *testing.T) {
 func TestJSONRendererEmpty(t *testing.T) {
 	r, _ := For("json")
 	var b strings.Builder
-	if err := r.Render(&b, adapter.Rows{}); err != nil {
+	if err := r.Render(&b, adapter.Rows{}, Options{}); err != nil {
 		t.Fatal(err)
 	}
 	var got []any
 	if err := json.Unmarshal([]byte(b.String()), &got); err != nil || len(got) != 0 {
 		t.Fatalf("empty rows must render as [], got %q (%v)", b.String(), err)
+	}
+}
+
+// TestJSONRendererNoHeadersNoOp pins that --no-headers does not affect JSON:
+// the output is still an array of self-describing objects.
+func TestJSONRendererNoHeadersNoOp(t *testing.T) {
+	r, _ := For("json")
+	var plain, noHdr strings.Builder
+	if err := r.Render(&plain, sampleRows(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Render(&noHdr, sampleRows(), Options{NoHeaders: true}); err != nil {
+		t.Fatal(err)
+	}
+	if plain.String() != noHdr.String() {
+		t.Fatalf("NoHeaders must be a no-op for JSON:\n plain = %q\n noHdr = %q", plain.String(), noHdr.String())
 	}
 }
 
@@ -98,7 +141,7 @@ func TestJSONRendererEscaping(t *testing.T) {
 		Columns: []string{`we"ird`},
 		Rows:    [][]*string{{ptr("line\nbreak\t\"quote\"")}},
 	}
-	if err := r.Render(&b, rows); err != nil {
+	if err := r.Render(&b, rows, Options{}); err != nil {
 		t.Fatal(err)
 	}
 	var got []map[string]string
@@ -108,6 +151,24 @@ func TestJSONRendererEscaping(t *testing.T) {
 	if got[0][`we"ird`] != "line\nbreak\t\"quote\"" {
 		t.Fatalf("round trip failed: %+v", got)
 	}
+}
+
+func TestRenderPivot(t *testing.T) {
+	t.Run("dispatches to text with options", func(t *testing.T) {
+		var b strings.Builder
+		if err := Render(&b, "text", sampleRows(), Options{NoHeaders: true}); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(b.String(), "id\tname") {
+			t.Fatalf("NoHeaders not honoured through pivot: %q", b.String())
+		}
+	})
+	t.Run("unknown format errors", func(t *testing.T) {
+		var b strings.Builder
+		if err := Render(&b, "yaml", sampleRows(), Options{}); err == nil {
+			t.Fatal("want error for unknown format")
+		}
+	})
 }
 
 func TestErrorHonorsFormat(t *testing.T) {

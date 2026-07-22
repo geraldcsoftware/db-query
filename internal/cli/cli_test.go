@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/geraldcsoftware/db-query/internal/adapter"
+	"github.com/geraldcsoftware/db-query/internal/schema"
 )
 
 func writeFile(t *testing.T, dir, name, body string, mode os.FileMode) string {
@@ -25,6 +28,58 @@ func fakePsql(t *testing.T, script string) string {
 	writeFile(t, dir, "psql", "#!/bin/sh\n"+script, 0o755)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return dir
+}
+
+// isolateCache points the schema cache at a fresh temp dir so runs never
+// touch the real cache and the first-run schema build is deterministic.
+func isolateCache(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+}
+
+// seedSchemaCache isolates the cache and pre-writes the entry for
+// testConfig's resolved host (localhost/testdb), so a query run finds the
+// cache present and skips the silent schema build — the psql stub then only
+// answers the user query.
+func seedSchemaCache(t *testing.T) {
+	t.Helper()
+	isolateCache(t)
+	path := schema.CachePath("localhost", "testdb")
+	if err := schema.Write(path, adapter.Rows{Columns: []string{"seeded"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// splitPsql installs a psql stub that answers the introspection query with a
+// canned catalogue (so the silent schema build succeeds) and runs the given
+// user-query script for everything else. The introspection SQL is
+// recognised by its information_schema reference. Both branches append a
+// marker line to $DBQ_CALLS so a test can assert which invocations ran.
+func splitPsql(t *testing.T, userScript string) {
+	t.Helper()
+	fakePsql(t, `
+sql=$(cat)
+case "$sql" in
+  *information_schema*)
+    printf 'introspect\n' >> "$DBQ_CALLS"
+    printf 'table_schema,table_name,column_name,data_type,is_nullable\npublic,people,id,integer,NO\n'
+    exit 0
+    ;;
+esac
+printf 'query\n' >> "$DBQ_CALLS"
+`+userScript)
+}
+
+// callsFile registers a temp calls-marker file for splitPsql and returns a
+// reader for its contents.
+func callsFile(t *testing.T) func() string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("DBQ_CALLS", path)
+	return func() string {
+		b, _ := os.ReadFile(path)
+		return string(b)
+	}
 }
 
 func testConfig(t *testing.T) string {
@@ -73,6 +128,7 @@ func TestHostsCommand(t *testing.T) {
 }
 
 func TestQueryHappyPath(t *testing.T) {
+	seedSchemaCache(t) // cache present → single invocation, the user query
 	dir := fakePsql(t, `
 cat > "$TMPDIR_CAPTURE/stdin"
 env > "$TMPDIR_CAPTURE/env"
@@ -105,6 +161,7 @@ printf 'id,name\n1,Ada\n'
 }
 
 func TestQueryJSONOutput(t *testing.T) {
+	seedSchemaCache(t)
 	fakePsql(t, `printf 'id,nick\n1,\001\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -122,6 +179,7 @@ func TestQueryJSONOutput(t *testing.T) {
 }
 
 func TestQueryMissingCredential(t *testing.T) {
+	isolateCache(t)
 	fakePsql(t, `printf 'x\n'`)
 	t.Setenv("DBQ_TEST_PW", "x") // register restore, then unset for real
 	os.Unsetenv("DBQ_TEST_PW")
@@ -133,25 +191,43 @@ func TestQueryMissingCredential(t *testing.T) {
 }
 
 func TestQuerySchemaErrorHint(t *testing.T) {
+	seedSchemaCache(t) // cache present → the failing stub is the user query
 	fakePsql(t, `echo 'ERROR:  42703: column "nope" does not exist' >&2; exit 1`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "SELECT nope FROM people")
-	if code != 1 {
-		t.Fatalf("code = %d, want client's exit code", code)
+	if code != 3 {
+		t.Fatalf("code = %d, want 3 (schema error)", code)
 	}
-	if !strings.Contains(errb, "introspect") {
-		t.Fatalf("schema error must hint at introspection, err=%q", errb)
+	if !strings.Contains(errb, "--refresh-schema") {
+		t.Fatalf("schema error must hint at --refresh-schema, err=%q", errb)
+	}
+}
+
+// TestQueryOtherSQLError pins the 3-vs-4 split: a non-schema SQL failure is
+// exit code 4 and carries no --refresh-schema hint.
+func TestQueryOtherSQLError(t *testing.T) {
+	seedSchemaCache(t)
+	fakePsql(t, `echo 'ERROR:  23505: duplicate key value violates unique constraint' >&2; exit 1`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "INSERT INTO people VALUES (1)")
+	if code != 4 {
+		t.Fatalf("code = %d, want 4 (other SQL error)", code)
+	}
+	if strings.Contains(errb, "--refresh-schema") {
+		t.Fatalf("a non-schema error must not hint at --refresh-schema, err=%q", errb)
 	}
 }
 
 func TestQueryJSONErrorIsStructured(t *testing.T) {
+	seedSchemaCache(t)
 	fakePsql(t, `echo 'ERROR: boom' >&2; exit 1`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "--output", "json", "SELECT 1")
-	if code != 1 {
-		t.Fatalf("code = %d", code)
+	if code != 4 {
+		t.Fatalf("code = %d, want 4", code)
 	}
 	var doc map[string]string
 	if err := json.Unmarshal([]byte(errb), &doc); err != nil {
@@ -163,7 +239,9 @@ func TestQueryJSONErrorIsStructured(t *testing.T) {
 }
 
 func TestQueryClientNotFound(t *testing.T) {
-	// Empty PATH: psql cannot start → distinct exit code 2.
+	// Empty PATH: psql cannot start → distinct exit code 2. The schema
+	// build is the first invocation and fails to start, which is enough.
+	isolateCache(t)
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -174,6 +252,7 @@ func TestQueryClientNotFound(t *testing.T) {
 }
 
 func TestIntrospectUsesAdapterSQL(t *testing.T) {
+	isolateCache(t)
 	fakePsql(t, `
 cat > "$TMPDIR_CAPTURE/stdin"
 printf 'table_name,column_name\npeople,id\n'
@@ -193,9 +272,14 @@ printf 'table_name,column_name\npeople,id\n'
 	if !strings.Contains(string(stdin), "information_schema.columns") {
 		t.Fatalf("introspect must send the adapter's catalog query, sent %q", stdin)
 	}
+	// introspect persists the cache as a side effect of printing it.
+	if !schema.Exists(schema.CachePath("localhost", "testdb")) {
+		t.Fatal("introspect must write the schema cache")
+	}
 }
 
 func TestQueryParamPassing(t *testing.T) {
+	seedSchemaCache(t) // skip the build so the captured argv is the user query
 	fakePsql(t, `
 printf '%s ' "$@" > "$TMPDIR_CAPTURE/argv"
 printf 'ok\n1\n'
@@ -273,6 +357,158 @@ func TestParamFlagParsing(t *testing.T) {
 	}
 	if err := p.Set("=v"); err == nil {
 		t.Fatal("want error for empty key")
+	}
+}
+
+func TestQueryBuildsSchemaOnFirstRun(t *testing.T) {
+	isolateCache(t) // cache absent → the build must run before the query
+	calls := callsFile(t)
+	splitPsql(t, `printf 'id\n42\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg, "SELECT id FROM people")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if !strings.Contains(out, "42") {
+		t.Fatalf("user query output = %q", out)
+	}
+	if c := calls(); !strings.Contains(c, "introspect") || !strings.Contains(c, "query") {
+		t.Fatalf("first run must introspect then query, calls=%q", c)
+	}
+	if !schema.Exists(schema.CachePath("localhost", "testdb")) {
+		t.Fatal("first run must write the schema cache")
+	}
+}
+
+func TestQuerySkipsSchemaWhenCached(t *testing.T) {
+	seedSchemaCache(t) // cache present → no build, just the user query
+	calls := callsFile(t)
+	splitPsql(t, `printf 'id\n42\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg, "SELECT id FROM people")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if !strings.Contains(out, "42") {
+		t.Fatalf("out = %q", out)
+	}
+	if c := calls(); strings.Contains(c, "introspect") {
+		t.Fatalf("a cached schema must not be rebuilt, calls=%q", c)
+	}
+}
+
+func TestQueryRefreshSchemaForcesRebuild(t *testing.T) {
+	seedSchemaCache(t) // cache present, but --refresh-schema overrides
+	calls := callsFile(t)
+	splitPsql(t, `printf 'id\n42\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--refresh-schema", "SELECT id FROM people")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if c := calls(); !strings.Contains(c, "introspect") || !strings.Contains(c, "query") {
+		t.Fatalf("--refresh-schema must rebuild before the query, calls=%q", c)
+	}
+}
+
+// TestQuerySchemaBuildFailureStops pins that a failed internal introspection
+// surfaces and stops: the user query must not run.
+func TestQuerySchemaBuildFailureStops(t *testing.T) {
+	isolateCache(t)
+	calls := callsFile(t)
+	// The introspection query fails; the user branch would otherwise run.
+	fakePsql(t, `
+sql=$(cat)
+case "$sql" in
+  *information_schema*)
+    printf 'introspect\n' >> "$DBQ_CALLS"
+    echo 'ERROR:  57014: canceling statement due to statement timeout' >&2
+    exit 1
+    ;;
+esac
+printf 'query\n' >> "$DBQ_CALLS"
+printf 'id\n42\n'
+`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, _ := run(t, "query", "--host", "testpg", "--config", cfg, "SELECT id FROM people")
+	if code != 4 { // ran and failed, not a schema error
+		t.Fatalf("code = %d, want 4 (introspection failed)", code)
+	}
+	if out != "" {
+		t.Fatalf("user query must not run after a failed build, out=%q", out)
+	}
+	if c := calls(); strings.Contains(c, "query") {
+		t.Fatalf("user query ran despite a failed schema build, calls=%q", c)
+	}
+}
+
+func TestIntrospectAlwaysRebuilds(t *testing.T) {
+	isolateCache(t)
+	// Seed a stale placeholder; introspect must overwrite it with fresh
+	// catalogue rows regardless of the cache already existing.
+	path := schema.CachePath("localhost", "testdb")
+	if err := schema.Write(path, adapter.Rows{Columns: []string{"stale"}}); err != nil {
+		t.Fatal(err)
+	}
+	calls := callsFile(t)
+	splitPsql(t, `printf 'unused\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "introspect", "--host", "testpg", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if c := calls(); !strings.Contains(c, "introspect") {
+		t.Fatalf("introspect must run the catalogue query, calls=%q", c)
+	}
+	if !strings.Contains(out, "people") {
+		t.Fatalf("introspect must print the fresh schema, out=%q", out)
+	}
+	got, err := schema.Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Columns) == 1 && got.Columns[0] == "stale" {
+		t.Fatal("introspect must overwrite the stale cache")
+	}
+}
+
+func TestQueryNoHeaders(t *testing.T) {
+	seedSchemaCache(t)
+	fakePsql(t, `printf 'count\n42\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--no-headers", "SELECT count(*) FROM people")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if out != "42\n" {
+		t.Fatalf("--no-headers 1×1 = %q, want %q", out, "42\n")
+	}
+}
+
+func TestQueryNoHeadersJSONNoOp(t *testing.T) {
+	seedSchemaCache(t)
+	fakePsql(t, `printf 'id,name\n1,Ada\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--no-headers", "--output", "json", "SELECT id, name FROM people")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	var rows []map[string]*string
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("--no-headers must not affect JSON shape: %q", out)
+	}
+	if len(rows) != 1 || rows[0]["name"] == nil || *rows[0]["name"] != "Ada" {
+		t.Fatalf("rows = %v", rows)
 	}
 }
 

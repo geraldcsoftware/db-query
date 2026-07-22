@@ -27,9 +27,34 @@ db-query hosts                                # list configured hosts
   this tool.
 - `--output text|json` (default `text`). In `json` mode errors are
   emitted as structured JSON on stderr.
-- Exit codes: `0` success, `1` config/credential/usage errors, `2` the
-  client binary could not start; a client that ran and failed propagates
-  its own exit code.
+- `--no-headers` (text output only) omits the header line and tab-separates
+  the rows for any shape, so a 1×1 result prints just the bare value. It is
+  a no-op for `--output json`, whose objects are already self-describing.
+
+### Schema cache
+
+The first query against a host+database silently introspects its tables and
+columns and caches the result under
+`$XDG_CACHE_HOME/db-query/schema/` (fallback `~/.cache/db-query/schema/`).
+Subsequent queries reuse the cache and do not re-introspect. The build is a
+side effect: the user query's result is still what gets printed. If that
+internal introspection fails, the error is surfaced and the user query does
+not run.
+
+- `--refresh-schema` (on `query` and `introspect`) rebuilds the cache first.
+- `db-query introspect` always rebuilds the cache and prints the schema.
+- A schema error (exit code `3`) does **not** auto-rebuild — re-run with
+  `--refresh-schema`, the only trigger that rebuilds the cache.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0`  | success |
+| `1`  | config, usage, or credential error |
+| `2`  | client binary could not start |
+| `3`  | schema error — the query references an unknown table or column (re-run with `--refresh-schema`) |
+| `4`  | other SQL error — the client ran and exited nonzero |
 
 ## Configuration
 
@@ -68,6 +93,7 @@ environment overlay to the client, never argv.
 
 ```sh
 make build          # build bin/db-query
+make install        # build, then copy the binary to ~/.local/bin (created if absent)
 make test           # unit tests
 make cover          # unit tests + coverage summary
 make integration    # docker compose up, run psql + sqlcmd suites, tear down

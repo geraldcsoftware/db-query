@@ -1,0 +1,100 @@
+// Package schema persists a host's introspected schema to a local cache
+// file so the CLI can skip re-introspection when the schema is already
+// known. The cache lives under $XDG_CACHE_HOME/db-query/schema/ and is
+// keyed on host+database; it carries table/column metadata only, never
+// credentials.
+package schema
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/geraldcsoftware/db-query/internal/adapter"
+)
+
+// CacheDir returns the schema cache directory: $XDG_CACHE_HOME/db-query/schema,
+// else ~/.cache/db-query/schema.
+func CacheDir() string {
+	base := os.Getenv("XDG_CACHE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return filepath.Join("db-query", "schema")
+		}
+		base = filepath.Join(home, ".cache")
+	}
+	return filepath.Join(base, "db-query", "schema")
+}
+
+// CachePath returns the cache file path for a host+database. The filename
+// is filesystem-safe and collision-safe: a sanitized host and database for
+// human legibility, plus the first 8 hex characters of the SHA-256 of
+// host+NUL+database. The hash is the uniqueness guarantee — distinct
+// host/database pairs never share a file even when sanitisation or a
+// case-folding filesystem would collapse their readable parts, and the NUL
+// separator stops a boundary shift ("ab"/"c" vs "a"/"bc") from hashing
+// alike.
+func CachePath(host, database string) string {
+	sum := sha256.Sum256([]byte(host + "\x00" + database))
+	hash := hex.EncodeToString(sum[:])[:8]
+	name := fmt.Sprintf("%s_%s-%s.json", sanitize(host), sanitize(database), hash)
+	return filepath.Join(CacheDir(), name)
+}
+
+// sanitize reduces a value to filesystem-safe characters. The hash in the
+// filename carries uniqueness, so this only needs to be legible, not
+// invertible.
+func sanitize(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '.', r == '-':
+			return r
+		default:
+			return '-'
+		}
+	}, s)
+}
+
+// Exists reports whether a schema cache file is present at path.
+func Exists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+// Write persists rows as JSON at path, creating the cache directory as
+// needed. NULL (a nil *string) and the empty string round-trip faithfully
+// as JSON null versus "".
+func Write(path string, rows adapter.Rows) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating schema cache dir: %w", err)
+	}
+	data, err := json.MarshalIndent(rows, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding schema: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("writing schema cache %s: %w", path, err)
+	}
+	return nil
+}
+
+// Read loads the cached rows at path.
+func Read(path string) (adapter.Rows, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return adapter.Rows{}, fmt.Errorf("reading schema cache %s: %w", path, err)
+	}
+	var rows adapter.Rows
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return adapter.Rows{}, fmt.Errorf("decoding schema cache %s: %w", path, err)
+	}
+	return rows, nil
+}

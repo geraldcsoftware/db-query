@@ -1,9 +1,15 @@
 BIN := bin/db-query
+INSTALL_DIR := $(HOME)/.local/bin
 
-.PHONY: build vet test cover integration integration-up integration-test integration-down clean
+.PHONY: build install vet test cover integration integration-up integration-test integration-down clean
 
 build:
 	go build -o $(BIN) ./cmd/db-query
+
+# Build, then copy the binary onto PATH at ~/.local/bin (created if absent).
+install: build
+	mkdir -p $(INSTALL_DIR)
+	cp $(BIN) $(INSTALL_DIR)/db-query
 
 vet:
 	go vet ./...

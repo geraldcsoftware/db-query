@@ -339,3 +339,79 @@ Genuinely unresolved — not yet locked:
 6. Saved-query cache + `--list`; then wire the Claude Code skill on top as a consumer.
 
 > Build the CLI to stand alone for personal use first. The skill is just a consumer of a tool that already works without it.
+
+## 13. Implementation notes (v1)
+
+Refinements captured as the v1 CLI was built. These record how the locked
+design lands in code; they do not alter the locks above.
+
+### 13.1 psql NULL via a `-P null` sentinel (refines §7.1)
+
+§7.1 assumed CSV quoting alone distinguishes NULL (unquoted empty field) from
+the empty string (quoted `""`). Go's `encoding/csv` does not expose that
+distinction — the reader hands back `""` for both a quoted and an unquoted
+empty field, so the quoting signal is lost before the adapter can read it.
+The psql adapter therefore sets `-P null=<sentinel>` (a control byte that
+cannot occur in ordinary text) so NULL arrives as a distinct token the parser
+maps back to a nil `*string`, while a genuine empty field stays `&""`. NULL
+fidelity for Postgres is thus preserved through a sentinel rather than through
+CSV quoting; the row type (`[][]*string`) and the rest of the pipeline are
+unchanged.
+
+### 13.2 Schema-cache lifecycle and file naming (resolves §10.2)
+
+Open decision §10.2 (manual `--refresh-schema` vs. checksum auto-invalidation)
+is resolved in favour of **manual refresh**. The cache is a silent side effect
+of running a query:
+
+- On `query`, the CLI computes the cache path for the resolved host+database.
+  If the file is **absent** (or `--refresh-schema` is passed), it runs the
+  provider introspection internally (`adapter.IntrospectSQL` built and run
+  through the normal `Build`/`Env`/`executor.Run`/`Parse` path), writes the
+  schema file, then runs the user query. If the file is **present** and no
+  flag is given, it does not re-introspect. Either way the user query's result
+  is what gets printed — the schema build is never rendered.
+- If the internal introspection itself fails, the error is surfaced and the
+  user query does **not** run.
+- `introspect` always rebuilds the cache and prints the schema. `--refresh-schema`
+  is accepted on both commands and is the **only** trigger that rebuilds the cache.
+
+File location and naming (`internal/schema`):
+
+- Directory: `$XDG_CACHE_HOME/db-query/schema/`, fallback `~/.cache/db-query/schema/`.
+- Filename: `<sanitized-host>_<sanitized-db>-<8hexhash>.json`, where the hash is
+  the first 8 hex characters of `sha256(host + NUL + database)`. The hash is the
+  uniqueness guarantee — distinct host/database pairs never share a file even
+  when sanitisation or a case-folding filesystem would collapse the readable
+  parts, and the NUL separator stops a boundary shift (`ab`/`c` vs `a`/`bc`)
+  from hashing alike. The sanitized parts are for human legibility only.
+- Persisted as JSON; NULL versus empty string round-trips faithfully as JSON
+  `null` versus `""`. Schema metadata only — never credentials.
+
+### 13.3 Exit codes 3 and 4 (extends §6)
+
+The fail-to-start vs. ran-nonzero distinction locked in §6 is surfaced to the
+process exit code, and a ran-nonzero result is split by whether it is a schema
+error:
+
+| Code | Meaning |
+|------|---------|
+| `0`  | success |
+| `1`  | config / usage / credential error |
+| `2`  | client binary failed to start (the Go error from `executor.Run`) |
+| `3`  | **schema error** — `adapter.IsSchemaError(res)` is true; the re-introspect-worthy signal |
+| `4`  | other SQL error — the client ran and exited nonzero but is not a schema error |
+
+On code `3` the CLI does **not** auto-reintrospect; it prints a hint to re-run
+with `--refresh-schema`. Keeping the rebuild behind the explicit flag (and off
+the error path) preserves the single, predictable cache-refresh trigger from
+§13.2.
+
+### 13.4 `--no-headers` (extends §8)
+
+`--no-headers` (query only) applies at the single render pivot (§8): in **text**
+output it omits the header line and tab-separates rows for any shape, so a 1×1
+result prints just the bare value. In **json** output it is a no-op — the objects
+are already self-describing. It is carried as a field on `render.Options` and
+read only inside the text renderer, so no adapter learns about it — consistent
+with the "format branch lives at one pivot point" lock.
