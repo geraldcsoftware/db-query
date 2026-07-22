@@ -11,10 +11,15 @@ import (
 // optionally bws:<secret-id>#<field> to pick a field of the secret JSON
 // (default "value"). A BWS secret is a single value — host config holds
 // two refs (one user, one password) rather than structured JSON in one.
-// Requires BWS_ACCESS_TOKEN in the environment, sourced outside db-query.
-type bwsResolver struct{}
+// The access token comes from accessToken if set, otherwise from the
+// BWS_ACCESS_TOKEN environment variable.
+type bwsResolver struct {
+	// accessToken is the configured token; empty falls back to the
+	// BWS_ACCESS_TOKEN environment variable.
+	accessToken string
+}
 
-func (bwsResolver) Resolve(rest string) (Credential, error) {
+func (r bwsResolver) Resolve(rest string) (Credential, error) {
 	id, field, _ := strings.Cut(rest, "#")
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -23,10 +28,15 @@ func (bwsResolver) Resolve(rest string) (Credential, error) {
 	if field == "" {
 		field = "value"
 	}
-	if os.Getenv("BWS_ACCESS_TOKEN") == "" {
-		return Credential{}, fmt.Errorf("bws: BWS_ACCESS_TOKEN is not set (source it outside db-query)")
+	token := r.accessToken
+	if token == "" {
+		token = os.Getenv("BWS_ACCESS_TOKEN")
 	}
-	out, err := runBackend(nil, "bws", "secret", "get", id, "--output", "json")
+	if token == "" {
+		return Credential{}, fmt.Errorf("bws: no access token — set bws.accessToken in config or the BWS_ACCESS_TOKEN environment variable")
+	}
+	out, err := runBackend(map[string]string{"BWS_ACCESS_TOKEN": token},
+		"bws", "secret", "get", id, "--output", "json")
 	if err != nil {
 		return Credential{}, err
 	}

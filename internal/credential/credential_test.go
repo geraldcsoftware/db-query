@@ -159,6 +159,49 @@ func TestBwsResolver(t *testing.T) {
 	})
 }
 
+func TestBwsResolverConfiguredToken(t *testing.T) {
+	t.Run("configured token is passed to the subprocess", func(t *testing.T) {
+		t.Setenv("BWS_ACCESS_TOKEN", "") // no env token; only the configured one
+		var seen string
+		withBackend(t, func(env map[string]string, name string, args ...string) ([]byte, error) {
+			seen = env["BWS_ACCESS_TOKEN"]
+			return []byte(`{"key":"k","value":"v"}`), nil
+		})
+		cred, err := ResolveWith("bws:1a2b", Options{BWSAccessToken: "from-config"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cred.Password != "v" {
+			t.Fatalf("password = %q", cred.Password)
+		}
+		if seen != "from-config" {
+			t.Fatalf("subprocess token = %q, want from-config", seen)
+		}
+	})
+	t.Run("falls back to env when no configured token", func(t *testing.T) {
+		t.Setenv("BWS_ACCESS_TOKEN", "from-env")
+		var seen string
+		withBackend(t, func(env map[string]string, name string, args ...string) ([]byte, error) {
+			seen = env["BWS_ACCESS_TOKEN"]
+			return []byte(`{"key":"k","value":"v"}`), nil
+		})
+		if _, err := ResolveWith("bws:1a2b", Options{}); err != nil {
+			t.Fatal(err)
+		}
+		if seen != "from-env" {
+			t.Fatalf("subprocess token = %q, want from-env", seen)
+		}
+	})
+	t.Run("neither source set errors naming both", func(t *testing.T) {
+		t.Setenv("BWS_ACCESS_TOKEN", "")
+		_, err := ResolveWith("bws:1a2b", Options{})
+		if err == nil || !strings.Contains(err.Error(), "BWS_ACCESS_TOKEN") ||
+			!strings.Contains(err.Error(), "bws.accessToken") {
+			t.Fatalf("want error naming both sources, got %v", err)
+		}
+	})
+}
+
 func TestBwResolver(t *testing.T) {
 	t.Run("requires session", func(t *testing.T) {
 		t.Setenv("BW_SESSION", "")

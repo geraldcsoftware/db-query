@@ -41,12 +41,31 @@ func IsURI(s string) bool {
 	return known
 }
 
+// Options carries cross-resolver configuration the dispatcher injects. It lets
+// the CLI hand a resolved Bitwarden Secrets Manager access token to the bws
+// resolver without any resolver learning about config.
+type Options struct {
+	// BWSAccessToken is the already-resolved BWS access token. Empty means the
+	// bws resolver falls back to the BWS_ACCESS_TOKEN environment variable.
+	BWSAccessToken string
+}
+
 // Resolve dispatches a credential URI to the resolver registered for its
 // scheme. The tail after "scheme:" is that resolver's private business.
 func Resolve(uri string) (Credential, error) {
+	return ResolveWith(uri, Options{})
+}
+
+// ResolveWith is Resolve with dispatcher-injected Options. The bws scheme is
+// constructed per-call with the option-supplied access token; every other
+// scheme ignores Options.
+func ResolveWith(uri string, opts Options) (Credential, error) {
 	scheme, rest, ok := strings.Cut(uri, ":")
 	if !ok {
 		return Credential{}, fmt.Errorf("credential is not a URI: %q", uri)
+	}
+	if scheme == "bws" {
+		return bwsResolver{accessToken: opts.BWSAccessToken}.Resolve(rest)
 	}
 	r, ok := resolvers[scheme]
 	if !ok {
@@ -59,7 +78,13 @@ func Resolve(uri string) (Credential, error) {
 // for example). Single-value backends (env:, bws:) put their one value in
 // Password by convention; multi-field backends may carry a Username.
 func ResolveScalar(uri string) (string, error) {
-	cred, err := Resolve(uri)
+	return ResolveScalarWith(uri, Options{})
+}
+
+// ResolveScalarWith is ResolveScalar with dispatcher-injected Options, so a
+// username carried as a bws: URI also uses the configured token.
+func ResolveScalarWith(uri string, opts Options) (string, error) {
+	cred, err := ResolveWith(uri, opts)
 	if err != nil {
 		return "", err
 	}
