@@ -139,6 +139,33 @@ The value must be a resolver URI (`env:`, `keychain:`, …); a raw token in
 config is refused, and `bws:` is not allowed (chicken-and-egg). With no `[bws]`
 section, the `BWS_ACCESS_TOKEN` environment variable is used.
 
+## Shell completion (zsh)
+
+`db-query completion zsh` prints a zsh completion script. Completion covers
+subcommands, flags, and the `--output` values, plus **dynamic** values read
+from your local files: host names (`--host`), saved queries (`--source`), and
+categories (`--category`) — each shown with a short description. These come
+from a hidden `db-query __complete` command the script calls on TAB; it reads
+only config and saved-query files, never a credential or a database.
+
+Installed via Homebrew, completion is set up automatically — nothing to do.
+Otherwise, pick one route:
+
+```sh
+# One line in ~/.zshrc (simplest; self-registers when sourced):
+source <(db-query completion zsh)
+
+# Or a file on your fpath (no per-startup cost):
+mkdir -p ~/.zsh/completions
+db-query completion zsh > ~/.zsh/completions/_db-query
+# then, in ~/.zshrc before `compinit`:
+#   fpath=(~/.zsh/completions $fpath)
+#   autoload -Uz compinit && compinit
+```
+
+After first install run `exec zsh` (or `rm -f ~/.zcompdump && compinit`) so
+zsh's completion cache picks up the new function.
+
 ## Requirements
 
 - `psql` on PATH for postgres hosts
