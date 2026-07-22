@@ -93,6 +93,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runIntrospect(args[1:], stdout, stderr)
 	case "hosts":
 		return runHosts(args[1:], stdout, stderr)
+	case "__complete":
+		return runComplete(args[1:], stdout, stderr)
 	case "version", "--version":
 		fmt.Fprintln(stdout, versionString())
 		return 0

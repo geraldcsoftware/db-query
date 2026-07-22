@@ -1,0 +1,126 @@
+package cli
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/geraldcsoftware/db-query/internal/savedquery"
+)
+
+// complete runs the hidden __complete command and returns its stdout,
+// asserting the fail-silent contract: it must always exit 0.
+func complete(t *testing.T, args ...string) string {
+	t.Helper()
+	var out, errb strings.Builder
+	code := Run(append([]string{"__complete"}, args...), &out, &errb)
+	if code != 0 {
+		t.Fatalf("__complete exited %d (must always be 0); err=%q", code, errb.String())
+	}
+	if errb.Len() != 0 {
+		t.Fatalf("__complete must never write stderr, got %q", errb.String())
+	}
+	return out.String()
+}
+
+func mustSave(t *testing.T, name, category, provider, sql string) {
+	t.Helper()
+	if _, err := savedquery.Save(name, category, provider, sql, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompleteHostsWithDescriptions(t *testing.T) {
+	cfg := writeFile(t, t.TempDir(), "config.toml", `
+[hosts.prod-fcubs]
+provider = "postgres"
+database = "vintegration_fcubs"
+[hosts.uat-switch]
+provider = "sqlserver"
+database = "postbridge"
+`, 0o600)
+	got := complete(t, "--config", cfg, "host")
+	want := "prod-fcubs\tpostgres · vintegration_fcubs\nuat-switch\tsqlserver · postbridge\n"
+	if got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+}
+
+func TestCompleteHostNoDatabase(t *testing.T) {
+	cfg := writeFile(t, t.TempDir(), "config.toml", `
+[hosts.h]
+provider = "postgres"
+`, 0o600)
+	if got := complete(t, "--config", cfg, "host"); got != "h\tpostgres\n" {
+		t.Fatalf("host with no database = %q", got)
+	}
+}
+
+func TestCompleteHostReadsEnvConfig(t *testing.T) {
+	cfg := writeFile(t, t.TempDir(), "config.toml", `
+[hosts.only]
+provider = "postgres"
+database = "db1"
+`, 0o600)
+	t.Setenv("DB_QUERY_CONFIG", cfg)
+	if got := complete(t, "host"); got != "only\tpostgres · db1\n" {
+		t.Fatalf("env-config host = %q", got)
+	}
+}
+
+func TestCompleteHostBadConfigIsSilent(t *testing.T) {
+	if got := complete(t, "--config", "/nope/does-not-exist.toml", "host"); got != "" {
+		t.Fatalf("a bad config must produce nothing, got %q", got)
+	}
+}
+
+func TestCompleteSources(t *testing.T) {
+	isolateStore(t)
+	mustSave(t, "daily-recon", "ops", "postgres", "SELECT * FROM recon WHERE d = :'day'")
+	mustSave(t, "month-close", "finance", "postgres", "SELECT 1")
+	got := complete(t, "source")
+	// List is sorted by category then name: finance/month-close, ops/daily-recon.
+	want := "month-close\tfinance · SELECT 1\ndaily-recon\tops · SELECT * FROM recon WHERE d = :'day'\n"
+	if got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+}
+
+func TestCompleteSourcesCategoryFilter(t *testing.T) {
+	isolateStore(t)
+	mustSave(t, "a", "ops", "postgres", "SELECT 1")
+	mustSave(t, "b", "finance", "postgres", "SELECT 2")
+	if got := complete(t, "--category", "ops", "source"); got != "a\tops · SELECT 1\n" {
+		t.Fatalf("category-filtered source = %q", got)
+	}
+}
+
+func TestCompleteCategories(t *testing.T) {
+	isolateStore(t)
+	mustSave(t, "a", "ops", "postgres", "SELECT 1")
+	mustSave(t, "b", "finance", "postgres", "SELECT 2")
+	mustSave(t, "c", "finance", "postgres", "SELECT 3")
+	// Sorted by category: finance (2), ops (1). Singular for the count of 1.
+	want := "finance\t2 queries\nops\t1 query\n"
+	if got := complete(t, "category"); got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+}
+
+func TestCompleteEmptyStoreIsSilent(t *testing.T) {
+	isolateStore(t)
+	if got := complete(t, "source"); got != "" {
+		t.Fatalf("empty store source = %q", got)
+	}
+	if got := complete(t, "category"); got != "" {
+		t.Fatalf("empty store category = %q", got)
+	}
+}
+
+func TestCompleteUnknownAndMissingTargetIsSilent(t *testing.T) {
+	if got := complete(t, "bogus"); got != "" {
+		t.Fatalf("unknown target = %q", got)
+	}
+	if got := complete(t); got != "" {
+		t.Fatalf("no target = %q", got)
+	}
+}
