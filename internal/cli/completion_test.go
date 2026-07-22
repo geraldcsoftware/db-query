@@ -124,3 +124,32 @@ func TestCompleteUnknownAndMissingTargetIsSilent(t *testing.T) {
 		t.Fatalf("no target = %q", got)
 	}
 }
+
+func TestCompletionZshEmitsEmbeddedScript(t *testing.T) {
+	var out, errb strings.Builder
+	code := Run([]string{"completion", "zsh"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb.String())
+	}
+	s := out.String()
+	if !strings.HasPrefix(s, "#compdef db-query") {
+		t.Fatalf("script must start with #compdef db-query, got prefix %q", s[:min(40, len(s))])
+	}
+	if !strings.Contains(s, "compdef _db-query db-query") {
+		t.Fatal("script must self-register via compdef for the source install route")
+	}
+	if s != zshCompletionScript {
+		t.Fatal("completion zsh must emit the embedded script verbatim")
+	}
+}
+
+func TestCompletionUnknownAndMissingShell(t *testing.T) {
+	code, _, errb := run(t, "completion", "bash")
+	if code != 1 || !strings.Contains(errb, "zsh") {
+		t.Fatalf("unknown shell: code=%d err=%q", code, errb)
+	}
+	code, _, errb = run(t, "completion")
+	if code != 1 || !strings.Contains(errb, "zsh") {
+		t.Fatalf("missing shell: code=%d err=%q", code, errb)
+	}
+}

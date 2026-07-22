@@ -29,6 +29,7 @@ Usage:
   db-query introspect --host <name> [flags]         list tables and columns, rebuild the schema cache
   db-query hosts      [flags]                       list configured hosts
   db-query version                                  print version information
+  db-query completion zsh                           print the zsh completion script (see README to install)
 
 Flags:
   --host <name>       host entry from the config file
@@ -95,6 +96,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runHosts(args[1:], stdout, stderr)
 	case "__complete":
 		return runComplete(args[1:], stdout, stderr)
+	case "completion":
+		return runCompletion(args[1:], stdout, stderr)
 	case "version", "--version":
 		fmt.Fprintln(stdout, versionString())
 		return 0

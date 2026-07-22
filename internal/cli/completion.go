@@ -1,6 +1,7 @@
 package cli
 
 import (
+	_ "embed"
 	"fmt"
 	"io"
 	"strings"
@@ -8,6 +9,27 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 )
+
+//go:embed completion.zsh
+var zshCompletionScript string
+
+// runCompletion prints the shell completion script. Only zsh is supported; an
+// unsupported or missing shell is a usage error (exit 1), which also leaves
+// room to add other shells later without changing today's contract.
+func runCompletion(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "db-query: completion needs a shell argument (only 'zsh' is supported)")
+		return 1
+	}
+	switch args[0] {
+	case "zsh":
+		fmt.Fprint(stdout, zshCompletionScript)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "db-query: unsupported shell %q (only 'zsh' is supported)\n", args[0])
+		return 1
+	}
+}
 
 // runComplete is the hidden dynamic-completion helper the zsh script shells
 // into on every TAB. It prints tab-delimited "name<TAB>description" candidate
