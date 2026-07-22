@@ -111,6 +111,37 @@ func TestPortAsString(t *testing.T) {
 	}
 }
 
+func TestLoadBWSSection(t *testing.T) {
+	path := writeConfig(t, `
+[bws]
+accessToken = "env:BWS_TOKEN"
+
+[hosts.h]
+provider = "postgres"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BWS.AccessToken != "env:BWS_TOKEN" {
+		t.Fatalf("BWS.AccessToken = %q", cfg.BWS.AccessToken)
+	}
+}
+
+func TestLoadNoBWSSection(t *testing.T) {
+	path := writeConfig(t, `
+[hosts.h]
+provider = "postgres"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BWS.AccessToken != "" {
+		t.Fatalf("BWS.AccessToken = %q, want empty", cfg.BWS.AccessToken)
+	}
+}
+
 func TestDefaultPath(t *testing.T) {
 	t.Run("explicit env wins", func(t *testing.T) {
 		t.Setenv("DB_QUERY_CONFIG", "/etc/custom.toml")

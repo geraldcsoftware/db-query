@@ -29,9 +29,17 @@ type HostConfig struct {
 	Extra      map[string]string
 }
 
+// BWSConfig configures the Bitwarden Secrets Manager backend. AccessToken is a
+// resolver URI (env:, keychain:, …) naming the source of the BWS access token;
+// empty falls back to the BWS_ACCESS_TOKEN environment variable.
+type BWSConfig struct {
+	AccessToken string
+}
+
 // Config is the full parsed configuration file.
 type Config struct {
 	Hosts map[string]HostConfig
+	BWS   BWSConfig
 }
 
 // coreKeys are the host-config keys the core interprets; everything else
@@ -62,11 +70,14 @@ func DefaultPath() string {
 func Load(path string) (Config, error) {
 	var raw struct {
 		Hosts map[string]map[string]any `toml:"hosts"`
+		BWS   struct {
+			AccessToken string `toml:"accessToken"`
+		} `toml:"bws"`
 	}
 	if _, err := toml.DecodeFile(path, &raw); err != nil {
 		return Config{}, fmt.Errorf("loading config %s: %w", path, err)
 	}
-	cfg := Config{Hosts: make(map[string]HostConfig, len(raw.Hosts))}
+	cfg := Config{Hosts: make(map[string]HostConfig, len(raw.Hosts)), BWS: BWSConfig{AccessToken: raw.BWS.AccessToken}}
 	for name, keys := range raw.Hosts {
 		h := HostConfig{Name: name, Extra: map[string]string{}}
 		for k, v := range keys {
