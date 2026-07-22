@@ -2,12 +2,14 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
+	"github.com/geraldcsoftware/db-query/internal/savedquery"
 	"github.com/geraldcsoftware/db-query/internal/schema"
 )
 
@@ -299,6 +301,36 @@ printf 'ok\n1\n'
 	}
 }
 
+// TestQueryFlagsAfterSQL guards the interspersed-args parsing: flags placed
+// after the positional SQL (which Go's flag package would otherwise swallow)
+// must still bind. The SQL and a trailing --param both have to reach psql.
+func TestQueryFlagsAfterSQL(t *testing.T) {
+	seedSchemaCache(t)
+	fakePsql(t, `
+printf '%s ' "$@" > "$TMPDIR_CAPTURE/argv"
+cat > "$TMPDIR_CAPTURE/stdin"
+printf 'ok\n1\n'
+`)
+	capture := t.TempDir()
+	t.Setenv("TMPDIR_CAPTURE", capture)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	// Flags on both sides of the SQL, including one that trails it.
+	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"SELECT :'who'", "--param", "who=Ada", "--no-headers")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	argv, _ := os.ReadFile(filepath.Join(capture, "argv"))
+	if !strings.Contains(string(argv), "-v who=Ada") {
+		t.Fatalf("trailing --param not bound; argv = %q", argv)
+	}
+	stdin, _ := os.ReadFile(filepath.Join(capture, "stdin"))
+	if !strings.Contains(string(stdin), "SELECT :'who'") {
+		t.Fatalf("SQL not delivered; stdin = %q", stdin)
+	}
+}
+
 func TestReadSQLSources(t *testing.T) {
 	t.Run("positional", func(t *testing.T) {
 		sql, err := readSQL([]string{"SELECT 1"}, "")
@@ -522,5 +554,259 @@ func TestUnknownHostAndFormat(t *testing.T) {
 	}
 	if code, _, errb := run(t, "query", "--config", cfg, "SELECT 1"); code != 1 || !strings.Contains(errb, "--host") {
 		t.Fatalf("missing --host: code=%d err=%q", code, errb)
+	}
+}
+
+// isolateStore points the saved-query store at a fresh temp dir so a test
+// never touches the real store; it returns the directory.
+func isolateStore(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("DB_QUERY_QUERIES_DIR", dir)
+	return dir
+}
+
+// TestQuerySaveOnSuccess pins that a successful run persists the SQL under
+// name+category with the host provider, keeping the placeholder and never the
+// resolved --param value.
+func TestQuerySaveOnSuccess(t *testing.T) {
+	seedSchemaCache(t)
+	isolateStore(t)
+	fakePsql(t, `printf 'id,name\n1,Ada\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--save", "people-by-name", "--category", "reports",
+		"--param", "who=Ada", "SELECT id, name FROM people WHERE name = :'who'")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if !strings.Contains(out, "Ada") {
+		t.Fatalf("query output not printed, out=%q", out)
+	}
+	sq, err := savedquery.Load("people-by-name", "reports")
+	if err != nil {
+		t.Fatalf("query was not saved: %v", err)
+	}
+	if sq.Provider != "postgres" {
+		t.Fatalf("saved provider = %q, want postgres", sq.Provider)
+	}
+	if !strings.Contains(sq.SQL, ":'who'") {
+		t.Fatalf("saved SQL must keep the placeholder, got %q", sq.SQL)
+	}
+	if strings.Contains(sq.SQL, "Ada") {
+		t.Fatalf("saved SQL must not carry the param value, got %q", sq.SQL)
+	}
+}
+
+// TestQuerySaveNotOnFailure pins that a non-zero run saves nothing and returns
+// its own exit code.
+func TestQuerySaveNotOnFailure(t *testing.T) {
+	seedSchemaCache(t)
+	isolateStore(t)
+	fakePsql(t, `echo 'ERROR: boom' >&2; exit 1`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, _, _ := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--save", "doomed", "SELECT 1")
+	if code != 4 {
+		t.Fatalf("code = %d, want 4 (the run's own exit code)", code)
+	}
+	if _, err := savedquery.Load("doomed", "default"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a failed run must save nothing, got %v", err)
+	}
+}
+
+// TestQuerySaveDuplicateRefusal pins that a dedup refusal is a usage error
+// (exit 1) even though the query already ran and printed, and that --force
+// overrides it.
+func TestQuerySaveDuplicateRefusal(t *testing.T) {
+	seedSchemaCache(t)
+	isolateStore(t)
+	fakePsql(t, `printf 'id\n1\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	if code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--save", "one", "SELECT id FROM people"); code != 0 {
+		t.Fatalf("first save code=%d err=%q", code, errb)
+	}
+	// Equivalent SQL under a new name: refused, but the query still runs and
+	// its output is printed.
+	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--save", "two", "SELECT id FROM people ;")
+	if code != 1 {
+		t.Fatalf("dup save code=%d, want 1", code)
+	}
+	if !strings.Contains(out, "1") {
+		t.Fatalf("query must still run and print, out=%q", out)
+	}
+	if !strings.Contains(errb, "identical") && !strings.Contains(errb, "already exists") {
+		t.Fatalf("must report the duplicate, err=%q", errb)
+	}
+	if _, err := savedquery.Load("two", "default"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a refused save must not create a file")
+	}
+	// --force writes it anyway.
+	if code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--save", "two", "--force", "SELECT id FROM people ;"); code != 0 {
+		t.Fatalf("force save code=%d err=%q", code, errb)
+	}
+	if _, err := savedquery.Load("two", "default"); err != nil {
+		t.Fatalf("force save should persist: %v", err)
+	}
+}
+
+// TestQuerySource pins that --source loads a stored query and sends its SQL
+// (placeholders included) to the client, binding --param as usual.
+func TestQuerySource(t *testing.T) {
+	seedSchemaCache(t)
+	isolateStore(t)
+	if _, err := savedquery.Save("by-name", "people", "postgres",
+		"SELECT id, name FROM people WHERE name = :'who'", false); err != nil {
+		t.Fatal(err)
+	}
+	fakePsql(t, `cat > "$TMPDIR_CAPTURE/stdin"; printf 'id,name\n1,Ada\n'`)
+	capture := t.TempDir()
+	t.Setenv("TMPDIR_CAPTURE", capture)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--source", "by-name", "--category", "people", "--param", "who=Ada")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if !strings.Contains(out, "Ada") {
+		t.Fatalf("out=%q", out)
+	}
+	stdin, _ := os.ReadFile(filepath.Join(capture, "stdin"))
+	if !strings.Contains(string(stdin), "WHERE name = :'who'") {
+		t.Fatalf("source SQL not sent to the client, stdin=%q", stdin)
+	}
+}
+
+// TestQuerySourceProviderGuard pins that a provider-mismatched saved query is
+// refused (exit 1) and never runs.
+func TestQuerySourceProviderGuard(t *testing.T) {
+	seedSchemaCache(t)
+	isolateStore(t)
+	if _, err := savedquery.Save("mismatch", "default", "sqlserver", "SELECT 1", false); err != nil {
+		t.Fatal(err)
+	}
+	calls := callsFile(t)
+	fakePsql(t, `printf 'ran\n' >> "$DBQ_CALLS"; printf 'x\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "--source", "mismatch")
+	if code != 1 {
+		t.Fatalf("provider mismatch must exit 1, got %d", code)
+	}
+	if !strings.Contains(errb, "provider") {
+		t.Fatalf("must explain the provider mismatch, err=%q", errb)
+	}
+	if strings.Contains(calls(), "ran") {
+		t.Fatal("a provider-mismatched saved query must not run")
+	}
+}
+
+// TestQuerySourceMissing pins that an unknown --source exits 1 and lists what
+// is available.
+func TestQuerySourceMissing(t *testing.T) {
+	seedSchemaCache(t)
+	isolateStore(t)
+	if _, err := savedquery.Save("present", "default", "postgres", "SELECT 1", false); err != nil {
+		t.Fatal(err)
+	}
+	fakePsql(t, `printf 'x\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "--source", "absent")
+	if code != 1 {
+		t.Fatalf("missing source must exit 1, got %d", code)
+	}
+	if !strings.Contains(errb, "present") {
+		t.Fatalf("must list available queries, err=%q", errb)
+	}
+}
+
+// TestQuerySourceSaveExclusive and the SQL-argument guard are pure usage
+// errors, resolved before any secret is touched.
+func TestQuerySourceSaveExclusive(t *testing.T) {
+	cfg := testConfig(t)
+	if code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--source", "x", "--save", "y"); code != 1 || !strings.Contains(errb, "mutually exclusive") {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--source", "x", "SELECT 1"); code != 1 || !strings.Contains(errb, "--source") {
+		t.Fatalf("source+SQL: code=%d err=%q", code, errb)
+	}
+	if code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--save", "", "SELECT 1"); code != 1 || !strings.Contains(errb, "--save") {
+		t.Fatalf("empty save name: code=%d err=%q", code, errb)
+	}
+}
+
+// TestQueriesSubcommand pins the queries listing in both formats and the
+// category filter.
+func TestQueriesSubcommand(t *testing.T) {
+	isolateStore(t)
+	if _, err := savedquery.Save("alpha", "reports", "postgres", "SELECT 1 FROM t", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := savedquery.Save("beta", "people", "postgres", "SELECT 2 FROM u", false); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errb := run(t, "queries")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	for _, want := range []string{"alpha", "beta", "reports", "people", "postgres"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("text listing missing %q, out=%q", want, out)
+		}
+	}
+
+	code, out, errb = run(t, "queries", "--output", "json")
+	if code != 0 {
+		t.Fatalf("json code=%d err=%q", code, errb)
+	}
+	var list []map[string]any
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		t.Fatalf("not JSON: %q", out)
+	}
+	if len(list) != 2 {
+		t.Fatalf("want 2 entries, got %d (%v)", len(list), list)
+	}
+	if s, _ := list[0]["sql"].(string); !strings.Contains(s, "SELECT") {
+		t.Fatalf("json must carry the full SQL, got %v", list[0])
+	}
+	if _, ok := list[0]["sqlhash"].(string); !ok {
+		t.Fatalf("json must carry the full hash, got %v", list[0])
+	}
+
+	code, out, _ = run(t, "queries", "--category", "people", "--output", "json")
+	if code != 0 {
+		t.Fatalf("filtered code=%d", code)
+	}
+	var filtered []map[string]any
+	if err := json.Unmarshal([]byte(out), &filtered); err != nil {
+		t.Fatalf("not JSON: %q", out)
+	}
+	if len(filtered) != 1 || filtered[0]["name"] != "beta" {
+		t.Fatalf("category filter failed: %v", filtered)
+	}
+}
+
+// TestQueriesEmptyStoreJSON pins that an empty store renders as a JSON array,
+// not null, so a consuming agent can always range over it.
+func TestQueriesEmptyStoreJSON(t *testing.T) {
+	isolateStore(t)
+	code, out, errb := run(t, "queries", "--output", "json")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if strings.TrimSpace(out) != "[]" {
+		t.Fatalf("empty store must be [], got %q", out)
 	}
 }

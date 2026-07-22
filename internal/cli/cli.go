@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -16,13 +17,15 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/credential"
 	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/render"
+	"github.com/geraldcsoftware/db-query/internal/savedquery"
 	"github.com/geraldcsoftware/db-query/internal/schema"
 )
 
 const usage = `db-query — run SQL against configured hosts via native clients
 
 Usage:
-  db-query query      --host <name> [flags] [SQL]   run ad-hoc SQL (positional, -f file, or stdin)
+  db-query query      --host <name> [flags] [SQL]   run ad-hoc SQL (positional, -f file, stdin) or a saved query
+  db-query queries    [flags]                       list saved queries
   db-query introspect --host <name> [flags]         list tables and columns, rebuild the schema cache
   db-query hosts      [flags]                       list configured hosts
 
@@ -32,9 +35,18 @@ Flags:
   --output text|json  output format (default text)
   --param k=v         bind a query parameter (repeatable); psql: :'k', sqlcmd: $(k)
   -f <path>           read SQL from file ("-" for stdin)
+  --save <name>       save the query under this name after it runs successfully (query)
+  --source <name>     run a previously saved query by name (query)
+  --category <cat>    saved-query category for --save/--source (default "default")
+  --force             with --save: overwrite an existing query and bypass the duplicate check
   --timeout <dur>     per-invocation deadline (default 30s)
   --refresh-schema    rebuild the cached schema first (query, introspect)
   --no-headers        text output only: omit the header line, tab-separate rows (query)
+
+Saved queries live under $DB_QUERY_QUERIES_DIR (else $XDG_CONFIG_HOME/db-query/queries,
+else ~/.config/db-query/queries) as <category>/<name>.sql, storing SQL with placeholders
+only — never resolved --param values. A saved query is bound to the provider it was saved
+against, so --source refuses to run it against a host of a different provider.
 
 Exit codes:
   0  success
@@ -56,6 +68,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "query":
 		return runQuery(args[1:], stdout, stderr)
+	case "queries":
+		return runQueries(args[1:], stdout, stderr)
 	case "introspect":
 		return runIntrospect(args[1:], stdout, stderr)
 	case "hosts":
@@ -97,30 +111,100 @@ func (p paramFlags) Set(kv string) error {
 	return nil
 }
 
+// parseInterspersed parses fs while allowing flags to appear before or after
+// the positional arguments. Go's flag package stops at the first non-flag
+// token, so `query --host h "SQL" --param k=v` would otherwise swallow the
+// SQL and everything after it as positionals and reject the trailing --param.
+// Looping past each positional lets flags and SQL be given in any order; the
+// collected positionals are returned. (A positional that itself begins with
+// "-" is still ambiguous — pass such SQL via -f or stdin.)
+func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
+}
+
 func runQuery(args []string, stdout, stderr io.Writer) int {
 	var c commonFlags
 	params := paramFlags{}
-	var sqlFile string
-	var refreshSchema, noHeaders bool
+	var sqlFile, saveName, sourceName, category string
+	var refreshSchema, noHeaders, force bool
 	fs := flag.NewFlagSet("query", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	addCommon(fs, &c)
 	fs.Var(params, "param", "bind a query parameter (repeatable)")
 	fs.StringVar(&sqlFile, "f", "", `read SQL from file ("-" for stdin)`)
+	fs.StringVar(&saveName, "save", "", "save the query under this name after it succeeds")
+	fs.StringVar(&sourceName, "source", "", "run a saved query by name")
+	fs.StringVar(&category, "category", savedquery.DefaultCategory, "saved-query category for --save/--source")
 	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache before running")
 	fs.BoolVar(&noHeaders, "no-headers", false, "text output: omit the header line")
-	if err := fs.Parse(args); err != nil {
+	fs.BoolVar(&force, "force", false, "with --save: overwrite an existing query and bypass the duplicate check")
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
 		return 1
 	}
-	sql, err := readSQL(fs.Args(), sqlFile)
-	if err != nil {
-		render.Error(stderr, c.output, err.Error())
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	// Flag-combination usage errors, checked before any secret is resolved.
+	// A saved query is a complete unit: it is either sourced or authored, and
+	// running one is not the moment to author another.
+	if set["source"] && set["save"] {
+		render.Error(stderr, c.output, "--source and --save are mutually exclusive; pick one")
 		return 1
+	}
+	if set["source"] && (len(positional) > 0 || sqlFile != "") {
+		render.Error(stderr, c.output, "--source runs a saved query; do not also pass SQL (a positional argument or -f)")
+		return 1
+	}
+	if set["save"] && strings.TrimSpace(saveName) == "" {
+		render.Error(stderr, c.output, "--save needs a non-empty query name")
+		return 1
+	}
+
+	// Ad-hoc SQL is read up front; a --source query is loaded after setup so
+	// the resolved host provider is known for the provider guard.
+	var sql string
+	if !set["source"] {
+		var err error
+		sql, err = readSQL(positional, sqlFile)
+		if err != nil {
+			render.Error(stderr, c.output, err.Error())
+			return 1
+		}
 	}
 
 	r, code := setup(c, stderr)
 	if code != 0 {
 		return code
+	}
+
+	if set["source"] {
+		sq, err := savedquery.Load(sourceName, category)
+		if err != nil {
+			render.Error(stderr, c.output, sourceUnavailable(sourceName, category))
+			return 1
+		}
+		// A saved query is provider-bound; running it against a host of a
+		// different provider would send provider-specific SQL to the wrong
+		// client. Refuse rather than let it fail obscurely mid-flight.
+		if sq.Provider != r.host.Provider {
+			render.Error(stderr, c.output, fmt.Sprintf(
+				"saved query %s/%s is bound to provider %q, but host %q uses provider %q; refusing to run",
+				sq.Category, sq.Name, sq.Provider, r.host.Name, r.host.Provider))
+			return 1
+		}
+		sql = sq.SQL
 	}
 
 	// The schema cache is a silent side effect: build it the first time a
@@ -136,9 +220,126 @@ func runQuery(args []string, stdout, stderr io.Writer) int {
 
 	rows, code := runOnce(r, adapter.Query{SQL: sql, Params: params}, c, true, stderr)
 	if code != 0 {
+		return code // a non-zero run saves nothing and returns its own code
+	}
+	if code := renderRows(rows, c.output, noHeaders, stdout, stderr); code != 0 {
 		return code
 	}
-	return renderRows(rows, c.output, noHeaders, stdout, stderr)
+
+	// Save on success only: the query ran, exited 0, and its output has been
+	// printed. The stored SQL carries placeholders, never the resolved --param
+	// values. A refusal (a duplicate or an existing file, without --force) is a
+	// usage error surfaced on stderr honouring --output — the run itself already
+	// stands, so its output is not retracted.
+	if set["save"] {
+		sq, err := savedquery.Save(saveName, category, r.host.Provider, sql, force)
+		if err != nil {
+			render.Error(stderr, c.output, "saving query: "+err.Error())
+			return 1
+		}
+		fmt.Fprintf(stderr, "db-query: saved as %s/%s\n", sq.Category, sq.Name)
+	}
+	return 0
+}
+
+// runQueries lists the saved queries in the store, optionally restricted to
+// one --category. text prints a table (category, name, provider, short hash,
+// SQL preview) through the shared render pivot; json emits the full records
+// (category, name, provider, sqlhash, sql) so a caller can match against them.
+func runQueries(args []string, stdout, stderr io.Writer) int {
+	var c commonFlags
+	var category string
+	fs := flag.NewFlagSet("queries", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	addCommon(fs, &c)
+	fs.StringVar(&category, "category", "", "restrict to one saved-query category")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if _, err := render.For(c.output); err != nil {
+		render.Error(stderr, c.output, err.Error())
+		return 1
+	}
+	list, err := savedquery.List(category)
+	if err != nil {
+		render.Error(stderr, c.output, err.Error())
+		return 1
+	}
+	if c.output == "json" {
+		return renderQueriesJSON(list, c.output, stdout, stderr)
+	}
+	rows := adapter.Rows{Columns: []string{"category", "name", "provider", "hash", "sql"}}
+	for _, q := range list {
+		cat, name, prov := q.Category, q.Name, q.Provider
+		hash := shortHash(q.SQLHash)
+		preview := previewSQL(q.SQL)
+		rows.Rows = append(rows.Rows, []*string{&cat, &name, &prov, &hash, &preview})
+	}
+	return renderRows(rows, c.output, false, stdout, stderr)
+}
+
+// queryListing is the JSON shape of one saved query in the queries command:
+// exactly the fields a caller needs to match a request against the store.
+type queryListing struct {
+	Category string `json:"category"`
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
+	SQLHash  string `json:"sqlhash"`
+	SQL      string `json:"sql"`
+}
+
+// renderQueriesJSON emits the listing as a JSON array (empty as []), honouring
+// --output on the error path.
+func renderQueriesJSON(list []savedquery.SavedQuery, output string, stdout, stderr io.Writer) int {
+	out := make([]queryListing, len(list))
+	for i, q := range list {
+		out[i] = queryListing{Category: q.Category, Name: q.Name, Provider: q.Provider, SQLHash: q.SQLHash, SQL: q.SQL}
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		render.Error(stderr, output, err.Error())
+		return 1
+	}
+	fmt.Fprintln(stdout, string(data))
+	return 0
+}
+
+// sourceUnavailable builds the error shown when --source names a query the
+// store does not hold, listing what is available so the caller can pick one.
+func sourceUnavailable(name, category string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "saved query %q not found in category %q", name, category)
+	all, err := savedquery.List("")
+	if err != nil || len(all) == 0 {
+		b.WriteString("; no saved queries available")
+		return b.String()
+	}
+	refs := make([]string, len(all))
+	for i, q := range all {
+		refs[i] = q.Category + "/" + q.Name
+	}
+	fmt.Fprintf(&b, "; available: %s", strings.Join(refs, ", "))
+	return b.String()
+}
+
+// shortHash trims a hash to its first 8 characters for compact listings.
+func shortHash(h string) string {
+	if len(h) <= 8 {
+		return h
+	}
+	return h[:8]
+}
+
+// previewSQL collapses SQL to a single spaced line and truncates it for the
+// text listing, so a multi-line query stays one table cell.
+func previewSQL(sql string) string {
+	s := strings.Join(strings.Fields(sql), " ")
+	const max = 60
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max-1]) + "…"
+	}
+	return s
 }
 
 func runIntrospect(args []string, stdout, stderr io.Writer) int {

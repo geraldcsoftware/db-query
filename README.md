@@ -17,11 +17,18 @@ in a selectable format. See `docs/design.md` for the full design.
 ```sh
 db-query query      --host prod-core "SELECT id, name FROM people WHERE name = :'who'" --param who=Ada
 db-query query      --host reporting --output json -f report.sql
+db-query query      --host prod-core --save people-by-name --category reports \
+                    "SELECT id, name FROM people WHERE name = :'who'" --param who=Ada
+db-query query      --host prod-core --source people-by-name --category reports --param who=Ada
+db-query queries    --category reports        # list saved queries
 db-query introspect --host prod-core          # list tables + columns
 db-query hosts                                # list configured hosts
 ```
 
-- SQL is given as one positional argument, via `-f file` (`-` for stdin), or piped on stdin.
+- SQL is given as one positional argument, via `-f file` (`-` for stdin), piped on stdin,
+  or by name with `--source` (a saved query). Flags may appear before or after the SQL
+  argument (`… "SELECT …" --param who=Ada` and `… --param who=Ada "SELECT …"` are equivalent);
+  SQL that itself begins with `-` must be passed via `-f` or stdin.
 - Params bind through the client's own `-v` mechanism: `:'name'` in psql
   SQL, `$(name)` in sqlcmd SQL. Values are never substituted into SQL by
   this tool.
@@ -30,6 +37,40 @@ db-query hosts                                # list configured hosts
 - `--no-headers` (text output only) omits the header line and tab-separates
   the rows for any shape, so a 1×1 result prints just the bare value. It is
   a no-op for `--output json`, whose objects are already self-describing.
+
+### Saved queries
+
+A query can be saved by name and re-run later, so a good query need not be
+retyped and an agent can match a request against a fixed set rather than
+free-generate SQL.
+
+- `--save <name>` persists the SQL **only after the query runs successfully**
+  (exit 0); its output is printed either way. `--category <cat>` files it
+  (default `default`). The stored SQL keeps its placeholders — `--param`
+  values are **never** written to disk.
+- `--source <name>` runs a saved query by name; `--param` binds as usual.
+  `--source` cannot be combined with a positional/`-f` SQL argument or with
+  `--save`. A saved query is bound to the provider it was saved against, so
+  `--source` refuses to run it against a host of a different provider. A name
+  the store does not hold errors (exit `1`) and lists the queries available.
+- `--force` (with `--save`) overwrites an existing name and bypasses the
+  duplicate check.
+- Saving refuses (exit `1`, output still printed) when another stored query
+  already holds the same SQL — compared on a normalised hash, so
+  whitespace/comment-only differences count as duplicates — or when the target
+  name already exists. `--force` overrides both.
+- `db-query queries [--category <cat>] [--output text|json]` lists the store.
+  `text` is a table (category, name, provider, short hash, SQL preview);
+  `json` is an array of `{category, name, provider, sqlhash, sql}` objects a
+  caller can match against.
+
+The store lives under `$DB_QUERY_QUERIES_DIR`, else
+`$XDG_CONFIG_HOME/db-query/queries`, else `~/.config/db-query/queries`. Each
+query is a `<category>/<name>.sql` file: a small reserved header of
+`-- db-query:key=value` lines (name, category, provider, sqlhash, saved)
+above the raw SQL body. A file holds SQL with placeholders only — never
+resolved parameter values or credentials. Your own leading comments in the
+body are preserved.
 
 ### Schema cache
 

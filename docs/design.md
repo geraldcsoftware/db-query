@@ -415,3 +415,37 @@ result prints just the bare value. In **json** output it is a no-op — the obje
 are already self-describing. It is carried as a field on `render.Options` and
 read only inside the text renderer, so no adapter learns about it — consistent
 with the "format branch lives at one pivot point" lock.
+
+### 13.5 Saved-query key strategy (resolves §10.1)
+
+Open decision §10.1 (saved-query key strategy) is resolved as follows:
+
+- **Caller-supplied names, not generated.** A saved query is keyed on a
+  human-owned `<category>/<name>` the caller chooses (`--save <name>`,
+  `--category <cat>`, default category `default`). Names and categories are
+  sanitised to safe path segments; an empty name and any segment containing
+  `/` or `..` are rejected, so a stored query can never escape the store. An
+  agent **matches** an intent against the existing set (`db-query queries`,
+  which emits `{category, name, provider, sqlhash, sql}` in JSON) rather than
+  free-generating SQL.
+- **Global normalised-hash dedup.** Save computes a canonical hash — comments
+  and whitespace stripped, trailing semicolons dropped, case preserved (quoted
+  identifiers can be case-sensitive) — and, unless `--force`, refuses if **any**
+  stored query anywhere in the store already holds that hash, naming it. So
+  drift in layout or comments does not spawn near-duplicates. A second guard
+  refuses when the target `<category>/<name>` file already exists.
+- **`--force` overrides both guards** and overwrites in place.
+- **Save on success only.** `--save` persists after the query has run and
+  exited 0; the SQL stored is the query text with placeholders, never the
+  resolved `--param` values (§9). A non-zero run saves nothing. A save refusal
+  is a usage error (exit `1`), but the run already happened and its output was
+  printed — the refusal is surfaced on stderr honouring `--output`.
+- **Provider binding.** A saved query records the provider it was saved
+  against; `--source` refuses to run it against a host of a different provider,
+  since params and SQL are provider-native (§7.3) with no rewrite layer.
+
+The store mirrors the schema cache's shape (§13.2): an XDG-aware directory
+(`$DB_QUERY_QUERIES_DIR`, else `$XDG_CONFIG_HOME/db-query/queries`, else
+`~/.config/db-query/queries`), one `<category>/<name>.sql` file per query
+carrying a reserved `-- db-query:key=value` header above the raw SQL body, and
+metadata only — never credentials.
