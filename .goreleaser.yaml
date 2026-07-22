@@ -51,6 +51,9 @@ changelog:
 
 brews:
   - name: db-query
+    # Publish into Formula/ (Homebrew's convention, matching the rest of the
+    # tap) rather than the tap root.
+    directory: Formula
     repository:
       owner: geraldcsoftware
       name: homebrew-tap
