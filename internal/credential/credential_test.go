@@ -104,6 +104,22 @@ func TestRunBackendEnvOverlay(t *testing.T) {
 	}
 }
 
+// TestRunBackendEnvOverlayOverridesExisting pins the feature's central
+// behaviour: an overlay value wins over the same key already present in the
+// parent environment (a configured [bws].accessToken overriding an inherited
+// BWS_ACCESS_TOKEN). The child must see the overlay, not the parent's value.
+func TestRunBackendEnvOverlayOverridesExisting(t *testing.T) {
+	t.Setenv("DBQ_OVERLAY", "from-parent")
+	out, err := runBackend(map[string]string{"DBQ_OVERLAY": "from-overlay"},
+		"sh", "-c", `printf '%s' "$DBQ_OVERLAY"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "from-overlay" {
+		t.Fatalf("overlay did not override parent env: got %q, want from-overlay", out)
+	}
+}
+
 func TestBwsResolver(t *testing.T) {
 	t.Run("requires access token", func(t *testing.T) {
 		t.Setenv("BWS_ACCESS_TOKEN", "")
