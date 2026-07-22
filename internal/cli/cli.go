@@ -28,6 +28,7 @@ Usage:
   db-query queries    [flags]                       list saved queries
   db-query introspect --host <name> [flags]         list tables and columns, rebuild the schema cache
   db-query hosts      [flags]                       list configured hosts
+  db-query version                                  print version information
 
 Flags:
   --host <name>       host entry from the config file
@@ -56,6 +57,24 @@ Exit codes:
   4  other SQL error — the client ran and exited nonzero
 `
 
+// BuildInfo carries release metadata reported by the `version` command and
+// the `--version` flag. It is populated from main via SetBuildInfo with values
+// injected at build time through -ldflags.
+type BuildInfo struct {
+	Version string
+	Commit  string
+	Date    string
+}
+
+var buildInfo = BuildInfo{Version: "dev", Commit: "none", Date: "unknown"}
+
+// SetBuildInfo records the build metadata reported by the version command.
+func SetBuildInfo(bi BuildInfo) { buildInfo = bi }
+
+func versionString() string {
+	return fmt.Sprintf("db-query %s (commit %s, built %s)", buildInfo.Version, buildInfo.Commit, buildInfo.Date)
+}
+
 // Exit codes: 0 success; 1 config/usage/credential error; 2 client binary
 // failed to start; 3 schema error (unknown table/column) — the
 // reintrospect-worthy signal; 4 other SQL error (client ran, exited
@@ -74,6 +93,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runIntrospect(args[1:], stdout, stderr)
 	case "hosts":
 		return runHosts(args[1:], stdout, stderr)
+	case "version", "--version":
+		fmt.Fprintln(stdout, versionString())
+		return 0
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0

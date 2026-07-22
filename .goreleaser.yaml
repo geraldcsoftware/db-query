@@ -1,0 +1,70 @@
+# GoReleaser configuration for db-query.
+# Reference: https://goreleaser.com
+version: 2
+
+project_name: db-query
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: db-query
+    main: ./cmd/db-query
+    binary: db-query
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: db-query
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
+
+homebrew_casks:
+  - name: db-query
+    binaries:
+      - db-query
+    repository:
+      owner: geraldcsoftware
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/geraldcsoftware/db-query"
+    description: "Run SQL against configured hosts via native database clients"
+    # The binaries are not Apple code-signed/notarized, so strip the Gatekeeper
+    # quarantine bit on install; otherwise macOS reports the binary as damaged.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/db-query"]
+          end
