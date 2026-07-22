@@ -473,7 +473,7 @@ func setup(c commonFlags, stderr io.Writer) (resolved, int) {
 		render.Error(stderr, c.output, err.Error())
 		return resolved{}, 1
 	}
-	cred, err := resolveCredential(host)
+	cred, err := resolveCredential(cfg, host)
 	if err != nil {
 		render.Error(stderr, c.output, err.Error())
 		return resolved{}, 1
@@ -555,14 +555,47 @@ func renderRows(rows adapter.Rows, output string, noHeaders bool, stdout, stderr
 	return 0
 }
 
-// resolveCredential produces the final neutral record for a host:
-// password from the credential URI; username from explicit host config
-// (literal or URI) with the resolver's own username filling the gap.
-func resolveCredential(host config.HostConfig) (credential.Credential, error) {
+// usesBWS reports whether the host resolves any secret through the bws: scheme,
+// so the configured access token is fetched only when it is actually needed.
+func usesBWS(host config.HostConfig) bool {
+	return strings.HasPrefix(host.Credential, "bws:") || strings.HasPrefix(host.Username, "bws:")
+}
+
+// bwsOptions resolves the configured Bitwarden Secrets Manager access token
+// into resolver Options, lazily: only when the host uses a bws: URI and a
+// [bws].accessToken is set. The token source must be a resolver URI and must
+// not itself be bws: (chicken-and-egg); an empty section leaves the token
+// empty so the resolver falls back to BWS_ACCESS_TOKEN.
+func bwsOptions(cfg config.Config, host config.HostConfig) (credential.Options, error) {
+	if !usesBWS(host) || cfg.BWS.AccessToken == "" {
+		return credential.Options{}, nil
+	}
+	uri := cfg.BWS.AccessToken
+	if strings.HasPrefix(uri, "bws:") {
+		return credential.Options{}, fmt.Errorf("bws.accessToken must not be a bws: URI (chicken-and-egg); use env:, keychain:, etc.")
+	}
+	if !credential.IsURI(uri) {
+		return credential.Options{}, fmt.Errorf("bws.accessToken must be a credential URI (e.g. env:NAME or keychain:service), not a raw value")
+	}
+	tok, err := credential.ResolveScalar(uri)
+	if err != nil {
+		return credential.Options{}, fmt.Errorf("resolving bws.accessToken: %w", err)
+	}
+	return credential.Options{BWSAccessToken: tok}, nil
+}
+
+// resolveCredential produces the final neutral record for a host: password
+// from the credential URI; username from explicit host config (literal or
+// URI) with the resolver's own username filling the gap. The BWS access
+// token is resolved lazily via bwsOptions and injected into resolution.
+func resolveCredential(cfg config.Config, host config.HostConfig) (credential.Credential, error) {
+	opts, err := bwsOptions(cfg, host)
+	if err != nil {
+		return credential.Credential{}, err
+	}
 	var cred credential.Credential
 	if host.Credential != "" {
-		var err error
-		cred, err = credential.Resolve(host.Credential)
+		cred, err = credential.ResolveWith(host.Credential, opts)
 		if err != nil {
 			return credential.Credential{}, fmt.Errorf("resolving credential for host %s: %w", host.Name, err)
 		}
@@ -571,7 +604,7 @@ func resolveCredential(host config.HostConfig) (credential.Credential, error) {
 	case host.Username == "":
 		// keep cred.Username (resolver-supplied, e.g. bw: or keychain:)
 	case credential.IsURI(host.Username):
-		u, err := credential.ResolveScalar(host.Username)
+		u, err := credential.ResolveScalarWith(host.Username, opts)
 		if err != nil {
 			return credential.Credential{}, fmt.Errorf("resolving username for host %s: %w", host.Name, err)
 		}

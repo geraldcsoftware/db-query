@@ -810,3 +810,35 @@ func TestQueriesEmptyStoreJSON(t *testing.T) {
 		t.Fatalf("empty store must be [], got %q", out)
 	}
 }
+
+// TestBWSAccessTokenGuards pins the two config-time refusals on
+// [bws].accessToken: a bws: URI (chicken-and-egg) and a raw, non-URI value.
+// Both are usage errors resolved before any secret is touched.
+func TestBWSAccessTokenGuards(t *testing.T) {
+	t.Run("bws: token URI is rejected", func(t *testing.T) {
+		cfg := writeFile(t, t.TempDir(), "config.toml", `
+[bws]
+accessToken = "bws:self"
+[hosts.h]
+provider   = "postgres"
+credential = "bws:secret-id"
+`, 0o600)
+		code, _, errb := run(t, "query", "--host", "h", "--config", cfg, "SELECT 1")
+		if code != 1 || !strings.Contains(errb, "chicken-and-egg") {
+			t.Fatalf("code=%d err=%q", code, errb)
+		}
+	})
+	t.Run("raw token value is rejected", func(t *testing.T) {
+		cfg := writeFile(t, t.TempDir(), "config.toml", `
+[bws]
+accessToken = "raw-token-value"
+[hosts.h]
+provider   = "postgres"
+credential = "bws:secret-id"
+`, 0o600)
+		code, _, errb := run(t, "query", "--host", "h", "--config", cfg, "SELECT 1")
+		if code != 1 || !strings.Contains(errb, "credential URI") {
+			t.Fatalf("code=%d err=%q", code, errb)
+		}
+	})
+}
