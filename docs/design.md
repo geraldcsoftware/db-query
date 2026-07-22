@@ -449,3 +449,12 @@ The store mirrors the schema cache's shape (§13.2): an XDG-aware directory
 `~/.config/db-query/queries`), one `<category>/<name>.sql` file per query
 carrying a reserved `-- db-query:key=value` header above the raw SQL body, and
 metadata only — never credentials.
+
+### 13.6 `[bws].accessToken` (token source override)
+
+The BWS access token source is configurable via a `[bws]` section holding a
+resolver URI, resolved lazily only when a host uses `bws:`. Pointer-only (raw
+refused), `bws:` refused (chicken-and-egg), and it falls back to
+`BWS_ACCESS_TOKEN` when unset. This is the first instance of per-resolver
+backend config; the token itself gets the same lazy, pointer-based treatment
+as every other credential.

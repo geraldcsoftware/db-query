@@ -125,6 +125,20 @@ Secrets Manager, needs `BWS_ACCESS_TOKEN`), `bw:item/<id-or-name>`
 (macOS). Resolution is lazy and per-invocation; passwords ride an
 environment overlay to the client, never argv.
 
+### Bitwarden Secrets Manager token
+
+By default the `bws:` scheme reads its access token from the `BWS_ACCESS_TOKEN`
+environment variable. To source it elsewhere, add a `[bws]` section whose
+`accessToken` is itself a resolver URI:
+
+    [bws]
+    accessToken = "env:BWS_ACCESS_TOKEN"   # name any env var
+    # accessToken = "keychain:bws-token"   # keep the token out of the shell env
+
+The value must be a resolver URI (`env:`, `keychain:`, …); a raw token in
+config is refused, and `bws:` is not allowed (chicken-and-egg). With no `[bws]`
+section, the `BWS_ACCESS_TOKEN` environment variable is used.
+
 ## Requirements
 
 - `psql` on PATH for postgres hosts
