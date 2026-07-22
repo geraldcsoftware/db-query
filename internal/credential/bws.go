@@ -26,7 +26,7 @@ func (bwsResolver) Resolve(rest string) (Credential, error) {
 	if os.Getenv("BWS_ACCESS_TOKEN") == "" {
 		return Credential{}, fmt.Errorf("bws: BWS_ACCESS_TOKEN is not set (source it outside db-query)")
 	}
-	out, err := runBackend("bws", "secret", "get", id, "--output", "json")
+	out, err := runBackend(nil, "bws", "secret", "get", id, "--output", "json")
 	if err != nil {
 		return Credential{}, err
 	}

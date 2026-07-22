@@ -21,7 +21,7 @@ func (keychainResolver) Resolve(rest string) (Credential, error) {
 		args = append(args, "-a", account)
 	}
 	args = append(args, "-w")
-	out, err := runBackend("security", args...)
+	out, err := runBackend(nil, "security", args...)
 	if err != nil {
 		return Credential{}, err
 	}

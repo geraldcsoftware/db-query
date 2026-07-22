@@ -21,7 +21,7 @@ func (bwResolver) Resolve(rest string) (Credential, error) {
 	if os.Getenv("BW_SESSION") == "" {
 		return Credential{}, fmt.Errorf("bw: BW_SESSION is not set — unlock the vault first (bw unlock)")
 	}
-	out, err := runBackend("bw", "get", "item", sel, "--nointeraction")
+	out, err := runBackend(nil, "bw", "get", "item", sel, "--nointeraction")
 	if err != nil {
 		return Credential{}, err
 	}

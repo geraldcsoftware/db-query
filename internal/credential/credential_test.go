@@ -85,11 +85,23 @@ func TestResolveScalar(t *testing.T) {
 }
 
 // withBackend swaps the backend runner for one test.
-func withBackend(t *testing.T, fn func(name string, args ...string) ([]byte, error)) {
+func withBackend(t *testing.T, fn func(env map[string]string, name string, args ...string) ([]byte, error)) {
 	t.Helper()
 	orig := runBackend
 	runBackend = fn
 	t.Cleanup(func() { runBackend = orig })
+}
+
+func TestRunBackendEnvOverlay(t *testing.T) {
+	// A real subprocess echoes an overlaid var, proving env reaches the child.
+	out, err := runBackend(map[string]string{"DBQ_OVERLAY": "yes"},
+		"sh", "-c", `printf '%s' "$DBQ_OVERLAY"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "yes" {
+		t.Fatalf("overlay not applied: got %q", out)
+	}
 }
 
 func TestBwsResolver(t *testing.T) {
@@ -102,7 +114,7 @@ func TestBwsResolver(t *testing.T) {
 	})
 	t.Run("resolves value field", func(t *testing.T) {
 		t.Setenv("BWS_ACCESS_TOKEN", "tok")
-		withBackend(t, func(name string, args ...string) ([]byte, error) {
+		withBackend(t, func(env map[string]string, name string, args ...string) ([]byte, error) {
 			if name != "bws" {
 				t.Fatalf("backend = %q, want bws", name)
 			}
@@ -118,7 +130,7 @@ func TestBwsResolver(t *testing.T) {
 	})
 	t.Run("fragment selects field", func(t *testing.T) {
 		t.Setenv("BWS_ACCESS_TOKEN", "tok")
-		withBackend(t, func(name string, args ...string) ([]byte, error) {
+		withBackend(t, func(env map[string]string, name string, args ...string) ([]byte, error) {
 			return []byte(`{"key":"the-user","value":"x"}`), nil
 		})
 		cred, err := Resolve("bws:1a2b#key")
@@ -137,7 +149,7 @@ func TestBwsResolver(t *testing.T) {
 	})
 	t.Run("backend failure surfaces", func(t *testing.T) {
 		t.Setenv("BWS_ACCESS_TOKEN", "tok")
-		withBackend(t, func(name string, args ...string) ([]byte, error) {
+		withBackend(t, func(env map[string]string, name string, args ...string) ([]byte, error) {
 			return nil, fmt.Errorf("bws: 404 secret not found")
 		})
 		_, err := Resolve("bws:missing")
@@ -157,7 +169,7 @@ func TestBwResolver(t *testing.T) {
 	})
 	t.Run("parses item with fields into extra", func(t *testing.T) {
 		t.Setenv("BW_SESSION", "sess")
-		withBackend(t, func(name string, args ...string) ([]byte, error) {
+		withBackend(t, func(env map[string]string, name string, args ...string) ([]byte, error) {
 			return []byte(`{"login":{"username":"svc","password":"pw"},
 				"fields":[{"name":"Host","value":"db.internal"},{"name":"port","value":"5433"}]}`), nil
 		})
@@ -174,7 +186,7 @@ func TestBwResolver(t *testing.T) {
 	})
 	t.Run("missing password", func(t *testing.T) {
 		t.Setenv("BW_SESSION", "sess")
-		withBackend(t, func(name string, args ...string) ([]byte, error) {
+		withBackend(t, func(env map[string]string, name string, args ...string) ([]byte, error) {
 			return []byte(`{"login":{"username":"svc","password":""}}`), nil
 		})
 		if _, err := Resolve("bw:item/mydb"); err == nil {
@@ -191,7 +203,7 @@ func TestBwResolver(t *testing.T) {
 func TestKeychainResolver(t *testing.T) {
 	t.Run("service and account", func(t *testing.T) {
 		var gotArgs []string
-		withBackend(t, func(name string, args ...string) ([]byte, error) {
+		withBackend(t, func(env map[string]string, name string, args ...string) ([]byte, error) {
 			if name != "security" {
 				t.Fatalf("backend = %q, want security", name)
 			}
@@ -211,7 +223,7 @@ func TestKeychainResolver(t *testing.T) {
 		}
 	})
 	t.Run("service only", func(t *testing.T) {
-		withBackend(t, func(name string, args ...string) ([]byte, error) {
+		withBackend(t, func(env map[string]string, name string, args ...string) ([]byte, error) {
 			return []byte("pw\n"), nil
 		})
 		cred, err := Resolve("keychain:mysvc")
