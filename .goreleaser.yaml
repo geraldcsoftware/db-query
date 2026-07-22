@@ -49,10 +49,8 @@ changelog:
       - Merge pull request
       - Merge branch
 
-homebrew_casks:
+brews:
   - name: db-query
-    binaries:
-      - db-query
     repository:
       owner: geraldcsoftware
       name: homebrew-tap
@@ -60,11 +58,11 @@ homebrew_casks:
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: "https://github.com/geraldcsoftware/db-query"
     description: "Run SQL against configured hosts via native database clients"
-    # The binaries are not Apple code-signed/notarized, so strip the Gatekeeper
-    # quarantine bit on install; otherwise macOS reports the binary as damaged.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/db-query"]
-          end
+    # A formula installs the pre-built binary into the Homebrew prefix, which is
+    # exempt from Gatekeeper quarantine — so no xattr workaround is needed — and
+    # generates the zsh completion at install time so `brew install` sets it up.
+    install: |
+      bin.install "db-query"
+      generate_completions_from_executable(bin/"db-query", "completion", shells: [:zsh])
+    test: |
+      system "#{bin}/db-query", "version"
