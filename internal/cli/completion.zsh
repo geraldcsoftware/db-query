@@ -69,6 +69,7 @@ _db-query() {
 _dbq_cmd_query() {
   _arguments \
     '--host[host entry from config]:host:__dbq_hosts' \
+    '(-d --database)'{-d,--database}'[override the host database]:database:' \
     '--config[config file path]:file:_files' \
     '--output[output format]:format:(text json)' \
     '*--param[bind a query parameter, k=v]:param:' \
@@ -93,6 +94,7 @@ _dbq_cmd_queries() {
 _dbq_cmd_introspect() {
   _arguments \
     '--host[host entry from config]:host:__dbq_hosts' \
+    '(-d --database)'{-d,--database}'[override the host database]:database:' \
     '--config[config file path]:file:_files' \
     '--output[output format]:format:(text json)' \
     '--timeout[per-invocation deadline]:duration:' \

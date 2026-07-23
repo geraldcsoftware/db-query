@@ -33,6 +33,7 @@ Usage:
 
 Flags:
   --host <name>       host entry from the config file
+  -d, --database <db> override the host's configured database (query, introspect)
   --config <path>     config file (default: $DB_QUERY_CONFIG or ~/.config/db-query/config.toml)
   --output text|json  output format (default text)
   --param k=v         bind a query parameter (repeatable); psql: :'k', sqlcmd: $(k)
@@ -111,10 +112,11 @@ func Run(args []string, stdout, stderr io.Writer) int {
 }
 
 type commonFlags struct {
-	host    string
-	config  string
-	output  string
-	timeout time.Duration
+	host     string
+	config   string
+	output   string
+	timeout  time.Duration
+	database string
 }
 
 func addCommon(fs *flag.FlagSet, c *commonFlags) {
@@ -122,6 +124,8 @@ func addCommon(fs *flag.FlagSet, c *commonFlags) {
 	fs.StringVar(&c.config, "config", "", "config file path")
 	fs.StringVar(&c.output, "output", "text", "output format: text|json")
 	fs.DurationVar(&c.timeout, "timeout", 30*time.Second, "per-invocation deadline")
+	fs.StringVar(&c.database, "database", "", "override the host's configured database")
+	fs.StringVar(&c.database, "d", "", "override the host's configured database (shorthand)")
 }
 
 // paramFlags collects repeatable --param k=v values.
@@ -506,6 +510,12 @@ func setup(c commonFlags, stderr io.Writer) (resolved, int) {
 		return resolved{}, 1
 	}
 	host = config.MergeCredential(host, cred)
+	// --database/-d overrides the host's configured database (and any value a
+	// resolver supplied), so one host entry can reach sibling databases on the
+	// same server without a second config block.
+	if c.database != "" {
+		host.Database = c.database
+	}
 	return resolved{adapter: a, cred: cred, host: host}, 0
 }
 

@@ -34,6 +34,9 @@ db-query hosts                                # list configured hosts
   this tool.
 - `--output text|json` (default `text`). In `json` mode errors are
   emitted as structured JSON on stderr.
+- `--database <db>` (`-d`) overrides the host's configured `database` for this
+  run (on `query` and `introspect`), so one host entry can reach sibling
+  databases on the same server without a second config block.
 - `--no-headers` (text output only) omits the header line and tab-separates
   the rows for any shape, so a 1×1 result prints just the bare value. It is
   a no-op for `--output json`, whose objects are already self-describing.

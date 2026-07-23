@@ -544,6 +544,38 @@ func TestQueryNoHeadersJSONNoOp(t *testing.T) {
 	}
 }
 
+// TestQueryDatabaseOverride pins that --database / -d overrides the host's
+// configured database for the run: the client sees the overridden name, and
+// the configured one does not leak.
+func TestQueryDatabaseOverride(t *testing.T) {
+	for _, flag := range []string{"-d", "--database"} {
+		t.Run(flag, func(t *testing.T) {
+			isolateCache(t)
+			// The schema cache is keyed on host+database, so seed the entry for
+			// the OVERRIDDEN database; the psql stub then only answers the query.
+			if err := schema.Write(schema.CachePath("localhost", "otherdb"), adapter.Rows{Columns: []string{"seeded"}}); err != nil {
+				t.Fatal(err)
+			}
+			fakePsql(t, `env > "$TMPDIR_CAPTURE/env"; printf 'ok\n1\n'`)
+			capture := t.TempDir()
+			t.Setenv("TMPDIR_CAPTURE", capture)
+			t.Setenv("DBQ_TEST_PW", "pw")
+			cfg := testConfig(t) // testpg is configured with database=testdb
+			code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, flag, "otherdb", "SELECT 1")
+			if code != 0 {
+				t.Fatalf("code=%d err=%q", code, errb)
+			}
+			env, _ := os.ReadFile(filepath.Join(capture, "env"))
+			if !strings.Contains(string(env), "PGDATABASE=otherdb") {
+				t.Fatalf("%s must override the configured database; env=%q", flag, env)
+			}
+			if strings.Contains(string(env), "PGDATABASE=testdb") {
+				t.Fatalf("the configured database must not leak when %s is set; env=%q", flag, env)
+			}
+		})
+	}
+}
+
 func TestUnknownHostAndFormat(t *testing.T) {
 	cfg := testConfig(t)
 	if code, _, errb := run(t, "query", "--host", "nope", "--config", cfg, "SELECT 1"); code != 1 || !strings.Contains(errb, "unknown host") {
