@@ -97,6 +97,21 @@ func TestLoadErrors(t *testing.T) {
 			t.Fatalf("error should list configured hosts, got %v", err)
 		}
 	})
+	t.Run("credential-typo key rejected with hint", func(t *testing.T) {
+		// A password source under 'password'/'pwd'/'pass' would be silently
+		// ignored, leaving the client to prompt interactively; reject it and
+		// point at the right key instead.
+		for _, key := range []string{"password", "passwd", "pwd", "pass", "Password"} {
+			path := writeConfig(t, "[hosts.x]\nprovider = \"sqlserver\"\n"+key+" = \"bws:abc\"\n")
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), "credential") {
+				t.Fatalf("key %q: want error pointing to 'credential', got %v", key, err)
+			}
+			if !strings.Contains(err.Error(), key) {
+				t.Fatalf("key %q: error should name the offending key, got %v", key, err)
+			}
+		}
+	})
 }
 
 func TestPortAsString(t *testing.T) {

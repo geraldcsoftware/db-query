@@ -128,6 +128,11 @@ Secrets Manager, needs `BWS_ACCESS_TOKEN`), `bw:item/<id-or-name>`
 (macOS). Resolution is lazy and per-invocation; passwords ride an
 environment overlay to the client, never argv.
 
+The password source is always the **`credential`** key — a resolver URI, never
+a plaintext password. A host key named `password` (or `pwd`/`pass`/`passwd`) is
+rejected at load with a pointer to `credential`, so a value under the wrong key
+can't be silently ignored and leave the client prompting for a password.
+
 ### Bitwarden Secrets Manager token
 
 By default the `bws:` scheme reads its access token from the `BWS_ACCESS_TOKEN`

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 
@@ -47,6 +48,16 @@ type Config struct {
 var coreKeys = map[string]bool{
 	"provider": true, "host": true, "port": true,
 	"database": true, "username": true, "credential": true,
+}
+
+// credentialMistakeKeys are the keys users reach for when they mean
+// 'credential'. The password source is a resolver URI under 'credential';
+// a value under one of these would otherwise fall through to Extra and be
+// silently ignored, leaving the client with no password and prompting
+// interactively (which fails in a non-TTY subprocess). Reject it up front
+// and point at the right key. Compared case-insensitively.
+var credentialMistakeKeys = map[string]bool{
+	"password": true, "passwd": true, "pwd": true, "pass": true,
 }
 
 // DefaultPath returns the config file location: $DB_QUERY_CONFIG if set,
@@ -106,6 +117,11 @@ func Load(path string) (Config, error) {
 			case "credential":
 				h.Credential, _ = v.(string)
 			default:
+				if credentialMistakeKeys[strings.ToLower(k)] {
+					return Config{}, fmt.Errorf(
+						"host %s: unknown key %q — the password source belongs under 'credential' as a resolver URI (e.g. credential = %q)",
+						name, k, "bws:<secret-id>")
+				}
 				h.Extra[k] = stringify(v)
 			}
 		}
