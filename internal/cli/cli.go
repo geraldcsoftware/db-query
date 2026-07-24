@@ -26,6 +26,7 @@ const usage = `db-query — run SQL against configured hosts via native clients
 Usage:
   db-query query      --host <name> [flags] [SQL]   run ad-hoc SQL (positional, -f file, stdin) or a saved query
   db-query queries    [flags]                       list saved queries
+  db-query schema     --host <name> [flags] [table] show the cached schema; a table name restricts to that table
   db-query introspect --host <name> [flags]         list tables and columns, rebuild the schema cache
   db-query hosts      [flags]                       list configured hosts
   db-query version                                  print version information
@@ -33,7 +34,7 @@ Usage:
 
 Flags:
   --host <name>       host entry from the config file
-  -d, --database <db> override the host's configured database (query, introspect)
+  -d, --database <db> override the host's configured database (query, schema, introspect)
   --config <path>     config file (default: $DB_QUERY_CONFIG or ~/.config/db-query/config.toml)
   --output text|json  output format (default text)
   --param k=v         bind a query parameter (repeatable); psql: :'k', sqlcmd: $(k)
@@ -43,8 +44,9 @@ Flags:
   --category <cat>    saved-query category for --save/--source (default "default")
   --force             with --save: overwrite an existing query and bypass the duplicate check
   --timeout <dur>     per-invocation deadline (default 30s)
-  --refresh-schema    rebuild the cached schema first (query, introspect)
-  --no-headers        text output only: omit the header line, tab-separate rows (query)
+  --refresh-schema    rebuild the cached schema first (query, schema, introspect)
+  --no-headers        text output only: omit the header line, tab-separate rows (query, schema)
+  --tables            schema: print one schema-qualified table name per line instead of columns
 
 Saved queries live under $DB_QUERY_QUERIES_DIR (else $XDG_CONFIG_HOME/db-query/queries,
 else ~/.config/db-query/queries) as <category>/<name>.sql, storing SQL with placeholders
@@ -91,6 +93,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runQuery(args[1:], stdout, stderr)
 	case "queries":
 		return runQueries(args[1:], stdout, stderr)
+	case "schema":
+		return runSchema(args[1:], stdout, stderr)
 	case "introspect":
 		return runIntrospect(args[1:], stdout, stderr)
 	case "hosts":
@@ -371,6 +375,151 @@ func previewSQL(sql string) string {
 		return string(r[:max-1]) + "…"
 	}
 	return s
+}
+
+// runSchema presents the cached schema for a host+database: the full
+// catalogue by default, one table's rows when a table name is given, or the
+// distinct table names with --tables. It is the read counterpart of
+// introspect: cache-first, silently building the cache when absent (like
+// the query path) and hitting the live database only then or under
+// --refresh-schema.
+func runSchema(args []string, stdout, stderr io.Writer) int {
+	var c commonFlags
+	var tablesOnly, refreshSchema, noHeaders bool
+	fs := flag.NewFlagSet("schema", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	addCommon(fs, &c)
+	fs.BoolVar(&tablesOnly, "tables", false, "print one schema-qualified table name per line")
+	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache first")
+	fs.BoolVar(&noHeaders, "no-headers", false, "text output: omit the header line")
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(positional) > 1 {
+		render.Error(stderr, c.output, fmt.Sprintf("expected at most one table name, got %d", len(positional)))
+		return 1
+	}
+	if tablesOnly && len(positional) > 0 {
+		render.Error(stderr, c.output, "--tables and a table name are mutually exclusive; pick one")
+		return 1
+	}
+
+	r, code := setup(c, stderr)
+	if code != 0 {
+		return code
+	}
+
+	cachePath := schema.CachePath(r.host.Host, r.host.Database)
+	if refreshSchema || !schema.Exists(cachePath) {
+		if code := buildSchema(r, cachePath, c, stderr); code != 0 {
+			return code
+		}
+	}
+	rows, err := schema.Read(cachePath)
+	if err != nil {
+		render.Error(stderr, c.output, err.Error())
+		return 1
+	}
+
+	switch {
+	case tablesOnly:
+		rows, err = tableNames(rows)
+	case len(positional) == 1:
+		var matched bool
+		rows, matched, err = filterTable(rows, positional[0])
+		if err == nil && !matched {
+			render.Error(stderr, c.output, fmt.Sprintf(
+				"table %q not found in the cached schema\nhint: if it was created recently, re-run with --refresh-schema to rebuild the schema cache",
+				positional[0]))
+			return 3
+		}
+	}
+	if err != nil {
+		render.Error(stderr, c.output, err.Error())
+		return 1
+	}
+	return renderRows(rows, c.output, noHeaders, stdout, stderr)
+}
+
+// catalogColumns locates the schema- and table-name columns in a cached
+// catalogue. The lookup is case-insensitive because providers differ in
+// catalog identifier case (postgres: table_schema, sqlserver: TABLE_SCHEMA).
+// A cache without both columns is not a catalogue this command can present.
+func catalogColumns(rows adapter.Rows) (schemaIdx, tableIdx int, err error) {
+	schemaIdx, tableIdx = -1, -1
+	for i, col := range rows.Columns {
+		switch {
+		case strings.EqualFold(col, "table_schema"):
+			schemaIdx = i
+		case strings.EqualFold(col, "table_name"):
+			tableIdx = i
+		}
+	}
+	if schemaIdx < 0 || tableIdx < 0 {
+		return 0, 0, fmt.Errorf("the schema cache has no table_schema/table_name columns; rebuild it with db-query introspect")
+	}
+	return schemaIdx, tableIdx, nil
+}
+
+// cell returns a row's value at idx, treating a missing or NULL cell as "".
+func cell(row []*string, idx int) string {
+	if idx >= len(row) || row[idx] == nil {
+		return ""
+	}
+	return *row[idx]
+}
+
+// tableNames reduces a catalogue to one schema-qualified name per distinct
+// table, in catalogue order, as a single "table" column — one name per line
+// in text output, the grep/xargs-friendly shape of --tables.
+func tableNames(rows adapter.Rows) (adapter.Rows, error) {
+	schemaIdx, tableIdx, err := catalogColumns(rows)
+	if err != nil {
+		return adapter.Rows{}, err
+	}
+	out := adapter.Rows{Columns: []string{"table"}}
+	seen := map[string]bool{}
+	for _, row := range rows.Rows {
+		name := cell(row, tableIdx)
+		if s := cell(row, schemaIdx); s != "" {
+			name = s + "." + name
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		n := name
+		out.Rows = append(out.Rows, []*string{&n})
+	}
+	return out, nil
+}
+
+// filterTable keeps only the catalogue rows for one table. A bare name
+// matches that table in any schema; a dotted name ("public.users") pins the
+// schema. Matching is case-insensitive on both parts, as SQL identifiers
+// are unless quoted. The bool reports whether anything matched, so the
+// caller can distinguish an unknown table from an empty one.
+func filterTable(rows adapter.Rows, name string) (adapter.Rows, bool, error) {
+	schemaIdx, tableIdx, err := catalogColumns(rows)
+	if err != nil {
+		return adapter.Rows{}, false, err
+	}
+	wantSchema, wantTable, qualified := strings.Cut(name, ".")
+	if !qualified {
+		wantSchema, wantTable = "", name
+	}
+	out := adapter.Rows{Columns: rows.Columns}
+	for _, row := range rows.Rows {
+		if !strings.EqualFold(cell(row, tableIdx), wantTable) {
+			continue
+		}
+		if qualified && !strings.EqualFold(cell(row, schemaIdx), wantSchema) {
+			continue
+		}
+		out.Rows = append(out.Rows, row)
+	}
+	return out, len(out.Rows) > 0, nil
 }
 
 func runIntrospect(args []string, stdout, stderr io.Writer) int {
