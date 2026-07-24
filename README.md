@@ -21,7 +21,10 @@ db-query query      --host prod-core --save people-by-name --category reports \
                     "SELECT id, name FROM people WHERE name = :'who'" --param who=Ada
 db-query query      --host prod-core --source people-by-name --category reports --param who=Ada
 db-query queries    --category reports        # list saved queries
-db-query introspect --host prod-core          # list tables + columns
+db-query schema     --host prod-core          # show the cached schema (tables + columns)
+db-query schema     --host prod-core people   # one table's columns (bare or schema-qualified name)
+db-query schema     --host prod-core --tables # one schema-qualified table name per line
+db-query introspect --host prod-core          # list tables + columns, always live
 db-query hosts                                # list configured hosts
 ```
 
@@ -39,8 +42,8 @@ db-query hosts                                # list configured hosts
 - `--output text|json` (default `text`). In `json` mode errors are
   emitted as structured JSON on stderr.
 - `--database <db>` (`-d`) overrides the host's configured `database` for this
-  run (on `query` and `introspect`), so one host entry can reach sibling
-  databases on the same server without a second config block.
+  run (on `query`, `schema`, and `introspect`), so one host entry can reach
+  sibling databases on the same server without a second config block.
 - `--no-headers` (text output only) omits the header line and tab-separates
   the rows for any shape, so a 1×1 result prints just the bare value. It is
   a no-op for `--output json`, whose objects are already self-describing.
@@ -89,7 +92,18 @@ side effect: the user query's result is still what gets printed. If that
 internal introspection fails, the error is surfaced and the user query does
 not run.
 
-- `--refresh-schema` (on `query` and `introspect`) rebuilds the cache first.
+- `db-query schema` presents the cache without touching the database: the full
+  catalogue, one table's columns (`schema <table>`, bare or schema-qualified,
+  case-insensitive), or the distinct table names (`--tables`, one
+  schema-qualified name per line — grep/xargs-friendly). A missing cache is
+  built silently first; a table not in the cache exits `3` with a
+  `--refresh-schema` hint. Example round trip:
+
+  ```sh
+  db-query schema --tables --host prod-core | grep -m1 people | xargs db-query schema --host prod-core
+  ```
+
+- `--refresh-schema` (on `query`, `schema`, and `introspect`) rebuilds the cache first.
 - `db-query introspect` always rebuilds the cache and prints the schema.
 - A schema error (exit code `3`) does **not** auto-rebuild — re-run with
   `--refresh-schema`, the only trigger that rebuilds the cache.

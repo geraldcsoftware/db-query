@@ -135,7 +135,7 @@ func TestUsageListsShorthands(t *testing.T) {
 // TestSubcommandHelp pins that -h/--help on any subcommand prints the usage
 // text on stdout and exits 0, instead of the flag package's default dump.
 func TestSubcommandHelp(t *testing.T) {
-	for _, cmd := range []string{"query", "queries", "introspect", "hosts"} {
+	for _, cmd := range []string{"query", "queries", "schema", "introspect", "hosts"} {
 		for _, h := range []string{"-h", "--help"} {
 			code, out, _ := run(t, cmd, h)
 			if code != 0 || !strings.Contains(out, "Usage:") {
@@ -931,6 +931,194 @@ func TestQueriesEmptyStoreJSON(t *testing.T) {
 	}
 	if strings.TrimSpace(out) != "[]" {
 		t.Fatalf("empty store must be [], got %q", out)
+	}
+}
+
+// seedCatalogueCache isolates the cache and pre-writes a realistic
+// introspected catalogue for testConfig's resolved host (localhost/testdb):
+// two tables in public plus a same-named table in another schema, so tests
+// can exercise bare-name, qualified, and distinct-table behaviour.
+func seedCatalogueCache(t *testing.T) {
+	t.Helper()
+	isolateCache(t)
+	s := func(v string) *string { return &v }
+	rows := adapter.Rows{
+		Columns: []string{"table_schema", "table_name", "column_name", "data_type", "is_nullable"},
+		Rows: [][]*string{
+			{s("public"), s("people"), s("id"), s("integer"), s("NO")},
+			{s("public"), s("people"), s("name"), s("text"), s("YES")},
+			{s("public"), s("orders"), s("id"), s("integer"), s("NO")},
+			{s("audit"), s("people"), s("event"), s("text"), s("NO")},
+		},
+	}
+	if err := schema.Write(schema.CachePath("localhost", "testdb"), rows); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSchemaReadsCacheWithoutClient(t *testing.T) {
+	seedCatalogueCache(t)
+	calls := callsFile(t)
+	fakePsql(t, `printf 'called\n' >> "$DBQ_CALLS"; exit 1`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "schema", "--host", "testpg", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if calls() != "" {
+		t.Fatalf("schema must not invoke the client when the cache exists; calls=%q", calls())
+	}
+	for _, want := range []string{"table_schema\ttable_name", "public\tpeople\tid", "audit\tpeople\tevent"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("out missing %q; out=%q", want, out)
+		}
+	}
+}
+
+func TestSchemaTablesOnly(t *testing.T) {
+	seedCatalogueCache(t)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "schema", "--host", "testpg", "--config", cfg, "--tables")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if out != "table\npublic.people\npublic.orders\naudit.people\n" {
+		t.Fatalf("out = %q", out)
+	}
+}
+
+func TestSchemaTableFilter(t *testing.T) {
+	t.Setenv("DBQ_TEST_PW", "pw")
+	t.Run("bare name matches any schema", func(t *testing.T) {
+		seedCatalogueCache(t)
+		cfg := testConfig(t)
+		code, out, errb := run(t, "schema", "--host", "testpg", "--config", cfg, "people")
+		if code != 0 {
+			t.Fatalf("code=%d err=%q", code, errb)
+		}
+		if !strings.Contains(out, "public\tpeople\tid") || !strings.Contains(out, "audit\tpeople\tevent") {
+			t.Fatalf("bare name must match both schemas; out=%q", out)
+		}
+		if strings.Contains(out, "orders") {
+			t.Fatalf("unrelated table leaked into filter; out=%q", out)
+		}
+	})
+	t.Run("qualified name pins the schema", func(t *testing.T) {
+		seedCatalogueCache(t)
+		cfg := testConfig(t)
+		code, out, errb := run(t, "schema", "--host", "testpg", "--config", cfg, "audit.people")
+		if code != 0 {
+			t.Fatalf("code=%d err=%q", code, errb)
+		}
+		if !strings.Contains(out, "audit\tpeople\tevent") || strings.Contains(out, "public") {
+			t.Fatalf("qualified filter wrong; out=%q", out)
+		}
+	})
+	t.Run("matching is case-insensitive", func(t *testing.T) {
+		seedCatalogueCache(t)
+		cfg := testConfig(t)
+		code, out, errb := run(t, "schema", "--host", "testpg", "--config", cfg, "ORDERS")
+		if code != 0 {
+			t.Fatalf("code=%d err=%q", code, errb)
+		}
+		if !strings.Contains(out, "public\torders\tid") {
+			t.Fatalf("case-insensitive match failed; out=%q", out)
+		}
+	})
+}
+
+func TestSchemaUnknownTable(t *testing.T) {
+	seedCatalogueCache(t)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, _, errb := run(t, "schema", "--host", "testpg", "--config", cfg, "nonexistent")
+	if code != 3 {
+		t.Fatalf("unknown table must exit 3, got %d (err=%q)", code, errb)
+	}
+	if !strings.Contains(errb, "nonexistent") || !strings.Contains(errb, "--refresh-schema") {
+		t.Fatalf("err must name the table and hint at --refresh-schema; err=%q", errb)
+	}
+}
+
+func TestSchemaTablesAndNameExclusive(t *testing.T) {
+	seedCatalogueCache(t)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, _, errb := run(t, "schema", "--host", "testpg", "--config", cfg, "--tables", "people")
+	if code != 1 || !strings.Contains(errb, "mutually exclusive") {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+}
+
+func TestSchemaBuildsCacheOnMiss(t *testing.T) {
+	isolateCache(t)
+	calls := callsFile(t)
+	splitPsql(t, `exit 1`) // only the introspection branch may run
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "schema", "--host", "testpg", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if calls() != "introspect\n" {
+		t.Fatalf("expected exactly one introspection call, got %q", calls())
+	}
+	if !strings.Contains(out, "public\tpeople\tid") {
+		t.Fatalf("out = %q", out)
+	}
+	if !schema.Exists(schema.CachePath("localhost", "testdb")) {
+		t.Fatal("cache file must exist after the silent build")
+	}
+}
+
+func TestSchemaRefreshForcesRebuild(t *testing.T) {
+	seedSchemaCache(t) // stale cache present: without --refresh-schema it would be printed as-is
+	calls := callsFile(t)
+	splitPsql(t, `exit 1`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "schema", "--host", "testpg", "--config", cfg, "--refresh-schema")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if calls() != "introspect\n" {
+		t.Fatalf("expected a rebuild introspection call, got %q", calls())
+	}
+	if !strings.Contains(out, "people") || strings.Contains(out, "seeded") {
+		t.Fatalf("out must show the rebuilt catalogue, not the stale cache; out=%q", out)
+	}
+}
+
+// TestSchemaShorthands drives the schema command entirely through
+// single-letter aliases: the common ones from addCommon (-H, -c, -o) and
+// -T as shorthand for --tables.
+func TestSchemaShorthands(t *testing.T) {
+	seedCatalogueCache(t)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "schema", "-H", "testpg", "-c", cfg, "-T")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if out != "table\npublic.people\npublic.orders\naudit.people\n" {
+		t.Fatalf("-T must behave as --tables; out = %q", out)
+	}
+	code, _, errb = run(t, "schema", "-H", "testpg", "-c", cfg, "-T", "people")
+	if code != 1 || !strings.Contains(errb, "mutually exclusive") {
+		t.Fatalf("-T with a table name: code=%d err=%q", code, errb)
+	}
+	code, out, errb = run(t, "schema", "-H", "testpg", "-c", cfg, "-o", "json", "orders")
+	if code != 0 || !strings.HasPrefix(strings.TrimSpace(out), "[") {
+		t.Fatalf("-o json on schema: code=%d out=%q err=%q", code, out, errb)
+	}
+}
+
+func TestSchemaInUsage(t *testing.T) {
+	code, out, _ := run(t, "help")
+	if code != 0 || !strings.Contains(out, "db-query schema") {
+		t.Fatalf("usage must document the schema command; out=%q", out)
 	}
 }
 

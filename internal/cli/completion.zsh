@@ -48,6 +48,7 @@ _db-query() {
       commands=(
         'query:run ad-hoc SQL or a saved query'
         'queries:list saved queries'
+        'schema:show the cached schema, a table, or the table list'
         'introspect:list tables and columns, rebuild the schema cache'
         'hosts:list configured hosts'
         'version:print version information'
@@ -60,6 +61,7 @@ _db-query() {
       case $line[1] in
         query)      _dbq_cmd_query ;;
         queries)    _dbq_cmd_queries ;;
+        schema)     _dbq_cmd_schema ;;
         introspect) _dbq_cmd_introspect ;;
         hosts)      _dbq_cmd_hosts ;;
         completion) _dbq_cmd_completion ;;
@@ -91,6 +93,19 @@ _dbq_cmd_queries() {
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
     '(-o --output)'{-o,--output}'[output format]:format:(text json)' \
     '(-C --category)'{-C,--category}'[restrict to one saved-query category]:category:__dbq_categories'
+}
+
+_dbq_cmd_schema() {
+  _arguments \
+    '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
+    '(-d --database)'{-d,--database}'[override the host database]:database:' \
+    '(-c --config)'{-c,--config}'[config file path]:file:_files' \
+    '(-o --output)'{-o,--output}'[output format]:format:(text json)' \
+    '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:' \
+    '--refresh-schema[rebuild the schema cache first]' \
+    '--no-headers[text output: omit the header line]' \
+    '(-T --tables)'{-T,--tables}'[print one schema-qualified table name per line]' \
+    '*:table:_message "table name (bare or schema-qualified) from the cached schema"'
 }
 
 _dbq_cmd_introspect() {
