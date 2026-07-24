@@ -21,7 +21,9 @@ __dbq_complete() {
   local -a values displays ctx
   local name desc
   [[ -n ${opt_args[--config]} ]]   && ctx+=(--config "${opt_args[--config]}")
+  [[ -n ${opt_args[-c]} ]]         && ctx+=(--config "${opt_args[-c]}")
   [[ -n ${opt_args[--category]} ]] && ctx+=(--category "${opt_args[--category]}")
+  [[ -n ${opt_args[-C]} ]]         && ctx+=(--category "${opt_args[-C]}")
   db-query __complete "${ctx[@]}" "$target" 2>/dev/null | while IFS=$'\t' read -r name desc; do
     values+=("$name")
     displays+=("${name}  --  ${desc}")
@@ -70,17 +72,17 @@ _db-query() {
 
 _dbq_cmd_query() {
   _arguments \
-    '--host[host entry from config]:host:__dbq_hosts' \
+    '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
     '(-d --database)'{-d,--database}'[override the host database]:database:' \
-    '--config[config file path]:file:_files' \
-    '--output[output format]:format:(text json)' \
-    '*--param[bind a query parameter, k=v]:param:' \
-    '-f[read SQL from file ("-" for stdin)]:file:_files' \
+    '(-c --config)'{-c,--config}'[config file path]:file:_files' \
+    '(-o --output)'{-o,--output}'[output format]:format:(text json)' \
+    '*'{-p,--param}'[bind a query parameter, k=v]:param:' \
+    '(-f --file)'{-f,--file}'[read SQL from file ("-" for stdin)]:file:_files' \
     '--save[save the query under this name after it succeeds]:name:' \
-    '--source[run a saved query by name]:name:__dbq_sources' \
-    '--category[saved-query category]:category:__dbq_categories' \
+    '(-s --source)'{-s,--source}'[run a saved query by name]:name:__dbq_sources' \
+    '(-C --category)'{-C,--category}'[saved-query category]:category:__dbq_categories' \
     '--force[overwrite an existing saved query]' \
-    '--timeout[per-invocation deadline]:duration:' \
+    '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:' \
     '--refresh-schema[rebuild the schema cache first]' \
     '--no-headers[text output: omit the header line]' \
     '*:SQL:_message "SQL is free-form; no completion"'
@@ -88,38 +90,38 @@ _dbq_cmd_query() {
 
 _dbq_cmd_queries() {
   _arguments \
-    '--config[config file path]:file:_files' \
-    '--output[output format]:format:(text json)' \
-    '--category[restrict to one saved-query category]:category:__dbq_categories'
+    '(-c --config)'{-c,--config}'[config file path]:file:_files' \
+    '(-o --output)'{-o,--output}'[output format]:format:(text json)' \
+    '(-C --category)'{-C,--category}'[restrict to one saved-query category]:category:__dbq_categories'
 }
 
 _dbq_cmd_schema() {
   _arguments \
-    '--host[host entry from config]:host:__dbq_hosts' \
+    '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
     '(-d --database)'{-d,--database}'[override the host database]:database:' \
-    '--config[config file path]:file:_files' \
-    '--output[output format]:format:(text json)' \
-    '--timeout[per-invocation deadline]:duration:' \
+    '(-c --config)'{-c,--config}'[config file path]:file:_files' \
+    '(-o --output)'{-o,--output}'[output format]:format:(text json)' \
+    '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:' \
     '--refresh-schema[rebuild the schema cache first]' \
     '--no-headers[text output: omit the header line]' \
-    '--tables[print one schema-qualified table name per line]' \
+    '(-T --tables)'{-T,--tables}'[print one schema-qualified table name per line]' \
     '*:table:_message "table name (bare or schema-qualified) from the cached schema"'
 }
 
 _dbq_cmd_introspect() {
   _arguments \
-    '--host[host entry from config]:host:__dbq_hosts' \
+    '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
     '(-d --database)'{-d,--database}'[override the host database]:database:' \
-    '--config[config file path]:file:_files' \
-    '--output[output format]:format:(text json)' \
-    '--timeout[per-invocation deadline]:duration:' \
+    '(-c --config)'{-c,--config}'[config file path]:file:_files' \
+    '(-o --output)'{-o,--output}'[output format]:format:(text json)' \
+    '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:' \
     '--refresh-schema[rebuild the schema cache]'
 }
 
 _dbq_cmd_hosts() {
   _arguments \
-    '--config[config file path]:file:_files' \
-    '--output[output format]:format:(text json)'
+    '(-c --config)'{-c,--config}'[config file path]:file:_files' \
+    '(-o --output)'{-o,--output}'[output format]:format:(text json)'
 }
 
 _dbq_cmd_completion() {

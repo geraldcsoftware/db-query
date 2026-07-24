@@ -32,6 +32,10 @@ db-query hosts                                # list configured hosts
   or by name with `--source` (a saved query). Flags may appear before or after the SQL
   argument (`… "SELECT …" --param who=Ada` and `… --param who=Ada "SELECT …"` are equivalent);
   SQL that itself begins with `-` must be passed via `-f` or stdin.
+- Most flags have a single-letter shorthand: `--host (-H)`, `--database (-d)`,
+  `--config (-c)`, `--output (-o)`, `--param (-p)`, `--file (-f)`, `--source (-s)`,
+  `--category (-C)`, `--timeout (-t)`, `--help (-h)`, `--version (-v)`. Deliberate
+  actions (`--save`, `--force`, `--refresh-schema`, `--no-headers`) are long-only.
 - Params bind through the client's own `-v` mechanism: `:'name'` in psql
   SQL, `$(name)` in sqlcmd SQL. Values are never substituted into SQL by
   this tool.

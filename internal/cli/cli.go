@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -33,20 +34,22 @@ Usage:
   db-query completion zsh                           print the zsh completion script (see README to install)
 
 Flags:
-  --host <name>       host entry from the config file
-  -d, --database <db> override the host's configured database (query, schema, introspect)
-  --config <path>     config file (default: $DB_QUERY_CONFIG or ~/.config/db-query/config.toml)
-  --output text|json  output format (default text)
-  --param k=v         bind a query parameter (repeatable); psql: :'k', sqlcmd: $(k)
-  -f <path>           read SQL from file ("-" for stdin)
-  --save <name>       save the query under this name after it runs successfully (query)
-  --source <name>     run a previously saved query by name (query)
-  --category <cat>    saved-query category for --save/--source (default "default")
-  --force             with --save: overwrite an existing query and bypass the duplicate check
-  --timeout <dur>     per-invocation deadline (default 30s)
-  --refresh-schema    rebuild the cached schema first (query, schema, introspect)
-  --no-headers        text output only: omit the header line, tab-separate rows (query, schema)
-  --tables            schema: print one schema-qualified table name per line instead of columns
+  --host (-H) <name>      : host entry from the config file
+  --database (-d) <db>    : override the host's configured database (query, schema, introspect)
+  --config (-c) <path>    : config file (default: $DB_QUERY_CONFIG or ~/.config/db-query/config.toml)
+  --output (-o) text|json : output format (default text)
+  --param (-p) k=v        : bind a query parameter (repeatable); psql: :'k', sqlcmd: $(k)
+  --file (-f) <path>      : read SQL from file ("-" for stdin)
+  --source (-s) <name>    : run a previously saved query by name (query)
+  --save <name>           : save the query under this name after it runs successfully (query)
+  --category (-C) <cat>   : saved-query category for --save/--source (default "default")
+  --force                 : with --save: overwrite an existing query and bypass the duplicate check
+  --timeout (-t) <dur>    : per-invocation deadline (default 30s)
+  --refresh-schema        : rebuild the cached schema first (query, schema, introspect)
+  --no-headers            : text output only: omit the header line, tab-separate rows (query, schema)
+  --tables (-T)           : schema: print one schema-qualified table name per line instead of columns
+  --help (-h)             : show this help (works on any command)
+  --version (-v)          : print version information
 
 Saved queries live under $DB_QUERY_QUERIES_DIR (else $XDG_CONFIG_HOME/db-query/queries,
 else ~/.config/db-query/queries) as <category>/<name>.sql, storing SQL with placeholders
@@ -103,7 +106,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runComplete(args[1:], stdout, stderr)
 	case "completion":
 		return runCompletion(args[1:], stdout, stderr)
-	case "version", "--version":
+	case "version", "-v", "--version":
 		fmt.Fprintln(stdout, versionString())
 		return 0
 	case "help", "-h", "--help":
@@ -123,13 +126,41 @@ type commonFlags struct {
 	database string
 }
 
+// addCommon registers the flags shared by every subcommand. Each long flag
+// and its single-letter shorthand bind the same variable, so either spelling
+// sets the value.
 func addCommon(fs *flag.FlagSet, c *commonFlags) {
 	fs.StringVar(&c.host, "host", "", "host entry from config")
+	fs.StringVar(&c.host, "H", "", "shorthand for --host")
 	fs.StringVar(&c.config, "config", "", "config file path")
+	fs.StringVar(&c.config, "c", "", "shorthand for --config")
 	fs.StringVar(&c.output, "output", "text", "output format: text|json")
+	fs.StringVar(&c.output, "o", "text", "shorthand for --output")
 	fs.DurationVar(&c.timeout, "timeout", 30*time.Second, "per-invocation deadline")
+	fs.DurationVar(&c.timeout, "t", 30*time.Second, "shorthand for --timeout")
 	fs.StringVar(&c.database, "database", "", "override the host's configured database")
-	fs.StringVar(&c.database, "d", "", "override the host's configured database (shorthand)")
+	fs.StringVar(&c.database, "d", "", "shorthand for --database")
+}
+
+// newFlagSet builds a subcommand FlagSet whose parse errors go to stderr.
+// Automatic usage printing is suppressed: a parse error already names the
+// offending flag, and -h/--help is mapped to the full usage text by exitParse.
+func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {}
+	return fs
+}
+
+// exitParse maps a flag-parse failure to its exit code: -h/--help prints the
+// usage text on stdout and exits 0; anything else was already reported on
+// stderr by the FlagSet (exit 1).
+func exitParse(err error, stdout io.Writer) int {
+	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprint(stdout, usage)
+		return 0
+	}
+	return 1
 }
 
 // paramFlags collects repeatable --param k=v values.
@@ -173,32 +204,36 @@ func runQuery(args []string, stdout, stderr io.Writer) int {
 	params := paramFlags{}
 	var sqlFile, saveName, sourceName, category string
 	var refreshSchema, noHeaders, force bool
-	fs := flag.NewFlagSet("query", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newFlagSet("query", stderr)
 	addCommon(fs, &c)
 	fs.Var(params, "param", "bind a query parameter (repeatable)")
-	fs.StringVar(&sqlFile, "f", "", `read SQL from file ("-" for stdin)`)
+	fs.Var(params, "p", "shorthand for --param")
+	fs.StringVar(&sqlFile, "file", "", `read SQL from file ("-" for stdin)`)
+	fs.StringVar(&sqlFile, "f", "", "shorthand for --file")
 	fs.StringVar(&saveName, "save", "", "save the query under this name after it succeeds")
 	fs.StringVar(&sourceName, "source", "", "run a saved query by name")
+	fs.StringVar(&sourceName, "s", "", "shorthand for --source")
 	fs.StringVar(&category, "category", savedquery.DefaultCategory, "saved-query category for --save/--source")
+	fs.StringVar(&category, "C", savedquery.DefaultCategory, "shorthand for --category")
 	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache before running")
 	fs.BoolVar(&noHeaders, "no-headers", false, "text output: omit the header line")
 	fs.BoolVar(&force, "force", false, "with --save: overwrite an existing query and bypass the duplicate check")
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
-		return 1
+		return exitParse(err, stdout)
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	sourceSet := set["source"] || set["s"]
 
 	// Flag-combination usage errors, checked before any secret is resolved.
 	// A saved query is a complete unit: it is either sourced or authored, and
 	// running one is not the moment to author another.
-	if set["source"] && set["save"] {
+	if sourceSet && set["save"] {
 		render.Error(stderr, c.output, "--source and --save are mutually exclusive; pick one")
 		return 1
 	}
-	if set["source"] && (len(positional) > 0 || sqlFile != "") {
+	if sourceSet && (len(positional) > 0 || sqlFile != "") {
 		render.Error(stderr, c.output, "--source runs a saved query; do not also pass SQL (a positional argument or -f)")
 		return 1
 	}
@@ -210,7 +245,7 @@ func runQuery(args []string, stdout, stderr io.Writer) int {
 	// Ad-hoc SQL is read up front; a --source query is loaded after setup so
 	// the resolved host provider is known for the provider guard.
 	var sql string
-	if !set["source"] {
+	if !sourceSet {
 		var err error
 		sql, err = readSQL(positional, sqlFile)
 		if err != nil {
@@ -224,7 +259,7 @@ func runQuery(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	if set["source"] {
+	if sourceSet {
 		sq, err := savedquery.Load(sourceName, category)
 		if err != nil {
 			render.Error(stderr, c.output, sourceUnavailable(sourceName, category))
@@ -284,12 +319,12 @@ func runQuery(args []string, stdout, stderr io.Writer) int {
 func runQueries(args []string, stdout, stderr io.Writer) int {
 	var c commonFlags
 	var category string
-	fs := flag.NewFlagSet("queries", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newFlagSet("queries", stderr)
 	addCommon(fs, &c)
 	fs.StringVar(&category, "category", "", "restrict to one saved-query category")
+	fs.StringVar(&category, "C", "", "shorthand for --category")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return exitParse(err, stdout)
 	}
 	if _, err := render.For(c.output); err != nil {
 		render.Error(stderr, c.output, err.Error())
@@ -386,15 +421,15 @@ func previewSQL(sql string) string {
 func runSchema(args []string, stdout, stderr io.Writer) int {
 	var c commonFlags
 	var tablesOnly, refreshSchema, noHeaders bool
-	fs := flag.NewFlagSet("schema", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newFlagSet("schema", stderr)
 	addCommon(fs, &c)
 	fs.BoolVar(&tablesOnly, "tables", false, "print one schema-qualified table name per line")
+	fs.BoolVar(&tablesOnly, "T", false, "shorthand for --tables")
 	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache first")
 	fs.BoolVar(&noHeaders, "no-headers", false, "text output: omit the header line")
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
-		return 1
+		return exitParse(err, stdout)
 	}
 	if len(positional) > 1 {
 		render.Error(stderr, c.output, fmt.Sprintf("expected at most one table name, got %d", len(positional)))
@@ -527,12 +562,11 @@ func runIntrospect(args []string, stdout, stderr io.Writer) int {
 	// --refresh-schema is accepted for symmetry with query; introspect
 	// always rebuilds the cache regardless, so the flag is a no-op here.
 	var refreshSchema bool
-	fs := flag.NewFlagSet("introspect", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newFlagSet("introspect", stderr)
 	addCommon(fs, &c)
 	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache (introspect always rebuilds)")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return exitParse(err, stdout)
 	}
 
 	r, code := setup(c, stderr)
@@ -555,11 +589,10 @@ func runIntrospect(args []string, stdout, stderr io.Writer) int {
 
 func runHosts(args []string, stdout, stderr io.Writer) int {
 	var c commonFlags
-	fs := flag.NewFlagSet("hosts", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newFlagSet("hosts", stderr)
 	addCommon(fs, &c)
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return exitParse(err, stdout)
 	}
 	cfg, err := loadConfig(c.config)
 	if err != nil {
