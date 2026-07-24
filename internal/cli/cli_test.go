@@ -118,6 +118,97 @@ func TestHelpAndUsage(t *testing.T) {
 	}
 }
 
+// TestUsageListsShorthands pins the help format: each flag with a shorthand
+// is listed as `--long (-x) : description` on one line.
+func TestUsageListsShorthands(t *testing.T) {
+	code, out, _ := run(t, "--help")
+	if code != 0 {
+		t.Fatalf("--help: code=%d", code)
+	}
+	for _, want := range []string{"--host (-H)", "--database (-d)", "--config (-c)", "--output (-o)", "--param (-p)", "--file (-f)", "--source (-s)", "--category (-C)", "--timeout (-t)", "--help (-h)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage missing %q", want)
+		}
+	}
+}
+
+// TestSubcommandHelp pins that -h/--help on any subcommand prints the usage
+// text on stdout and exits 0, instead of the flag package's default dump.
+func TestSubcommandHelp(t *testing.T) {
+	for _, cmd := range []string{"query", "queries", "introspect", "hosts"} {
+		for _, h := range []string{"-h", "--help"} {
+			code, out, _ := run(t, cmd, h)
+			if code != 0 || !strings.Contains(out, "Usage:") {
+				t.Fatalf("%s %s: code=%d out=%q", cmd, h, code, out)
+			}
+		}
+	}
+}
+
+// TestVersionShorthand pins -v as an alias of --version at the top level.
+func TestVersionShorthand(t *testing.T) {
+	code, out, _ := run(t, "-v")
+	if code != 0 || !strings.Contains(out, "db-query") {
+		t.Fatalf("-v: code=%d out=%q", code, out)
+	}
+}
+
+// TestShorthandFlags drives a full query run through the single-letter
+// aliases (-H, -c, -o, -t, -p, --file) and asserts they land exactly where
+// their long forms would.
+func TestShorthandFlags(t *testing.T) {
+	seedSchemaCache(t)
+	capture := t.TempDir()
+	t.Setenv("TMPDIR_CAPTURE", capture)
+	fakePsql(t, `
+cat > "$TMPDIR_CAPTURE/stdin"
+printf '%s\n' "$@" > "$TMPDIR_CAPTURE/argv"
+printf 'id\n1\n'
+`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	sqlFile := writeFile(t, t.TempDir(), "q.sql", "SELECT :'who'", 0o600)
+
+	code, out, errb := run(t, "query", "-H", "testpg", "-c", cfg, "-o", "json", "-t", "10s", "-p", "who=Ada", "--file", sqlFile)
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	var rows []map[string]*string
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("-o json did not produce JSON: %q", out)
+	}
+	stdin, _ := os.ReadFile(filepath.Join(capture, "stdin"))
+	if string(stdin) != "SELECT :'who'" {
+		t.Fatalf("--file SQL over stdin = %q", stdin)
+	}
+	argv, _ := os.ReadFile(filepath.Join(capture, "argv"))
+	if !strings.Contains(string(argv), "who=Ada") {
+		t.Fatalf("-p param missing from client argv: %q", argv)
+	}
+}
+
+// TestShorthandSourceAndCategory pins -s/--source and -C/--category via the
+// usage errors they trigger, which fire before any credential or store work.
+func TestShorthandSourceAndCategory(t *testing.T) {
+	code, _, errb := run(t, "query", "-s", "foo", "--save", "bar")
+	if code != 1 || !strings.Contains(errb, "mutually exclusive") {
+		t.Fatalf("-s with --save: code=%d err=%q", code, errb)
+	}
+	code, _, errb = run(t, "query", "-s", "foo", "SELECT 1")
+	if code != 1 || !strings.Contains(errb, "--source") {
+		t.Fatalf("-s with SQL: code=%d err=%q", code, errb)
+	}
+	t.Setenv("DB_QUERY_QUERIES_DIR", t.TempDir())
+	seedSchemaCache(t)
+	fakePsql(t, `printf 'x\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, _, errb = run(t, "query", "-H", "testpg", "-c", cfg, "-s", "missing", "-C", "reports")
+	if code != 1 || !strings.Contains(errb, `"reports"`) {
+		t.Fatalf("-C category not honoured: code=%d err=%q", code, errb)
+	}
+}
+
 func TestHostsCommand(t *testing.T) {
 	cfg := testConfig(t)
 	code, out, errb := run(t, "hosts", "--config", cfg)
