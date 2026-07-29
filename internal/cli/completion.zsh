@@ -38,16 +38,28 @@ _db-query() {
   local curcontext="$curcontext" state line
   typeset -A opt_args
 
+  # The shared flags are also accepted before the command, so they are offered
+  # at the top level too — which is what makes `db-query --host <TAB>` complete
+  # hosts before a command has been typed. A flag matched here lands in the
+  # same opt_args map the per-command functions write to, so a global --config
+  # is passed through to the dynamic helpers as well.
   _arguments -C \
+    '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
+    '(-d --database)'{-d,--database}'[override the host database]:database:' \
+    '(-c --config)'{-c,--config}'[config file path]:file:_files' \
+    '(-o --output)'{-o,--output}'[output format]:format:(text json)' \
+    '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:' \
     '1: :->command' \
     '*:: :->args' && return
 
   case $state in
     command)
-      local -a commands
+      # Not named `aliases`: that is a zsh special parameter (the alias table),
+      # and shadowing it with a plain array is an assignment-type error.
+      local -a commands shorthands
       commands=(
         'query:run ad-hoc SQL or a saved query'
-        'queries:list saved queries'
+        'list:list saved queries'
         'schema:show the cached schema, a table, or the table list'
         'introspect:list tables and columns, rebuild the schema cache'
         'hosts:list configured hosts'
@@ -55,16 +67,25 @@ _db-query() {
         'completion:print the zsh completion script'
         'help:show usage'
       )
+      # Shorthands are their own group so they never crowd out the full names.
+      shorthands=(
+        'q:shorthand for query'
+        's:shorthand for schema'
+        'i:shorthand for introspect'
+        'ls:shorthand for list'
+        'l:shorthand for list'
+      )
       _describe -t commands 'db-query command' commands
+      _describe -t shorthands 'db-query shorthand' shorthands
       ;;
     args)
       case $line[1] in
-        query)      _dbq_cmd_query ;;
-        queries)    _dbq_cmd_queries ;;
-        schema)     _dbq_cmd_schema ;;
-        introspect) _dbq_cmd_introspect ;;
-        hosts)      _dbq_cmd_hosts ;;
-        completion) _dbq_cmd_completion ;;
+        query|q)      _dbq_cmd_query ;;
+        list|ls|l)    _dbq_cmd_list ;;
+        schema|s)     _dbq_cmd_schema ;;
+        introspect|i) _dbq_cmd_introspect ;;
+        hosts)        _dbq_cmd_hosts ;;
+        completion)   _dbq_cmd_completion ;;
       esac
       ;;
   esac
@@ -88,7 +109,7 @@ _dbq_cmd_query() {
     '*:SQL:_message "SQL is free-form; no completion"'
 }
 
-_dbq_cmd_queries() {
+_dbq_cmd_list() {
   _arguments \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
     '(-o --output)'{-o,--output}'[output format]:format:(text json)' \

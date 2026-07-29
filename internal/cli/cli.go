@@ -25,13 +25,16 @@ import (
 const usage = `db-query — run SQL against configured hosts via native clients
 
 Usage:
-  db-query query      --host <name> [flags] [SQL]   run ad-hoc SQL (positional, -f file, stdin) or a saved query
-  db-query queries    [flags]                       list saved queries
-  db-query schema     --host <name> [flags] [table] show the cached schema; a table name restricts to that table
-  db-query introspect --host <name> [flags]         list tables and columns, rebuild the schema cache
-  db-query hosts      [flags]                       list configured hosts
-  db-query version                                  print version information
-  db-query completion zsh                           print the zsh completion script (see README to install)
+  db-query [shared flags] <command> [flags] [args]
+
+Commands:
+  query      (q)     --host <name> [flags] [SQL]   run ad-hoc SQL (positional, -f file, stdin) or a saved query
+  list       (ls, l) [flags]                       list saved queries
+  schema     (s)     --host <name> [flags] [table] show the cached schema; a table name restricts to that table
+  introspect (i)     --host <name> [flags]         list tables and columns, rebuild the schema cache
+  hosts              [flags]                       list configured hosts
+  version                                          print version information
+  completion zsh                                   print the zsh completion script (see README to install)
 
 Flags:
   --host (-H) <name>      : host entry from the config file
@@ -50,6 +53,26 @@ Flags:
   --tables (-T)           : schema: print one schema-qualified table name per line instead of columns
   --help (-h)             : show this help (works on any command)
   --version (-v)          : print version information
+
+The shared flags (--host, --database, --config, --output, --timeout) may also be
+given before the command, which keeps the part that changes between runs at the
+end of the line — so the previous command can be edited instead of retyped:
+
+  db-query --host test --database testdb schema
+  db-query --host test --database testdb query "select * from todos;"
+
+The same flag given after the command wins over one given before it. Only these
+five are accepted before the command; a command's own flags belong after it.
+
+Environment:
+  DB_QUERY_HOST        default for --host
+  DB_QUERY_DATABASE    default for --database
+  DB_QUERY_CONFIG      default config file path
+  DB_QUERY_QUERIES_DIR saved-query store directory
+
+A flag beats the environment, and the environment beats the config file, so an
+exported DB_QUERY_HOST/DB_QUERY_DATABASE pair makes every command in that shell
+short while a one-off --host still overrides it.
 
 Saved queries live under $DB_QUERY_QUERIES_DIR (else $XDG_CONFIG_HOME/db-query/queries,
 else ~/.config/db-query/queries) as <category>/<name>.sql, storing SQL with placeholders
@@ -82,6 +105,27 @@ func versionString() string {
 	return fmt.Sprintf("db-query %s (commit %s, built %s)", buildInfo.Version, buildInfo.Commit, buildInfo.Date)
 }
 
+// commandAliases maps each shorthand to the command it stands for. The set is
+// an explicit map rather than a prefix match: a prefix would make `l` ambiguous
+// the moment a second l-command lands, and a new command could silently steal
+// an established shorthand.
+var commandAliases = map[string]string{
+	"q":  "query",
+	"s":  "schema",
+	"i":  "introspect",
+	"ls": "list",
+	"l":  "list",
+}
+
+// canonicalCommand resolves a command alias to the full command name, leaving
+// anything else untouched so an unknown command is still reported as typed.
+func canonicalCommand(name string) string {
+	if full, ok := commandAliases[name]; ok {
+		return full
+	}
+	return name
+}
+
 // Exit codes: 0 success; 1 config/usage/credential error; 2 client binary
 // failed to start; 3 schema error (unknown table/column) — the
 // reintrospect-worthy signal; 4 other SQL error (client ran, exited
@@ -91,29 +135,55 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return 1
 	}
-	switch args[0] {
-	case "query":
-		return runQuery(args[1:], stdout, stderr)
-	case "queries":
-		return runQueries(args[1:], stdout, stderr)
-	case "schema":
-		return runSchema(args[1:], stdout, stderr)
-	case "introspect":
-		return runIntrospect(args[1:], stdout, stderr)
-	case "hosts":
-		return runHosts(args[1:], stdout, stderr)
-	case "__complete":
-		return runComplete(args[1:], stdout, stderr)
-	case "completion":
-		return runCompletion(args[1:], stdout, stderr)
-	case "version", "-v", "--version":
+	// The shared flags are parsed off the front of the command line before the
+	// command is chosen. Go's flag package stops at the first non-flag token,
+	// which is exactly the command name, so `--host h schema --tables` leaves
+	// ["schema", "--tables"] for the subcommand. Only the shared flags are
+	// registered here: a subcommand's own flag before the command is still an
+	// error, rather than quietly becoming global for every command.
+	var globals commonFlags
+	var showVersion bool
+	fs := newFlagSet("db-query", stderr)
+	addCommon(fs, &globals, envDefaults())
+	fs.BoolVar(&showVersion, "version", false, "print version information")
+	fs.BoolVar(&showVersion, "v", false, "shorthand for --version")
+	if err := fs.Parse(args); err != nil {
+		return exitParse(err, stdout)
+	}
+	if showVersion {
 		fmt.Fprintln(stdout, versionString())
 		return 0
-	case "help", "-h", "--help":
+	}
+	rest := fs.Args()
+	if len(rest) == 0 {
+		// Shared flags but no command: nothing to run.
+		fmt.Fprint(stderr, usage)
+		return 1
+	}
+	cmdArgs := rest[1:]
+	switch canonicalCommand(rest[0]) {
+	case "query":
+		return runQuery(cmdArgs, globals, stdout, stderr)
+	case "list":
+		return runList(cmdArgs, globals, stdout, stderr)
+	case "schema":
+		return runSchema(cmdArgs, globals, stdout, stderr)
+	case "introspect":
+		return runIntrospect(cmdArgs, globals, stdout, stderr)
+	case "hosts":
+		return runHosts(cmdArgs, globals, stdout, stderr)
+	case "__complete":
+		return runComplete(cmdArgs, stdout, stderr)
+	case "completion":
+		return runCompletion(cmdArgs, stdout, stderr)
+	case "version":
+		fmt.Fprintln(stdout, versionString())
+		return 0
+	case "help":
 		fmt.Fprint(stdout, usage)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "db-query: unknown command %q\n\n%s", args[0], usage)
+		fmt.Fprintf(stderr, "db-query: unknown command %q\n\n%s", rest[0], usage)
 		return 1
 	}
 }
@@ -126,20 +196,40 @@ type commonFlags struct {
 	database string
 }
 
+const (
+	defaultOutput  = "text"
+	defaultTimeout = 30 * time.Second
+)
+
+// envDefaults seeds the shared flags from the environment: DB_QUERY_HOST and
+// DB_QUERY_DATABASE stand in for --host/--database, so one export makes every
+// later command in that shell short. --config is left empty because
+// DB_QUERY_CONFIG is already read further down, by config.DefaultPath.
+func envDefaults() commonFlags {
+	return commonFlags{
+		host:     os.Getenv("DB_QUERY_HOST"),
+		database: os.Getenv("DB_QUERY_DATABASE"),
+		output:   defaultOutput,
+		timeout:  defaultTimeout,
+	}
+}
+
 // addCommon registers the flags shared by every subcommand. Each long flag
 // and its single-letter shorthand bind the same variable, so either spelling
-// sets the value.
-func addCommon(fs *flag.FlagSet, c *commonFlags) {
-	fs.StringVar(&c.host, "host", "", "host entry from config")
-	fs.StringVar(&c.host, "H", "", "shorthand for --host")
-	fs.StringVar(&c.config, "config", "", "config file path")
-	fs.StringVar(&c.config, "c", "", "shorthand for --config")
-	fs.StringVar(&c.output, "output", "text", "output format: text|json")
-	fs.StringVar(&c.output, "o", "text", "shorthand for --output")
-	fs.DurationVar(&c.timeout, "timeout", 30*time.Second, "per-invocation deadline")
-	fs.DurationVar(&c.timeout, "t", 30*time.Second, "shorthand for --timeout")
-	fs.StringVar(&c.database, "database", "", "override the host's configured database")
-	fs.StringVar(&c.database, "d", "", "shorthand for --database")
+// sets the value. def supplies every default, which is how a value given
+// before the command — or in the environment — is inherited: the subcommand's
+// own spelling overrides it only when actually given.
+func addCommon(fs *flag.FlagSet, c *commonFlags, def commonFlags) {
+	fs.StringVar(&c.host, "host", def.host, "host entry from config")
+	fs.StringVar(&c.host, "H", def.host, "shorthand for --host")
+	fs.StringVar(&c.config, "config", def.config, "config file path")
+	fs.StringVar(&c.config, "c", def.config, "shorthand for --config")
+	fs.StringVar(&c.output, "output", def.output, "output format: text|json")
+	fs.StringVar(&c.output, "o", def.output, "shorthand for --output")
+	fs.DurationVar(&c.timeout, "timeout", def.timeout, "per-invocation deadline")
+	fs.DurationVar(&c.timeout, "t", def.timeout, "shorthand for --timeout")
+	fs.StringVar(&c.database, "database", def.database, "override the host's configured database")
+	fs.StringVar(&c.database, "d", def.database, "shorthand for --database")
 }
 
 // newFlagSet builds a subcommand FlagSet whose parse errors go to stderr.
@@ -199,13 +289,13 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-func runQuery(args []string, stdout, stderr io.Writer) int {
+func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int {
 	var c commonFlags
 	params := paramFlags{}
 	var sqlFile, saveName, sourceName, category string
 	var refreshSchema, noHeaders, force bool
 	fs := newFlagSet("query", stderr)
-	addCommon(fs, &c)
+	addCommon(fs, &c, globals)
 	fs.Var(params, "param", "bind a query parameter (repeatable)")
 	fs.Var(params, "p", "shorthand for --param")
 	fs.StringVar(&sqlFile, "file", "", `read SQL from file ("-" for stdin)`)
@@ -312,15 +402,15 @@ func runQuery(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runQueries lists the saved queries in the store, optionally restricted to
+// runList lists the saved queries in the store, optionally restricted to
 // one --category. text prints a table (category, name, provider, short hash,
 // SQL preview) through the shared render pivot; json emits the full records
 // (category, name, provider, sqlhash, sql) so a caller can match against them.
-func runQueries(args []string, stdout, stderr io.Writer) int {
+func runList(args []string, globals commonFlags, stdout, stderr io.Writer) int {
 	var c commonFlags
 	var category string
-	fs := newFlagSet("queries", stderr)
-	addCommon(fs, &c)
+	fs := newFlagSet("list", stderr)
+	addCommon(fs, &c, globals)
 	fs.StringVar(&category, "category", "", "restrict to one saved-query category")
 	fs.StringVar(&category, "C", "", "shorthand for --category")
 	if err := fs.Parse(args); err != nil {
@@ -336,7 +426,7 @@ func runQueries(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if c.output == "json" {
-		return renderQueriesJSON(list, c.output, stdout, stderr)
+		return renderListJSON(list, c.output, stdout, stderr)
 	}
 	rows := adapter.Rows{Columns: []string{"category", "name", "provider", "hash", "sql"}}
 	for _, q := range list {
@@ -348,7 +438,7 @@ func runQueries(args []string, stdout, stderr io.Writer) int {
 	return renderRows(rows, c.output, false, stdout, stderr)
 }
 
-// queryListing is the JSON shape of one saved query in the queries command:
+// queryListing is the JSON shape of one saved query in the list command:
 // exactly the fields a caller needs to match a request against the store.
 type queryListing struct {
 	Category string `json:"category"`
@@ -358,9 +448,9 @@ type queryListing struct {
 	SQL      string `json:"sql"`
 }
 
-// renderQueriesJSON emits the listing as a JSON array (empty as []), honouring
+// renderListJSON emits the listing as a JSON array (empty as []), honouring
 // --output on the error path.
-func renderQueriesJSON(list []savedquery.SavedQuery, output string, stdout, stderr io.Writer) int {
+func renderListJSON(list []savedquery.SavedQuery, output string, stdout, stderr io.Writer) int {
 	out := make([]queryListing, len(list))
 	for i, q := range list {
 		out[i] = queryListing{Category: q.Category, Name: q.Name, Provider: q.Provider, SQLHash: q.SQLHash, SQL: q.SQL}
@@ -418,11 +508,11 @@ func previewSQL(sql string) string {
 // introspect: cache-first, silently building the cache when absent (like
 // the query path) and hitting the live database only then or under
 // --refresh-schema.
-func runSchema(args []string, stdout, stderr io.Writer) int {
+func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) int {
 	var c commonFlags
 	var tablesOnly, refreshSchema, noHeaders bool
 	fs := newFlagSet("schema", stderr)
-	addCommon(fs, &c)
+	addCommon(fs, &c, globals)
 	fs.BoolVar(&tablesOnly, "tables", false, "print one schema-qualified table name per line")
 	fs.BoolVar(&tablesOnly, "T", false, "shorthand for --tables")
 	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache first")
@@ -557,13 +647,13 @@ func filterTable(rows adapter.Rows, name string) (adapter.Rows, bool, error) {
 	return out, len(out.Rows) > 0, nil
 }
 
-func runIntrospect(args []string, stdout, stderr io.Writer) int {
+func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer) int {
 	var c commonFlags
 	// --refresh-schema is accepted for symmetry with query; introspect
 	// always rebuilds the cache regardless, so the flag is a no-op here.
 	var refreshSchema bool
 	fs := newFlagSet("introspect", stderr)
-	addCommon(fs, &c)
+	addCommon(fs, &c, globals)
 	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache (introspect always rebuilds)")
 	if err := fs.Parse(args); err != nil {
 		return exitParse(err, stdout)
@@ -587,10 +677,10 @@ func runIntrospect(args []string, stdout, stderr io.Writer) int {
 	return renderRows(rows, c.output, false, stdout, stderr)
 }
 
-func runHosts(args []string, stdout, stderr io.Writer) int {
+func runHosts(args []string, globals commonFlags, stdout, stderr io.Writer) int {
 	var c commonFlags
 	fs := newFlagSet("hosts", stderr)
-	addCommon(fs, &c)
+	addCommon(fs, &c, globals)
 	if err := fs.Parse(args); err != nil {
 		return exitParse(err, stdout)
 	}
@@ -668,7 +758,7 @@ func setup(c commonFlags, stderr io.Writer) (resolved, int) {
 		return resolved{}, 1
 	}
 	if c.host == "" {
-		render.Error(stderr, c.output, "--host is required")
+		render.Error(stderr, c.output, "--host is required (pass --host/-H before or after the command, or export DB_QUERY_HOST)")
 		return resolved{}, 1
 	}
 	cfg, err := loadConfig(c.config)
