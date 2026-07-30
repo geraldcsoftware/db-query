@@ -104,6 +104,17 @@ func run(t *testing.T, args ...string) (int, string, string) {
 	return code, out.String(), errb.String()
 }
 
+// TestMain clears the environment defaults the CLI reads, so a developer who
+// has DB_QUERY_HOST/DB_QUERY_DATABASE/DB_QUERY_CONFIG exported in their own
+// shell does not change what the tests see. The tests that exercise the
+// environment path set these explicitly with t.Setenv.
+func TestMain(m *testing.M) {
+	for _, k := range []string{"DB_QUERY_HOST", "DB_QUERY_DATABASE", "DB_QUERY_CONFIG"} {
+		os.Unsetenv(k)
+	}
+	os.Exit(m.Run())
+}
+
 func TestHelpAndUsage(t *testing.T) {
 	code, out, _ := run(t, "help")
 	if code != 0 || !strings.Contains(out, "db-query") {
@@ -135,7 +146,7 @@ func TestUsageListsShorthands(t *testing.T) {
 // TestSubcommandHelp pins that -h/--help on any subcommand prints the usage
 // text on stdout and exits 0, instead of the flag package's default dump.
 func TestSubcommandHelp(t *testing.T) {
-	for _, cmd := range []string{"query", "queries", "schema", "introspect", "hosts"} {
+	for _, cmd := range []string{"query", "list", "schema", "introspect", "hosts"} {
 		for _, h := range []string{"-h", "--help"} {
 			code, out, _ := run(t, cmd, h)
 			if code != 0 || !strings.Contains(out, "Usage:") {
@@ -150,6 +161,171 @@ func TestVersionShorthand(t *testing.T) {
 	code, out, _ := run(t, "-v")
 	if code != 0 || !strings.Contains(out, "db-query") {
 		t.Fatalf("-v: code=%d out=%q", code, out)
+	}
+}
+
+// TestUsageDocumentsCommandsAndEnvironment pins that the help text carries the
+// two discovery surfaces a terminal user has nowhere else to learn: the command
+// shorthands and the environment defaults.
+func TestUsageDocumentsCommandsAndEnvironment(t *testing.T) {
+	code, out, _ := run(t, "--help")
+	if code != 0 {
+		t.Fatalf("--help: code=%d", code)
+	}
+	for _, want := range []string{"query      (q)", "list       (ls, l)", "schema     (s)", "introspect (i)", "DB_QUERY_HOST", "DB_QUERY_DATABASE"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage missing %q", want)
+		}
+	}
+}
+
+// TestCommandAliases pins each shorthand to its command. Dispatch is asserted
+// through a response only that command produces, so a shorthand landing on the
+// wrong command (or on the unknown-command path) fails.
+func TestCommandAliases(t *testing.T) {
+	isolateStore(t)
+	if _, err := savedquery.Save("alpha", "reports", "postgres", "SELECT 1 FROM t", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, alias := range []string{"ls", "l"} {
+		code, out, errb := run(t, alias, "--output", "json")
+		if code != 0 {
+			t.Fatalf("%s: code=%d err=%q", alias, code, errb)
+		}
+		var list []map[string]any
+		if err := json.Unmarshal([]byte(out), &list); err != nil || len(list) != 1 {
+			t.Fatalf("%s did not list the store: out=%q err=%v", alias, out, err)
+		}
+	}
+	// query/schema/introspect all require a host: the host error proves the
+	// shorthand reached the command, while "unknown command" would not. `q` is
+	// given SQL because the query path reads its SQL before resolving a host.
+	for _, args := range [][]string{{"q", "SELECT 1"}, {"s"}, {"i"}} {
+		code, _, errb := run(t, args...)
+		if code != 1 || !strings.Contains(errb, "--host is required") {
+			t.Fatalf("%v: code=%d err=%q", args, code, errb)
+		}
+	}
+	// -T belongs to schema alone, so accepting it pins `s` to schema rather
+	// than to another host-requiring command.
+	if code, _, errb := run(t, "s", "-T"); code != 1 || !strings.Contains(errb, "--host is required") {
+		t.Fatalf("s -T: code=%d err=%q", code, errb)
+	}
+	// The rename is complete: the old name is not a hidden alias.
+	if code, _, errb := run(t, "queries"); code != 1 || !strings.Contains(errb, "unknown command") {
+		t.Fatalf("queries must be gone: code=%d err=%q", code, errb)
+	}
+}
+
+// TestSharedFlagsBeforeCommand pins the position-free spelling of the shared
+// flags: given before the command they reach the run exactly as they would
+// after it, which is what lets the previous command be edited rather than
+// retyped.
+func TestSharedFlagsBeforeCommand(t *testing.T) {
+	isolateCache(t)
+	// The cache is keyed on host+database, so seed the overridden database:
+	// a global --database that failed to land would trigger a schema build
+	// against testdb instead and the assertion below would catch it.
+	if err := schema.Write(schema.CachePath("localhost", "otherdb"), adapter.Rows{Columns: []string{"seeded"}}); err != nil {
+		t.Fatal(err)
+	}
+	capture := t.TempDir()
+	t.Setenv("TMPDIR_CAPTURE", capture)
+	fakePsql(t, `env > "$TMPDIR_CAPTURE/env"; printf 'ok\n1\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+
+	code, out, errb := run(t, "--host", "testpg", "--database", "otherdb", "--config", cfg, "query", "SELECT 1")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if !strings.Contains(out, "ok") {
+		t.Fatalf("out = %q", out)
+	}
+	env, _ := os.ReadFile(filepath.Join(capture, "env"))
+	if !strings.Contains(string(env), "PGDATABASE=otherdb") {
+		t.Fatalf("a global --database must reach the client; env=%q", env)
+	}
+	// Shorthands work in the same position, and so does a command flag after
+	// the globals.
+	code, _, errb = run(t, "-H", "testpg", "-d", "otherdb", "-c", cfg, "query", "--no-headers", "SELECT 1")
+	if code != 0 {
+		t.Fatalf("shorthand globals: code=%d err=%q", code, errb)
+	}
+	// A command's own flag is not accepted before the command: it would
+	// otherwise become global for every command.
+	if code, _, errb := run(t, "--tables", "schema"); code != 1 || !strings.Contains(errb, "not defined") {
+		t.Fatalf("subcommand flag before command: code=%d err=%q", code, errb)
+	}
+	// Globals with no command name run nothing.
+	if code, _, errb := run(t, "-H", "testpg"); code != 1 || !strings.Contains(errb, "Usage:") {
+		t.Fatalf("globals with no command: code=%d err=%q", code, errb)
+	}
+}
+
+// TestCommandFlagBeatsGlobal pins the precedence between the two positions:
+// the same flag after the command wins, in both directions.
+func TestCommandFlagBeatsGlobal(t *testing.T) {
+	seedSchemaCache(t)
+	fakePsql(t, `printf 'ok\n1\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+
+	if code, _, errb := run(t, "--host", "nope", "--config", cfg, "query", "--host", "testpg", "SELECT 1"); code != 0 {
+		t.Fatalf("command --host must win over the global one: code=%d err=%q", code, errb)
+	}
+	if code, _, errb := run(t, "--host", "testpg", "--config", cfg, "query", "--host", "nope", "SELECT 1"); code != 1 || !strings.Contains(errb, "unknown host") {
+		t.Fatalf("command --host must win even when it is the bad one: code=%d err=%q", code, errb)
+	}
+}
+
+// TestEnvironmentDefaults pins DB_QUERY_HOST/DB_QUERY_DATABASE as defaults for
+// --host/--database, and that either flag position still overrides them.
+func TestEnvironmentDefaults(t *testing.T) {
+	isolateCache(t)
+	for _, db := range []string{"envdb", "flagdb"} {
+		if err := schema.Write(schema.CachePath("localhost", db), adapter.Rows{Columns: []string{"seeded"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	capture := t.TempDir()
+	t.Setenv("TMPDIR_CAPTURE", capture)
+	fakePsql(t, `env > "$TMPDIR_CAPTURE/env"; printf 'ok\n1\n'`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	t.Setenv("DB_QUERY_CONFIG", cfg) // so no --config is needed either
+	t.Setenv("DB_QUERY_HOST", "testpg")
+	t.Setenv("DB_QUERY_DATABASE", "envdb")
+
+	code, out, errb := run(t, "query", "SELECT 1")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if !strings.Contains(out, "ok") {
+		t.Fatalf("out = %q", out)
+	}
+	env, _ := os.ReadFile(filepath.Join(capture, "env"))
+	if !strings.Contains(string(env), "PGDATABASE=envdb") {
+		t.Fatalf("DB_QUERY_DATABASE must supply the database; env=%q", env)
+	}
+
+	// A flag beats the environment, before or after the command.
+	for _, args := range [][]string{
+		{"query", "--database", "flagdb", "SELECT 1"},
+		{"--database", "flagdb", "query", "SELECT 1"},
+	} {
+		if code, _, errb := run(t, args...); code != 0 {
+			t.Fatalf("%v: code=%d err=%q", args, code, errb)
+		}
+		env, _ := os.ReadFile(filepath.Join(capture, "env"))
+		if !strings.Contains(string(env), "PGDATABASE=flagdb") {
+			t.Fatalf("%v: --database must beat DB_QUERY_DATABASE; env=%q", args, env)
+		}
+	}
+	// An unknown host in the environment fails like an unknown host anywhere.
+	t.Setenv("DB_QUERY_HOST", "nope")
+	if code, _, errb := run(t, "query", "SELECT 1"); code != 1 || !strings.Contains(errb, "unknown host") {
+		t.Fatalf("bad DB_QUERY_HOST: code=%d err=%q", code, errb)
 	}
 }
 
@@ -869,9 +1045,9 @@ func TestQuerySourceSaveExclusive(t *testing.T) {
 	}
 }
 
-// TestQueriesSubcommand pins the queries listing in both formats and the
+// TestListSubcommand pins the saved-query listing in both formats and the
 // category filter.
-func TestQueriesSubcommand(t *testing.T) {
+func TestListSubcommand(t *testing.T) {
 	isolateStore(t)
 	if _, err := savedquery.Save("alpha", "reports", "postgres", "SELECT 1 FROM t", false); err != nil {
 		t.Fatal(err)
@@ -880,7 +1056,7 @@ func TestQueriesSubcommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, out, errb := run(t, "queries")
+	code, out, errb := run(t, "list")
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb)
 	}
@@ -890,7 +1066,7 @@ func TestQueriesSubcommand(t *testing.T) {
 		}
 	}
 
-	code, out, errb = run(t, "queries", "--output", "json")
+	code, out, errb = run(t, "list", "--output", "json")
 	if code != 0 {
 		t.Fatalf("json code=%d err=%q", code, errb)
 	}
@@ -908,7 +1084,7 @@ func TestQueriesSubcommand(t *testing.T) {
 		t.Fatalf("json must carry the full hash, got %v", list[0])
 	}
 
-	code, out, _ = run(t, "queries", "--category", "people", "--output", "json")
+	code, out, _ = run(t, "list", "--category", "people", "--output", "json")
 	if code != 0 {
 		t.Fatalf("filtered code=%d", code)
 	}
@@ -921,11 +1097,11 @@ func TestQueriesSubcommand(t *testing.T) {
 	}
 }
 
-// TestQueriesEmptyStoreJSON pins that an empty store renders as a JSON array,
+// TestListEmptyStoreJSON pins that an empty store renders as a JSON array,
 // not null, so a consuming agent can always range over it.
-func TestQueriesEmptyStoreJSON(t *testing.T) {
+func TestListEmptyStoreJSON(t *testing.T) {
 	isolateStore(t)
-	code, out, errb := run(t, "queries", "--output", "json")
+	code, out, errb := run(t, "list", "--output", "json")
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb)
 	}
@@ -1117,7 +1293,7 @@ func TestSchemaShorthands(t *testing.T) {
 
 func TestSchemaInUsage(t *testing.T) {
 	code, out, _ := run(t, "help")
-	if code != 0 || !strings.Contains(out, "db-query schema") {
+	if code != 0 || !strings.Contains(out, "show the cached schema") {
 		t.Fatalf("usage must document the schema command; out=%q", out)
 	}
 }

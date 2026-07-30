@@ -425,7 +425,7 @@ Open decision §10.1 (saved-query key strategy) is resolved as follows:
   `--category <cat>`, default category `default`). Names and categories are
   sanitised to safe path segments; an empty name and any segment containing
   `/` or `..` are rejected, so a stored query can never escape the store. An
-  agent **matches** an intent against the existing set (`db-query queries`,
+  agent **matches** an intent against the existing set (`db-query list`,
   which emits `{category, name, provider, sqlhash, sql}` in JSON) rather than
   free-generating SQL.
 - **Global normalised-hash dedup.** Save computes a canonical hash — comments
@@ -458,3 +458,34 @@ refused), `bws:` refused (chicken-and-egg), and it falls back to
 `BWS_ACCESS_TOKEN` when unset. This is the first instance of per-resolver
 backend config; the token itself gets the same lazy, pointer-based treatment
 as every other credential.
+
+### 13.7 Terminal ergonomics: flag position, environment defaults, shorthands
+
+Manual use is dominated by one loop: look at the schema, then run the query it
+informs, against the same host and database. Three changes make that loop cheap
+to retype — or rather, cheap to *not* retype — without adding a mode or a
+stateful "current connection":
+
+- **Shared flags before the command.** `--host`, `--database`, `--config`,
+  `--output` and `--timeout` may precede the command (`db-query --host test
+  --database testdb schema`), which keeps the varying tail at the end of the
+  line so shell history can be edited instead of retyped. Implementation is a
+  pre-pass `FlagSet` registering only the shared flags: Go's flag package stops
+  at the first non-flag token, which *is* the command name. The parsed values
+  become the subcommand's flag **defaults**, so the same flag after the command
+  overrides one before it for free. Only those five are accepted there — a
+  command's own flag before the command stays an error, so `--save` never
+  becomes global for every command.
+- **`DB_QUERY_HOST` / `DB_QUERY_DATABASE`.** The same two values as environment
+  defaults, for a shell pinned to one database. Named for the existing
+  `DB_QUERY_*` family (`DB_QUERY_CONFIG`, `DB_QUERY_QUERIES_DIR`) rather than a
+  second, shorter convention. Precedence: flag → environment → config file,
+  which is the §3 "explicit wins, the ambient fills gaps" rule one layer out.
+- **Command shorthands.** `q`/`s`/`i`/`ls`/`l` for query/schema/introspect/list,
+  as an explicit alias map — not prefix matching, which would make `l`
+  ambiguous the moment a second l-command lands and lets a new command silently
+  steal an established shorthand. `queries` was renamed `list` in the same pass
+  (no back-compat alias; the unknown-command path prints the usage).
+
+`hosts` deliberately has no shorthand: `h` reads as help, which `-h`/`--help`
+already owns.

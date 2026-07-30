@@ -20,7 +20,7 @@ db-query query      --host reporting --output json -f report.sql
 db-query query      --host prod-core --save people-by-name --category reports \
                     "SELECT id, name FROM people WHERE name = :'who'" --param who=Ada
 db-query query      --host prod-core --source people-by-name --category reports --param who=Ada
-db-query queries    --category reports        # list saved queries
+db-query list       --category reports        # list saved queries
 db-query schema     --host prod-core          # show the cached schema (tables + columns)
 db-query schema     --host prod-core people   # one table's columns (bare or schema-qualified name)
 db-query schema     --host prod-core --tables # one schema-qualified table name per line
@@ -36,6 +36,42 @@ db-query hosts                                # list configured hosts
   `--config (-c)`, `--output (-o)`, `--param (-p)`, `--file (-f)`, `--source (-s)`,
   `--category (-C)`, `--timeout (-t)`, `--help (-h)`, `--version (-v)`. Deliberate
   actions (`--save`, `--force`, `--refresh-schema`, `--no-headers`) are long-only.
+- Commands have shorthands too: `query (q)`, `schema (s)`, `introspect (i)`,
+  `list (ls, l)`.
+
+### Shared flags before the command
+
+The five shared flags — `--host`, `--database`, `--config`, `--output`,
+`--timeout` — may also be given **before** the command. Typical use is a
+schema lookup followed by the query it informs: with the connection up front,
+the part that changes stays at the end of the line, so the previous command
+can be edited rather than retyped.
+
+```sh
+db-query --host test --database testdb schema --tables
+db-query --host test --database testdb query "SELECT * FROM todos;"
+```
+
+The same flag given after the command wins over one given before it
+(`--host a query --host b` runs against `b`). Only those five are accepted
+there; a command's own flags (`--tables`, `--param`, …) belong after the
+command and error out before it.
+
+### Environment defaults
+
+`DB_QUERY_HOST` and `DB_QUERY_DATABASE` supply the defaults for `--host` and
+`--database`, so a shell that works on one database can drop them entirely:
+
+```sh
+export DB_QUERY_HOST=testhost
+export DB_QUERY_DATABASE=testdb
+db-query s --tables
+db-query q "SELECT count(*) FROM todos;"
+```
+
+Precedence is flag (either position) → environment → config file. Note that an
+exported host is invisible state: `db-query hosts` shows what is configured, but
+the host in effect is whatever `DB_QUERY_HOST` says until you override it.
 - Params bind through the client's own `-v` mechanism: `:'name'` in psql
   SQL, `$(name)` in sqlcmd SQL. Values are never substituted into SQL by
   this tool.
@@ -69,7 +105,7 @@ free-generate SQL.
   already holds the same SQL — compared on a normalised hash, so
   whitespace/comment-only differences count as duplicates — or when the target
   name already exists. `--force` overrides both.
-- `db-query queries [--category <cat>] [--output text|json]` lists the store.
+- `db-query list [--category <cat>] [--output text|json]` (`ls`, `l`) lists the store.
   `text` is a table (category, name, provider, short hash, SQL preview);
   `json` is an array of `{category, name, provider, sqlhash, sql}` objects a
   caller can match against.
@@ -168,9 +204,10 @@ section, the `BWS_ACCESS_TOKEN` environment variable is used.
 ## Shell completion (zsh)
 
 `db-query completion zsh` prints a zsh completion script. Completion covers
-subcommands, flags, and the `--output` values, plus **dynamic** values read
-from your local files: host names (`--host`), saved queries (`--source`), and
-categories (`--category`) — each shown with a short description. These come
+subcommands (and their shorthands), flags — before or after the command — and
+the `--output` values, plus **dynamic** values read from your local files: host
+names (`--host`), saved queries (`--source`), and categories (`--category`) —
+each shown with a short description. These come
 from a hidden `db-query __complete` command the script calls on TAB; it reads
 only config and saved-query files, never a credential or a database.
 
