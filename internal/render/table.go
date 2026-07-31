@@ -22,6 +22,42 @@ const nullCell = "NULL"
 // previewSQL already uses for the list command's SQL column.
 const ellipsis = "…"
 
+// Border names the character set the table renderer frames rows with.
+const (
+	// BorderASCII frames with +-| — pure ASCII, so it survives any terminal,
+	// font, locale, and a copy-paste into plain text.
+	BorderASCII = "ascii"
+	// BorderLight frames with Unicode box-drawing characters. Sharper on a
+	// modern terminal; needs a UTF-8 locale and a font that has the glyphs.
+	BorderLight = "light"
+	// BorderMarkdown emits a GitHub-flavoured Markdown table, for pasting
+	// into an issue, a PR, or notes.
+	BorderMarkdown = "markdown"
+	// BorderNone drops the frame entirely, leaving aligned columns — text
+	// output's shape, but padded into place.
+	BorderNone = "none"
+)
+
+// DefaultBorder is the style used when none is requested.
+const DefaultBorder = BorderASCII
+
+// Borders returns the accepted --border values in help order: the default
+// first, then by decreasing amount of frame.
+func Borders() []string {
+	return []string{BorderASCII, BorderLight, BorderMarkdown, BorderNone}
+}
+
+// ValidBorder reports whether b names a border style. Callers validate at flag
+// parse time so a bad value fails before a credential is resolved.
+func ValidBorder(b string) error {
+	for _, v := range Borders() {
+		if v == b {
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown border style %q (supported: %s)", b, strings.Join(Borders(), ", "))
+}
+
 // tableRenderer prints an aligned ASCII box table with a row-count footer.
 // It is what `--output auto` resolves to when stdout is a terminal; the
 // resolution happens in the CLI layer, so this renderer stays a pure function
@@ -34,14 +70,29 @@ func (tableRenderer) Render(w io.Writer, rows adapter.Rows, opts Options) error 
 	if len(rows.Columns) == 0 {
 		return nil
 	}
+	// An unset Border means the default, so a zero Options still renders.
+	border := opts.Border
+	if border == "" {
+		border = DefaultBorder
+	}
+	if err := ValidBorder(border); err != nil {
+		return err
+	}
 
 	t := table.NewWriter()
-	t.SetStyle(table.StyleDefault)
+	if border == BorderLight {
+		t.SetStyle(table.StyleLight)
+	} else {
+		t.SetStyle(table.StyleDefault)
+	}
 	// go-pretty upper-cases headers by default. A SQL identifier is
 	// meaningful and may be a case-sensitive quoted name, so it must survive
 	// verbatim — this is the one library default that would corrupt data.
 	t.Style().Format.Header = text.FormatDefault
 	t.Style().Options.SeparateRows = false
+	if border == BorderNone {
+		t.Style().Options = table.OptionsNoBordersAndSeparators
+	}
 
 	if opts.MaxColWidth > 0 {
 		cfgs := make([]table.ColumnConfig, len(rows.Columns))
@@ -65,18 +116,40 @@ func (tableRenderer) Render(w io.Writer, rows adapter.Rows, opts Options) error 
 		t.AppendRow(dataRow(row, len(rows.Columns)))
 	}
 
+	// Markdown is a distinct render mode in go-pretty, not a border style —
+	// it emits pipe-delimited rows and a --- separator rather than a frame.
+	out := t.Render()
+	if border == BorderMarkdown {
+		out = t.RenderMarkdown()
+	}
+	if border == BorderNone {
+		out = trimFramePadding(out)
+	}
 	// Render() writes to an output mirror only if one is set, and discards
 	// write errors when it does. Taking the string and writing it here keeps
 	// error propagation consistent with the text and json renderers.
-	if _, err := fmt.Fprintln(w, t.Render()); err != nil {
+	if _, err := fmt.Fprintln(w, out); err != nil {
 		return err
 	}
 	// The footer is chrome, not data: --no-headers means "just the rows".
-	if opts.NoHeaders {
+	// Markdown drops it too — that output exists to be pasted verbatim into a
+	// document, where a trailing count would render as a stray paragraph.
+	if opts.NoHeaders || border == BorderMarkdown {
 		return nil
 	}
 	_, err := fmt.Fprintf(w, "(%d %s)\n", len(rows.Rows), plural(len(rows.Rows)))
 	return err
+}
+
+// trimFramePadding removes the cell padding the borderless style would
+// otherwise leave hanging off both edges — one leading space per line and any
+// trailing spaces — so rows start at column zero like text output does.
+func trimFramePadding(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(strings.TrimPrefix(line, " "), " ")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // snip truncates a cell to maxLen display cells, appending an ellipsis. It

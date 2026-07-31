@@ -221,3 +221,108 @@ func TestTableRendererShortRow(t *testing.T) {
 		t.Fatalf("short row =\n%s\nwant:\n%s", got, want)
 	}
 }
+
+func TestBorders(t *testing.T) {
+	t.Run("lists styles in help order", func(t *testing.T) {
+		got := strings.Join(Borders(), " ")
+		want := "ascii light markdown none"
+		if got != want {
+			t.Fatalf("Borders() = %q, want %q", got, want)
+		}
+	})
+	t.Run("validates", func(t *testing.T) {
+		for _, b := range Borders() {
+			if err := ValidBorder(b); err != nil {
+				t.Errorf("ValidBorder(%q) = %v", b, err)
+			}
+		}
+		if err := ValidBorder("double"); err == nil {
+			t.Error("ValidBorder(double) must fail")
+		}
+	})
+	t.Run("default is ascii", func(t *testing.T) {
+		if DefaultBorder != BorderASCII {
+			t.Fatalf("DefaultBorder = %q", DefaultBorder)
+		}
+		// An unset Border must render, so a zero Options stays usable.
+		if renderTable(t, sampleRows(), Options{}) != renderTable(t, sampleRows(), Options{Border: BorderASCII}) {
+			t.Fatal("empty Border must behave as ascii")
+		}
+	})
+	t.Run("unknown style is an error", func(t *testing.T) {
+		var b strings.Builder
+		if err := Render(&b, "table", sampleRows(), Options{Border: "double"}); err == nil {
+			t.Fatal("want error for unknown border")
+		}
+	})
+}
+
+func TestBorderLight(t *testing.T) {
+	got := renderTable(t, sampleRows(), Options{Border: BorderLight})
+	want := "" +
+		"┌────┬───────┬──────────┐\n" +
+		"│ id │ name  │ nickname │\n" +
+		"├────┼───────┼──────────┤\n" +
+		"│ 1  │ Ada   │ NULL     │\n" +
+		"│ 2  │ Grace │          │\n" +
+		"└────┴───────┴──────────┘\n" +
+		"(2 rows)\n"
+	if got != want {
+		t.Fatalf("light =\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestBorderMarkdown(t *testing.T) {
+	got := renderTable(t, sampleRows(), Options{Border: BorderMarkdown})
+	want := "" +
+		"| id | name | nickname |\n" +
+		"| --- | --- | --- |\n" +
+		"| 1 | Ada | NULL |\n" +
+		"| 2 | Grace |  |\n"
+	if got != want {
+		t.Fatalf("markdown =\n%q\nwant:\n%q", got, want)
+	}
+	// The row-count footer would render as a stray paragraph under a pasted
+	// table, so markdown drops it.
+	if strings.Contains(got, "rows)") {
+		t.Error("markdown must not carry the row-count footer")
+	}
+}
+
+func TestBorderNone(t *testing.T) {
+	got := renderTable(t, sampleRows(), Options{Border: BorderNone})
+	want := "" +
+		"id  name   nickname\n" +
+		"1   Ada    NULL\n" +
+		"2   Grace\n" +
+		"(2 rows)\n"
+	if got != want {
+		t.Fatalf("none =\n%q\nwant:\n%q", got, want)
+	}
+	// Rows must start at column zero and carry no trailing padding, so the
+	// output lines up with text mode rather than sitting inside a ghost frame.
+	for _, line := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
+		if strings.HasPrefix(line, " ") || strings.HasSuffix(line, " ") {
+			t.Errorf("line %q still carries frame padding", line)
+		}
+	}
+}
+
+// TestBorderStylesShareCellSemantics pins that the NULL marker, the control
+// character collapse and the width cap apply regardless of frame style — the
+// border chooses glyphs, not cell behaviour.
+func TestBorderStylesShareCellSemantics(t *testing.T) {
+	rows := adapter.Rows{
+		Columns: []string{"v", "w"},
+		Rows:    [][]*string{{nil, ptr("a\nb")}},
+	}
+	for _, b := range Borders() {
+		got := renderTable(t, rows, Options{Border: b, MaxColWidth: 30})
+		if !strings.Contains(got, "NULL") {
+			t.Errorf("border %q lost the NULL marker:\n%s", b, got)
+		}
+		if strings.Contains(got, "\na\nb") || strings.Contains(got, "a\nb") {
+			t.Errorf("border %q let a newline through:\n%q", b, got)
+		}
+	}
+}

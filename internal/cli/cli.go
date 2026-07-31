@@ -53,6 +53,8 @@ Flags:
                             row-count footer (query, schema)
   --max-col-width <n>     : table output: truncate cells wider than n cells (default 50,
                             0 = unlimited) (query, schema)
+  --border <style>        : table output: ascii|light|markdown|none (default ascii)
+                            (query, schema)
   --tables (-T)           : schema: print one schema-qualified table name per line instead of columns
   --help (-h)             : show this help (works on any command)
   --version (-v)          : print version information
@@ -63,6 +65,12 @@ a pipe, a redirect, or a program calling db-query still gets the stable
 machine-readable shape. Pass --output explicitly to force either one; export
 DB_QUERY_OUTPUT to pin it for a whole shell. Every command that prints rows —
 query, list, schema, introspect, hosts — honours the same setting.
+
+--border picks the table frame: ascii (portable, the default), light (Unicode
+box-drawing), markdown (paste into an issue or notes file), or none (aligned
+columns, no frame). markdown omits the row-count footer so the output pastes
+verbatim; combined with --no-headers it emits data rows without the --- rule,
+which appends to an existing table rather than standing alone.
 
 The shared flags (--host, --database, --config, --output, --timeout) may also be
 given before the command, which keeps the part that changes between runs at the
@@ -317,6 +325,7 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	var sqlFile, saveName, sourceName, category string
 	var refreshSchema, noHeaders, force bool
 	var maxColWidth int
+	var border string
 	fs := newFlagSet("query", stderr)
 	addCommon(fs, &c, globals)
 	fs.Var(params, "param", "bind a query parameter (repeatable)")
@@ -331,10 +340,15 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache before running")
 	fs.BoolVar(&noHeaders, "no-headers", false, "text/table output: omit the header line")
 	fs.IntVar(&maxColWidth, "max-col-width", defaultMaxColWidth, "table output: truncate cells wider than this (0 = unlimited)")
+	fs.StringVar(&border, "border", render.DefaultBorder, "table output: frame style ("+strings.Join(render.Borders(), "|")+")")
 	fs.BoolVar(&force, "force", false, "with --save: overwrite an existing query and bypass the duplicate check")
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
 		return exitParse(err, stdout)
+	}
+	if err := render.ValidBorder(border); err != nil {
+		render.Error(stderr, c.output, err.Error())
+		return 1
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
@@ -406,7 +420,7 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	if code != 0 {
 		return code // a non-zero run saves nothing and returns its own code
 	}
-	if code := renderRows(rows, c.output, noHeaders, maxColWidth, stdout, stderr); code != 0 {
+	if code := renderRows(rows, c.output, noHeaders, maxColWidth, border, stdout, stderr); code != 0 {
 		return code
 	}
 
@@ -459,7 +473,7 @@ func runList(args []string, globals commonFlags, stdout, stderr io.Writer) int {
 		preview := previewSQL(q.SQL)
 		rows.Rows = append(rows.Rows, []*string{&cat, &name, &prov, &hash, &preview})
 	}
-	return renderRows(rows, c.output, false, defaultMaxColWidth, stdout, stderr)
+	return renderRows(rows, c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
 }
 
 // queryListing is the JSON shape of one saved query in the list command:
@@ -536,6 +550,7 @@ func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) int
 	var c commonFlags
 	var tablesOnly, refreshSchema, noHeaders bool
 	var maxColWidth int
+	var border string
 	fs := newFlagSet("schema", stderr)
 	addCommon(fs, &c, globals)
 	fs.BoolVar(&tablesOnly, "tables", false, "print one schema-qualified table name per line")
@@ -543,9 +558,14 @@ func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) int
 	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache first")
 	fs.BoolVar(&noHeaders, "no-headers", false, "text/table output: omit the header line")
 	fs.IntVar(&maxColWidth, "max-col-width", defaultMaxColWidth, "table output: truncate cells wider than this (0 = unlimited)")
+	fs.StringVar(&border, "border", render.DefaultBorder, "table output: frame style ("+strings.Join(render.Borders(), "|")+")")
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
 		return exitParse(err, stdout)
+	}
+	if err := render.ValidBorder(border); err != nil {
+		render.Error(stderr, c.output, err.Error())
+		return 1
 	}
 	if len(positional) > 1 {
 		render.Error(stderr, c.output, fmt.Sprintf("expected at most one table name, got %d", len(positional)))
@@ -590,7 +610,7 @@ func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) int
 		render.Error(stderr, c.output, err.Error())
 		return 1
 	}
-	return renderRows(rows, c.output, noHeaders, maxColWidth, stdout, stderr)
+	return renderRows(rows, c.output, noHeaders, maxColWidth, border, stdout, stderr)
 }
 
 // catalogColumns locates the schema- and table-name columns in a cached
@@ -700,7 +720,7 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 		render.Error(stderr, c.output, err.Error())
 		return 1
 	}
-	return renderRows(rows, c.output, false, defaultMaxColWidth, stdout, stderr)
+	return renderRows(rows, c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
 }
 
 func runHosts(args []string, globals commonFlags, stdout, stderr io.Writer) int {
@@ -721,7 +741,7 @@ func runHosts(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 		n, p, d := name, h.Provider, h.Database
 		rows.Rows = append(rows.Rows, []*string{&n, &p, &d})
 	}
-	return renderRows(rows, c.output, false, defaultMaxColWidth, stdout, stderr)
+	return renderRows(rows, c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
 }
 
 func readSQL(positional []string, file string) (string, error) {
@@ -887,9 +907,9 @@ func buildSchema(r resolved, cachePath string, c commonFlags, stderr io.Writer) 
 // command's rows converge on and it already holds the destination writer, so
 // the TTY probe happens once, in the CLI layer, and no renderer has to inspect
 // what it is writing to.
-func renderRows(rows adapter.Rows, output string, noHeaders bool, maxColWidth int, stdout, stderr io.Writer) int {
+func renderRows(rows adapter.Rows, output string, noHeaders bool, maxColWidth int, border string, stdout, stderr io.Writer) int {
 	output = resolveOutput(output, stdout)
-	opts := render.Options{NoHeaders: noHeaders, MaxColWidth: maxColWidth}
+	opts := render.Options{NoHeaders: noHeaders, MaxColWidth: maxColWidth, Border: border}
 	if err := render.Render(stdout, output, rows, opts); err != nil {
 		render.Error(stderr, output, err.Error())
 		return 1

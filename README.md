@@ -37,7 +37,7 @@ db-query hosts                                # list configured hosts
   `--config (-c)`, `--output (-o)`, `--param (-p)`, `--file (-f)`, `--source (-s)`,
   `--category (-C)`, `--timeout (-t)`, `--help (-h)`, `--version (-v)`. Deliberate
   actions (`--save`, `--force`, `--refresh-schema`, `--no-headers`,
-  `--max-col-width`) are long-only.
+  `--max-col-width`, `--border`) are long-only.
 - Commands have shorthands too: `query (q)`, `schema (s)`, `introspect (i)`,
   `list (ls, l)`.
 
@@ -99,6 +99,19 @@ the host in effect is whatever `DB_QUERY_HOST` says until you override it.
 - `--max-col-width <n>` (`query`, `schema`; default 50, `0` = unlimited) caps a
   **table** cell at `n` display cells, truncating with `…`. Only `table` output
   is affected; `text` and `json` always carry values whole.
+- `--border ascii|light|markdown|none` (`query`, `schema`; default `ascii`)
+  picks the table frame:
+
+  | Style | Frame | Use |
+  |---|---|---|
+  | `ascii` | `+--+ \| --` | portable — any terminal, font, locale, or plain-text paste |
+  | `light` | `┌─┬┐ │` | Unicode box-drawing; sharper, needs a UTF-8 locale and glyphs |
+  | `markdown` | `\| --- \|` | paste straight into an issue, PR, or notes file |
+  | `none` | none | aligned columns, no frame — `text`'s shape, padded into place |
+
+  `markdown` omits the row-count footer so the output pastes verbatim. Combined
+  with `--no-headers` it emits data rows without the `---` rule, which appends
+  to an existing table rather than standing alone.
 - `--database <db>` (`-d`) overrides the host's configured `database` for this
   run (on `query`, `schema`, and `introspect`), so one host entry can reach
   sibling databases on the same server without a second config block.

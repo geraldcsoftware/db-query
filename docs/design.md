@@ -553,3 +553,18 @@ Table rendering is display-oriented and lossy by design, which is safe because
 from the empty string), control characters collapse to spaces so an embedded
 newline cannot break the row framing, and `--max-col-width` (default 50,
 `0` = unlimited) truncates over-wide cells with `…`.
+
+`--border ascii|light|markdown|none` (default `ascii`) selects the frame. It is
+a presentation knob only: the NULL marker, the control-character collapse and
+the width cap are properties of the renderer, not of a style, so they hold
+across all four — a test pins that. Two of the styles are not literally borders
+in go-pretty and are adapted:
+
+- **`markdown`** is a separate render mode (`RenderMarkdown()`), not a `Style`.
+  It also drops the row-count footer, because that output exists to be pasted
+  verbatim into a document where a trailing count reads as a stray paragraph.
+  With `--no-headers` it emits data rows and no `---` rule — not a standalone
+  table, but exactly what appending to an existing one needs.
+- **`none`** uses `OptionsNoBordersAndSeparators`, which leaves the cell padding
+  hanging off both edges. The renderer trims one leading space and any trailing
+  spaces per line so rows start at column zero, matching `text`.

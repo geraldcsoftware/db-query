@@ -239,3 +239,66 @@ func TestCompletionOffersEveryFormat(t *testing.T) {
 		t.Fatalf("%d format lists, but only %d match %q — a list has drifted", got, n, want)
 	}
 }
+
+func TestQueryBorderStyles(t *testing.T) {
+	cases := map[string]string{
+		"ascii":    "+----+------+",
+		"light":    "┌────┬──────┐",
+		"markdown": "| --- | --- |",
+		"none":     "id  name",
+	}
+	for border, marker := range cases {
+		t.Run(border, func(t *testing.T) {
+			got := queryOut(t, "--output", "table", "--border", border)
+			if !strings.Contains(got, marker) {
+				t.Fatalf("--border %s missing %q:\n%s", border, marker, got)
+			}
+		})
+	}
+}
+
+// TestBorderRejectedEarly pins that a bad --border fails as a usage error,
+// before any credential is resolved or the client is invoked.
+func TestBorderRejectedEarly(t *testing.T) {
+	cfg := testConfig(t)
+	// No psql stub and no password on purpose: if validation happened late,
+	// this would fail with a credential or exec error instead.
+	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"--border", "double", "SELECT 1")
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(errb, "unknown border style") {
+		t.Fatalf("stderr = %q", errb)
+	}
+	for _, b := range render.Borders() {
+		if !strings.Contains(errb, b) {
+			t.Errorf("error does not offer %q: %q", b, errb)
+		}
+	}
+}
+
+func TestSchemaBorder(t *testing.T) {
+	seedCatalogueCache(t)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "schema", "--host", "testpg", "--config", cfg,
+		"--output", "table", "--border", "markdown")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if !strings.Contains(out, "| --- |") {
+		t.Fatalf("schema --border markdown:\n%s", out)
+	}
+}
+
+func TestCompletionOffersEveryBorder(t *testing.T) {
+	code, script, errb := run(t, "completion", "zsh")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	want := "border:(" + strings.Join(render.Borders(), " ") + ")"
+	if !strings.Contains(script, want) {
+		t.Fatalf("completion script does not offer %q", want)
+	}
+}

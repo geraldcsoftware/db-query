@@ -26,6 +26,10 @@ type Options struct {
 	// with an ellipsis beyond it; 0 means unlimited. Table output only — text
 	// and json carry values whole.
 	MaxColWidth int
+
+	// Border selects the table frame: ascii, light, markdown, or none. Empty
+	// means DefaultBorder, so a zero Options renders. Table output only.
+	Border string
 }
 
 // AutoFormat resolves to table when stdout is a terminal and text otherwise.

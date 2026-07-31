@@ -107,6 +107,7 @@ _dbq_cmd_query() {
     '--refresh-schema[rebuild the schema cache first]' \
     '--no-headers[omit the header line]' \
     '--max-col-width[table output: truncate cells wider than n (0 = unlimited)]:cells:' \
+    '--border[table output: frame style]:border:(ascii light markdown none)' \
     '*:SQL:_message "SQL is free-form; no completion"'
 }
 
@@ -127,6 +128,7 @@ _dbq_cmd_schema() {
     '--refresh-schema[rebuild the schema cache first]' \
     '--no-headers[omit the header line]' \
     '--max-col-width[table output: truncate cells wider than n (0 = unlimited)]:cells:' \
+    '--border[table output: frame style]:border:(ascii light markdown none)' \
     '(-T --tables)'{-T,--tables}'[print one schema-qualified table name per line]' \
     '*:table:_message "table name (bare or schema-qualified) from the cached schema"'
 }
