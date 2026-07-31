@@ -40,7 +40,7 @@ Flags:
   --host (-H) <name>      : host entry from the config file
   --database (-d) <db>    : override the host's configured database (query, schema, introspect)
   --config (-c) <path>    : config file (default: $DB_QUERY_CONFIG or ~/.config/db-query/config.toml)
-  --output (-o) text|json : output format (default text)
+  --output (-o) <format>  : json|table|text|auto (default auto)
   --param (-p) k=v        : bind a query parameter (repeatable); psql: :'k', sqlcmd: $(k)
   --file (-f) <path>      : read SQL from file ("-" for stdin)
   --source (-s) <name>    : run a previously saved query by name (query)
@@ -49,10 +49,20 @@ Flags:
   --force                 : with --save: overwrite an existing query and bypass the duplicate check
   --timeout (-t) <dur>    : per-invocation deadline (default 30s)
   --refresh-schema        : rebuild the cached schema first (query, schema, introspect)
-  --no-headers            : text output only: omit the header line, tab-separate rows (query, schema)
+  --no-headers            : omit the header line; text tab-separates rows, table drops the
+                            row-count footer (query, schema)
+  --max-col-width <n>     : table output: truncate cells wider than n cells (default 50,
+                            0 = unlimited) (query, schema)
   --tables (-T)           : schema: print one schema-qualified table name per line instead of columns
   --help (-h)             : show this help (works on any command)
   --version (-v)          : print version information
+
+Output formats. auto — the default — renders a bordered table when stdout is a
+terminal and tab-separated text otherwise, so results are readable by eye while
+a pipe, a redirect, or a program calling db-query still gets the stable
+machine-readable shape. Pass --output explicitly to force either one; export
+DB_QUERY_OUTPUT to pin it for a whole shell. Every command that prints rows —
+query, list, schema, introspect, hosts — honours the same setting.
 
 The shared flags (--host, --database, --config, --output, --timeout) may also be
 given before the command, which keeps the part that changes between runs at the
@@ -67,6 +77,7 @@ five are accepted before the command; a command's own flags belong after it.
 Environment:
   DB_QUERY_HOST        default for --host
   DB_QUERY_DATABASE    default for --database
+  DB_QUERY_OUTPUT      default for --output
   DB_QUERY_CONFIG      default config file path
   DB_QUERY_QUERIES_DIR saved-query store directory
 
@@ -197,19 +208,30 @@ type commonFlags struct {
 }
 
 const (
-	defaultOutput  = "text"
+	defaultOutput  = render.AutoFormat
 	defaultTimeout = 30 * time.Second
+	// defaultMaxColWidth caps a table cell's display width. Wide enough for a
+	// timestamp or a short description; a blob column is truncated rather than
+	// allowed to push every other column off the screen.
+	defaultMaxColWidth = 50
 )
 
 // envDefaults seeds the shared flags from the environment: DB_QUERY_HOST and
 // DB_QUERY_DATABASE stand in for --host/--database, so one export makes every
-// later command in that shell short. --config is left empty because
-// DB_QUERY_CONFIG is already read further down, by config.DefaultPath.
+// later command in that shell short. DB_QUERY_OUTPUT pins the format, which is
+// how a caller that must not receive tables — an agent, a CI job — opts out of
+// the auto default once instead of passing --output on every invocation.
+// --config is left empty because DB_QUERY_CONFIG is already read further down,
+// by config.DefaultPath.
 func envDefaults() commonFlags {
+	output := os.Getenv("DB_QUERY_OUTPUT")
+	if output == "" {
+		output = defaultOutput
+	}
 	return commonFlags{
 		host:     os.Getenv("DB_QUERY_HOST"),
 		database: os.Getenv("DB_QUERY_DATABASE"),
-		output:   defaultOutput,
+		output:   output,
 		timeout:  defaultTimeout,
 	}
 }
@@ -224,7 +246,7 @@ func addCommon(fs *flag.FlagSet, c *commonFlags, def commonFlags) {
 	fs.StringVar(&c.host, "H", def.host, "shorthand for --host")
 	fs.StringVar(&c.config, "config", def.config, "config file path")
 	fs.StringVar(&c.config, "c", def.config, "shorthand for --config")
-	fs.StringVar(&c.output, "output", def.output, "output format: text|json")
+	fs.StringVar(&c.output, "output", def.output, "output format: "+strings.Join(render.Formats(), "|"))
 	fs.StringVar(&c.output, "o", def.output, "shorthand for --output")
 	fs.DurationVar(&c.timeout, "timeout", def.timeout, "per-invocation deadline")
 	fs.DurationVar(&c.timeout, "t", def.timeout, "shorthand for --timeout")
@@ -294,6 +316,7 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	params := paramFlags{}
 	var sqlFile, saveName, sourceName, category string
 	var refreshSchema, noHeaders, force bool
+	var maxColWidth int
 	fs := newFlagSet("query", stderr)
 	addCommon(fs, &c, globals)
 	fs.Var(params, "param", "bind a query parameter (repeatable)")
@@ -306,7 +329,8 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	fs.StringVar(&category, "category", savedquery.DefaultCategory, "saved-query category for --save/--source")
 	fs.StringVar(&category, "C", savedquery.DefaultCategory, "shorthand for --category")
 	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache before running")
-	fs.BoolVar(&noHeaders, "no-headers", false, "text output: omit the header line")
+	fs.BoolVar(&noHeaders, "no-headers", false, "text/table output: omit the header line")
+	fs.IntVar(&maxColWidth, "max-col-width", defaultMaxColWidth, "table output: truncate cells wider than this (0 = unlimited)")
 	fs.BoolVar(&force, "force", false, "with --save: overwrite an existing query and bypass the duplicate check")
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -382,7 +406,7 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	if code != 0 {
 		return code // a non-zero run saves nothing and returns its own code
 	}
-	if code := renderRows(rows, c.output, noHeaders, stdout, stderr); code != 0 {
+	if code := renderRows(rows, c.output, noHeaders, maxColWidth, stdout, stderr); code != 0 {
 		return code
 	}
 
@@ -416,7 +440,7 @@ func runList(args []string, globals commonFlags, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return exitParse(err, stdout)
 	}
-	if _, err := render.For(c.output); err != nil {
+	if err := render.Valid(c.output); err != nil {
 		render.Error(stderr, c.output, err.Error())
 		return 1
 	}
@@ -435,7 +459,7 @@ func runList(args []string, globals commonFlags, stdout, stderr io.Writer) int {
 		preview := previewSQL(q.SQL)
 		rows.Rows = append(rows.Rows, []*string{&cat, &name, &prov, &hash, &preview})
 	}
-	return renderRows(rows, c.output, false, stdout, stderr)
+	return renderRows(rows, c.output, false, defaultMaxColWidth, stdout, stderr)
 }
 
 // queryListing is the JSON shape of one saved query in the list command:
@@ -511,12 +535,14 @@ func previewSQL(sql string) string {
 func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) int {
 	var c commonFlags
 	var tablesOnly, refreshSchema, noHeaders bool
+	var maxColWidth int
 	fs := newFlagSet("schema", stderr)
 	addCommon(fs, &c, globals)
 	fs.BoolVar(&tablesOnly, "tables", false, "print one schema-qualified table name per line")
 	fs.BoolVar(&tablesOnly, "T", false, "shorthand for --tables")
 	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache first")
-	fs.BoolVar(&noHeaders, "no-headers", false, "text output: omit the header line")
+	fs.BoolVar(&noHeaders, "no-headers", false, "text/table output: omit the header line")
+	fs.IntVar(&maxColWidth, "max-col-width", defaultMaxColWidth, "table output: truncate cells wider than this (0 = unlimited)")
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
 		return exitParse(err, stdout)
@@ -564,7 +590,7 @@ func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) int
 		render.Error(stderr, c.output, err.Error())
 		return 1
 	}
-	return renderRows(rows, c.output, noHeaders, stdout, stderr)
+	return renderRows(rows, c.output, noHeaders, maxColWidth, stdout, stderr)
 }
 
 // catalogColumns locates the schema- and table-name columns in a cached
@@ -674,7 +700,7 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 		render.Error(stderr, c.output, err.Error())
 		return 1
 	}
-	return renderRows(rows, c.output, false, stdout, stderr)
+	return renderRows(rows, c.output, false, defaultMaxColWidth, stdout, stderr)
 }
 
 func runHosts(args []string, globals commonFlags, stdout, stderr io.Writer) int {
@@ -695,7 +721,7 @@ func runHosts(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 		n, p, d := name, h.Provider, h.Database
 		rows.Rows = append(rows.Rows, []*string{&n, &p, &d})
 	}
-	return renderRows(rows, c.output, false, stdout, stderr)
+	return renderRows(rows, c.output, false, defaultMaxColWidth, stdout, stderr)
 }
 
 func readSQL(positional []string, file string) (string, error) {
@@ -753,7 +779,7 @@ type resolved struct {
 // touched), and merges it into the host config. On any failure it renders
 // the error and returns exit code 1.
 func setup(c commonFlags, stderr io.Writer) (resolved, int) {
-	if _, err := render.For(c.output); err != nil {
+	if err := render.Valid(c.output); err != nil {
 		render.Error(stderr, c.output, err.Error())
 		return resolved{}, 1
 	}
@@ -856,12 +882,38 @@ func buildSchema(r resolved, cachePath string, c commonFlags, stderr io.Writer) 
 
 // renderRows writes rows through the single render pivot, honouring the
 // output format and cross-format options. It returns 0 or exit code 1.
-func renderRows(rows adapter.Rows, output string, noHeaders bool, stdout, stderr io.Writer) int {
-	if err := render.Render(stdout, output, rows, render.Options{NoHeaders: noHeaders}); err != nil {
+//
+// This is also where render.AutoFormat is resolved: it is the one place every
+// command's rows converge on and it already holds the destination writer, so
+// the TTY probe happens once, in the CLI layer, and no renderer has to inspect
+// what it is writing to.
+func renderRows(rows adapter.Rows, output string, noHeaders bool, maxColWidth int, stdout, stderr io.Writer) int {
+	output = resolveOutput(output, stdout)
+	opts := render.Options{NoHeaders: noHeaders, MaxColWidth: maxColWidth}
+	if err := render.Render(stdout, output, rows, opts); err != nil {
 		render.Error(stderr, output, err.Error())
 		return 1
 	}
 	return 0
+}
+
+// resolveOutput maps render.AutoFormat onto a concrete format: table when w is
+// a terminal, text otherwise. Any explicit format passes through untouched.
+//
+// The probe is a type assertion rather than a build-tagged isatty call, which
+// keeps it dependency-free and makes the piped path the default in tests: a
+// bytes.Buffer is not an *os.File, so it resolves to text exactly as a pipe or
+// a redirect does.
+func resolveOutput(format string, w io.Writer) string {
+	if format != render.AutoFormat {
+		return format
+	}
+	if f, ok := w.(*os.File); ok {
+		if info, err := f.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+			return "table"
+		}
+	}
+	return "text"
 }
 
 // usesBWS reports whether the host resolves any secret through the bws: scheme,

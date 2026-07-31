@@ -2,7 +2,8 @@
 
 A Go CLI that wraps native database clients (`psql`, `sqlcmd`), resolves
 credentials on demand from a configured source, and returns query output
-in a selectable format. See `docs/design.md` for the full design.
+in a selectable format — an aligned table at a terminal, tab-separated text
+when piped. See `docs/design.md` for the full design.
 
 ```
  cred URI ─▶ [resolver] ─▶ Credential ─▶ [adapter.build] ─▶ Invocation ─▶ [executor.Run] ─▶ RawResult
@@ -35,7 +36,8 @@ db-query hosts                                # list configured hosts
 - Most flags have a single-letter shorthand: `--host (-H)`, `--database (-d)`,
   `--config (-c)`, `--output (-o)`, `--param (-p)`, `--file (-f)`, `--source (-s)`,
   `--category (-C)`, `--timeout (-t)`, `--help (-h)`, `--version (-v)`. Deliberate
-  actions (`--save`, `--force`, `--refresh-schema`, `--no-headers`) are long-only.
+  actions (`--save`, `--force`, `--refresh-schema`, `--no-headers`,
+  `--max-col-width`) are long-only.
 - Commands have shorthands too: `query (q)`, `schema (s)`, `introspect (i)`,
   `list (ls, l)`.
 
@@ -69,20 +71,41 @@ db-query s --tables
 db-query q "SELECT count(*) FROM todos;"
 ```
 
+`DB_QUERY_OUTPUT` does the same for `--output`. Because the default is `auto`,
+this is mainly how a caller that must never receive tables opts out once
+instead of passing `--output` on every invocation:
+
+```sh
+export DB_QUERY_OUTPUT=text   # or json — pin the machine-readable shape
+```
+
+Piping already selects `text` on its own, so this is only needed when something
+runs `db-query` with a terminal attached and still wants the stable format.
+
 Precedence is flag (either position) → environment → config file. Note that an
 exported host is invisible state: `db-query hosts` shows what is configured, but
 the host in effect is whatever `DB_QUERY_HOST` says until you override it.
 - Params bind through the client's own `-v` mechanism: `:'name'` in psql
   SQL, `$(name)` in sqlcmd SQL. Values are never substituted into SQL by
   this tool.
-- `--output text|json` (default `text`). In `json` mode errors are
+- `--output json|table|text|auto` (default `auto`). `auto` renders a bordered
+  table when stdout is a terminal and tab-separated `text` otherwise, so
+  results are readable by eye while a pipe, a redirect, or a program calling
+  `db-query` still gets the stable machine-readable shape. Pass `--output`
+  explicitly to force either one, or export `DB_QUERY_OUTPUT` to pin it for a
+  whole shell. Every command that prints rows — `query`, `list`, `schema`,
+  `introspect`, `hosts` — honours the setting. In `json` mode errors are
   emitted as structured JSON on stderr.
+- `--max-col-width <n>` (`query`, `schema`; default 50, `0` = unlimited) caps a
+  **table** cell at `n` display cells, truncating with `…`. Only `table` output
+  is affected; `text` and `json` always carry values whole.
 - `--database <db>` (`-d`) overrides the host's configured `database` for this
   run (on `query`, `schema`, and `introspect`), so one host entry can reach
   sibling databases on the same server without a second config block.
-- `--no-headers` (text output only) omits the header line and tab-separates
-  the rows for any shape, so a 1×1 result prints just the bare value. It is
-  a no-op for `--output json`, whose objects are already self-describing.
+- `--no-headers` omits the header line. In `text` it tab-separates the rows for
+  any shape, so a 1×1 result prints just the bare value; in `table` it drops the
+  header row and the row-count footer, leaving only the framed data. It is a
+  no-op for `--output json`, whose objects are already self-describing.
 
 ### Saved queries
 
@@ -105,8 +128,8 @@ free-generate SQL.
   already holds the same SQL — compared on a normalised hash, so
   whitespace/comment-only differences count as duplicates — or when the target
   name already exists. `--force` overrides both.
-- `db-query list [--category <cat>] [--output text|json]` (`ls`, `l`) lists the store.
-  `text` is a table (category, name, provider, short hash, SQL preview);
+- `db-query list [--category <cat>] [--output <format>]` (`ls`, `l`) lists the store.
+  `text`/`table` show category, name, provider, short hash and SQL preview;
   `json` is an array of `{category, name, provider, sqlhash, sql}` objects a
   caller can match against.
 

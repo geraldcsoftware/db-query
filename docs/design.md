@@ -9,7 +9,7 @@
 
 1. Resolves credentials from a configured source (Bitwarden SM, Bitwarden CLI, Apple Keychain, env/`.env`) **on demand**, per invocation.
 2. Injects them the way each **provider** expects (`PGUSER`/`PGPASSWORD` for Postgres; the SQL Server equivalents for `sqlcmd`) via an **environment overlay**, never argv.
-3. Runs a query — ad-hoc SQL or a **named, saved query** — and returns output in a selectable format (`--output text|json`, default `text`).
+3. Runs a query — ad-hoc SQL or a **named, saved query** — and returns output in a selectable format (`--output json|table|text|auto`, default `auto`).
 
 The load-bearing idea is a **neutral credential record** between two independent seams, plus a **provider-blind central executor** at the bottom and a **parse-once / render-once** output pipeline at the top:
 
@@ -269,7 +269,7 @@ Locked rules:
 
 ## 8. Output formatting & rendering pipeline
 
-**[LOCKED] `--output text|json`, default `text`.** Format branch lives at **one pivot point**, not per adapter — avoid the `providers × formats` matrix.
+**[LOCKED] `--output json|table|text|auto`, default `auto`.** Format branch lives at **one pivot point**, not per adapter — avoid the `providers × formats` matrix.
 
 ```
 adapter parses client output → Rows (neutral) → renderer[format] → bytes
@@ -284,9 +284,10 @@ type Rows struct {
 type Renderer interface { Render(w io.Writer, rows Rows) error }
 
 var renderers = map[string]Renderer{
-    "text": textRenderer{}, // tab-separated, default
-    "json": jsonRenderer{},
-    // "csv", "table" drop in later with zero pipeline change
+    "text":  textRenderer{},  // tab-separated, the machine-readable shape
+    "json":  jsonRenderer{},
+    "table": tableRenderer{}, // aligned ASCII box, for a terminal
+    // "csv" drops in later with zero pipeline change
 }
 ```
 
@@ -295,7 +296,7 @@ var renderers = map[string]Renderer{
 - **Always parse into neutral `Rows`.** The earlier "clean-text passthrough" shortcut does not survive `--output json`: once you parse for JSON, parsing is the always-path. Cost relocates into reliable structured parsing per client (§7).
 - **NULL fidelity is `[][]*string`.** `null` vs `""` is real once JSON exists; nil pointer = NULL, `&""` = empty. psql CSV gives this cheaply. **v1: sqlcmd Path A does not distinguish** NULL from `"NULL"` (accepted; §7.2) — the row type still holds, Path A just never emits a nil. v2 restores fidelity via Path B.
 - **Errors honor `--output`.** In `json` mode a failure emits **structured JSON** (`{"error": "..."}`) to stderr, not a bare string mid-stream, so `--output json | jq` never breaks on the error path. The format flag governs the whole output contract, not just the happy path.
-- **Default `text` when the flag is omitted.** No TTY auto-detection — an explicit default is more predictable than magic.
+- **Default `auto` when the flag is omitted.** `auto` resolves to `table` when stdout is a terminal and `text` otherwise. This **supersedes** the original v1 rule (*default `text`; no TTY auto-detection — an explicit default is more predictable than magic*). The concern behind that rule was **invisible** behaviour; `auto` is a named value that appears in `--help`, can be passed explicitly, and is overridable by flag or `DB_QUERY_OUTPUT`. Resolution happens once in the CLI layer, before the render pivot, so renderers stay pure functions of `(Rows, Options)`. See §13.8.
 
 ## 9. Security considerations
 
@@ -325,7 +326,7 @@ Genuinely unresolved — not yet locked:
 - Buffer output; run under a context deadline.
 - psql parses via `--csv`; sqlcmd via coaxed-tabular (default) or `FOR JSON` (opt-in, high-fidelity).
 - **Params: native per provider — psql `:'name'`/`:name`, sqlcmd `$(name)` (not `@name`). Always bound via client `-v`; Go never substitutes into SQL; `-v` emitted only when the query has ≥1 param.** sqlcmd value-validation as the v1 injection mitigation.
-- `--output text|json` (default text); parse-once into neutral `Rows`, render-once per format; errors honor the format.
+- `--output json|table|text|auto` (default `auto`, resolved by TTY in the CLI layer); parse-once into neutral `Rows`, render-once per format; errors honor the format.
 - NULL fidelity via `[][]*string`. **v1 accepts sqlcmd Path A rendering NULL as literal `NULL`; faithful SQL Server NULL is a v2 patch.**
 - **`--raw` passthrough is out of v1** (deferred to v2). Every query in v1 goes through the normal build → run → parse → render path.
 
@@ -489,3 +490,66 @@ stateful "current connection":
 
 `hosts` deliberately has no shorthand: `h` reads as help, which `-h`/`--help`
 already owns.
+
+### 13.8 `auto` output and TTY detection (amends §8)
+
+§8 originally locked *default `text`; no TTY auto-detection — an explicit
+default is more predictable than magic*. That rule is **amended**: the default
+is now `auto`, which resolves to `table` when stdout is a terminal and `text`
+otherwise.
+
+The original concern was **invisible** behaviour, not terminal detection as
+such. `auto` is not invisible: it is a named value listed in `--help` and in
+shell completion, it can be passed explicitly (`--output auto`), and it is
+overridable three ways — `--output` before the command, `--output` after it, or
+`DB_QUERY_OUTPUT` for a whole shell. What the amendment buys is that the two
+audiences stop fighting over one default. A person at a prompt wants aligned
+columns; a pipeline, a redirect, or an agent shelling out wants the stable
+tab-separated shape. Detection lets each get it without configuration.
+
+**The compatibility guarantee.** Whenever stdout is not a terminal, output is
+byte-identical to the pre-`auto` `text` renderer. Nothing that consumed
+`db-query` through a pipe sees any change.
+
+Consequences:
+
+- **`text` is unchanged and remains the machine format.** The table is a
+  *new* renderer, not a reshaping of `text` — `cut -f` and `awk -F'\t'`
+  keep working, and the exact-byte tests that pin `text` keep passing.
+- **Resolution happens in the CLI layer, not in a renderer.** `renderRows` is
+  the one point every command's rows converge on and it already holds the
+  destination writer, so the probe runs once there. Renderers stay pure
+  functions of `(Rows, Options)` and never inspect what they write to.
+- **`render.For` rejects `auto` by design; `render.Valid` accepts it.** Flag
+  validation uses `Valid`, rendering uses `For`. A renderer lookup that
+  silently accepted `auto` would let a caller render without ever probing.
+- **The probe is a type assertion, not a dependency.** `w.(*os.File)` plus
+  `ModeCharDevice`; no build tags, no `isatty`. It also makes the piped path
+  the default under test — a `bytes.Buffer` is not an `*os.File`, so the whole
+  existing suite exercises `text` without modification.
+- **`--no-headers` extends to `table`** (§13.4): it drops the header row and
+  the row-count footer, leaving the framed data.
+- **Every row-printing command honours the format** — `query`, `list`,
+  `schema`, `introspect`, `hosts` — because they all render through the pivot.
+  Note `list` keeps a JSON branch outside the pivot; `auto` is resolved before
+  it, so `table` falls through into the normal `Rows` path.
+
+**The table renderer takes the first non-stdlib rendering dependency**,
+`github.com/jedib0t/go-pretty/v6` (4 modules compiled in). It was chosen over
+`lipgloss` (13 modules, and it runs its own TTY/colour detection through
+package globals — a second, invisible probe under this one) and over
+`tablewriter` (12 modules, and its defaults rewrite headers destructively:
+`user_name` renders as `USER NAME`). The stdlib `text/tabwriter` cannot be used
+because it measures with `utf8.RuneCountInString`, so any double-width glyph
+mis-pads every following column.
+
+One library default must stay pinned: go-pretty upper-cases headers unless
+`Style().Format.Header` is set to `text.FormatDefault`. A SQL identifier may be
+a case-sensitive quoted name, so it has to survive verbatim; a test asserts a
+`user_name` column renders unchanged.
+
+Table rendering is display-oriented and lossy by design, which is safe because
+`json` remains the fidelity path: NULL prints as a visible `NULL` (distinct
+from the empty string), control characters collapse to spaces so an embedded
+newline cannot break the row framing, and `--max-col-width` (default 50,
+`0` = unlimited) truncates over-wide cells with `…`.
