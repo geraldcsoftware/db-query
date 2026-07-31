@@ -47,7 +47,7 @@ _db-query() {
     '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
     '(-d --database)'{-d,--database}'[override the host database]:database:' \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
-    '(-o --output)'{-o,--output}'[output format]:format:(text json)' \
+    '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)' \
     '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:' \
     '1: :->command' \
     '*:: :->args' && return
@@ -96,7 +96,7 @@ _dbq_cmd_query() {
     '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
     '(-d --database)'{-d,--database}'[override the host database]:database:' \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
-    '(-o --output)'{-o,--output}'[output format]:format:(text json)' \
+    '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)' \
     '*'{-p,--param}'[bind a query parameter, k=v]:param:' \
     '(-f --file)'{-f,--file}'[read SQL from file ("-" for stdin)]:file:_files' \
     '--save[save the query under this name after it succeeds]:name:' \
@@ -105,14 +105,16 @@ _dbq_cmd_query() {
     '--force[overwrite an existing saved query]' \
     '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:' \
     '--refresh-schema[rebuild the schema cache first]' \
-    '--no-headers[text output: omit the header line]' \
+    '--no-headers[omit the header line]' \
+    '--max-col-width[table output: truncate cells wider than n (0 = unlimited)]:cells:' \
+    '--border[table output: frame style]:border:(ascii light markdown none)' \
     '*:SQL:_message "SQL is free-form; no completion"'
 }
 
 _dbq_cmd_list() {
   _arguments \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
-    '(-o --output)'{-o,--output}'[output format]:format:(text json)' \
+    '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)' \
     '(-C --category)'{-C,--category}'[restrict to one saved-query category]:category:__dbq_categories'
 }
 
@@ -121,10 +123,12 @@ _dbq_cmd_schema() {
     '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
     '(-d --database)'{-d,--database}'[override the host database]:database:' \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
-    '(-o --output)'{-o,--output}'[output format]:format:(text json)' \
+    '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)' \
     '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:' \
     '--refresh-schema[rebuild the schema cache first]' \
-    '--no-headers[text output: omit the header line]' \
+    '--no-headers[omit the header line]' \
+    '--max-col-width[table output: truncate cells wider than n (0 = unlimited)]:cells:' \
+    '--border[table output: frame style]:border:(ascii light markdown none)' \
     '(-T --tables)'{-T,--tables}'[print one schema-qualified table name per line]' \
     '*:table:_message "table name (bare or schema-qualified) from the cached schema"'
 }
@@ -134,7 +138,7 @@ _dbq_cmd_introspect() {
     '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
     '(-d --database)'{-d,--database}'[override the host database]:database:' \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
-    '(-o --output)'{-o,--output}'[output format]:format:(text json)' \
+    '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)' \
     '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:' \
     '--refresh-schema[rebuild the schema cache]'
 }
@@ -142,7 +146,7 @@ _dbq_cmd_introspect() {
 _dbq_cmd_hosts() {
   _arguments \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
-    '(-o --output)'{-o,--output}'[output format]:format:(text json)'
+    '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)'
 }
 
 _dbq_cmd_completion() {

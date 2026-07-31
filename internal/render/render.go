@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
@@ -17,9 +18,24 @@ import (
 type Options struct {
 	// NoHeaders omits the header line in text output and prints every row
 	// tab-separated for any shape, so a 1×1 result is just the bare value.
+	// In table output it drops the header row and the row-count footer.
 	// JSON ignores it — its objects are already self-describing.
 	NoHeaders bool
+
+	// MaxColWidth caps a table cell at this many display cells, truncating
+	// with an ellipsis beyond it; 0 means unlimited. Table output only — text
+	// and json carry values whole.
+	MaxColWidth int
+
+	// Border selects the table frame: ascii, light, markdown, or none. Empty
+	// means DefaultBorder, so a zero Options renders. Table output only.
+	Border string
 }
+
+// AutoFormat resolves to table when stdout is a terminal and text otherwise.
+// It is not a renderer: the CLI resolves it to a concrete format before the
+// render pivot, which keeps every renderer a pure function of (Rows, Options).
+const AutoFormat = "auto"
 
 // Renderer renders a neutral rowset to a writer.
 type Renderer interface {
@@ -27,17 +43,42 @@ type Renderer interface {
 }
 
 var renderers = map[string]Renderer{
-	"text": textRenderer{},
-	"json": jsonRenderer{},
+	"text":  textRenderer{},
+	"json":  jsonRenderer{},
+	"table": tableRenderer{},
 }
 
-// For returns the renderer for a format name.
+// Formats returns every accepted --output value: the concrete renderers
+// sorted, then AutoFormat. The shell completion and the usage text are
+// generated from it so they cannot drift from the registry.
+func Formats() []string {
+	names := make([]string, 0, len(renderers)+1)
+	for name := range renderers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return append(names, AutoFormat)
+}
+
+// For returns the renderer for a format name. AutoFormat is deliberately not
+// a key — passing it here is a bug, not a fallback.
 func For(format string) (Renderer, error) {
 	r, ok := renderers[format]
 	if !ok {
-		return nil, fmt.Errorf("unknown output format %q (supported: text, json)", format)
+		return nil, fmt.Errorf("unknown output format %q (supported: %s)", format, strings.Join(Formats(), ", "))
 	}
 	return r, nil
+}
+
+// Valid reports whether format is something the CLI accepts — a concrete
+// renderer, or AutoFormat, which it resolves to one before rendering. Use it
+// for flag validation; use For at the point of rendering.
+func Valid(format string) error {
+	if format == AutoFormat {
+		return nil
+	}
+	_, err := For(format)
+	return err
 }
 
 // Render writes rows to w in the named format. This is the single pivot

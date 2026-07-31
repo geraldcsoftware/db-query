@@ -24,9 +24,54 @@ func TestForUnknownFormat(t *testing.T) {
 	if _, err := For("yaml"); err == nil {
 		t.Fatal("want error for unknown format")
 	}
-	for _, f := range []string{"text", "json"} {
+	for _, f := range []string{"text", "json", "table"} {
 		if _, err := For(f); err != nil {
 			t.Fatalf("format %q: %v", f, err)
+		}
+	}
+}
+
+// TestForRejectsAuto pins that auto is not a renderer. Resolving it is the
+// CLI's job; if For accepted it as a synonym for something, a caller could
+// render "auto" without ever probing the terminal.
+func TestForRejectsAuto(t *testing.T) {
+	if _, err := For(AutoFormat); err == nil {
+		t.Fatal("For must reject auto — it is resolved in the CLI, not here")
+	}
+}
+
+func TestValid(t *testing.T) {
+	for _, f := range []string{"text", "json", "table", AutoFormat} {
+		if err := Valid(f); err != nil {
+			t.Errorf("Valid(%q) = %v, want nil", f, err)
+		}
+	}
+	if err := Valid("yaml"); err == nil {
+		t.Error("Valid(yaml) must fail")
+	}
+}
+
+// TestFormats pins the advertised value list. The zsh completion and the
+// usage text are generated from Formats, so this is what stops them drifting
+// apart from the renderer registry.
+func TestFormats(t *testing.T) {
+	got := strings.Join(Formats(), " ")
+	want := "json table text auto"
+	if got != want {
+		t.Fatalf("Formats() = %q, want %q", got, want)
+	}
+}
+
+// TestForErrorListsEveryFormat guards the operator-facing message: a mistyped
+// --output should name all the real options, including auto.
+func TestForErrorListsEveryFormat(t *testing.T) {
+	_, err := For("yaml")
+	if err == nil {
+		t.Fatal("want error")
+	}
+	for _, f := range Formats() {
+		if !strings.Contains(err.Error(), f) {
+			t.Errorf("error %q does not mention %q", err, f)
 		}
 	}
 }
