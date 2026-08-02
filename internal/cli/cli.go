@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +34,8 @@ Commands:
   list       (ls, l) [flags]                       list saved queries
   schema     (s)     --host <name> [flags] [table] show the cached schema; a table name restricts to that table
   introspect (i)     --host <name> [flags]         list tables and columns, rebuild the schema cache
-  hosts              [flags]                       list configured hosts
+  hosts              [flags] [name]                list configured hosts; a name shows that host's
+                                                   effective config and where each key came from
   version                                          print version information
   completion zsh                                   print the zsh completion script (see README to install)
 
@@ -97,6 +100,27 @@ Saved queries live under $DB_QUERY_QUERIES_DIR (else $XDG_CONFIG_HOME/db-query/q
 else ~/.config/db-query/queries) as <category>/<name>.sql, storing SQL with placeholders
 only — never resolved --param values. A saved query is bound to the provider it was saved
 against, so --source refuses to run it against a host of a different provider.
+
+Shared host configuration. A [profiles.<name>] section holds keys that several
+hosts have in common; a host picks them up with inherit = "<name>". Profiles may
+inherit profiles, so a base profile can carry the provider while narrower ones
+carry per-group credentials. Precedence runs explicit host key, then the nearest
+profile in the chain, then anything the resolved credential supplies. A profile
+is not connectable — it only feeds hosts. Run 'db-query hosts <name>' to see a
+host's merged result and which section each key came from.
+
+  [profiles.pg]
+  provider   = "postgres"
+  database   = "postgres"
+
+  [profiles.eus]
+  inherit    = "pg"
+  username   = "gchifanzwa"
+  credential = "bws:<secret-id>"
+
+  [hosts.lionel]
+  inherit    = "eus"
+  host       = "lionel.internal"
 
 Exit codes:
   0  success
@@ -727,13 +751,26 @@ func runHosts(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	var c commonFlags
 	fs := newFlagSet("hosts", stderr)
 	addCommon(fs, &c, globals)
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
 		return exitParse(err, stdout)
+	}
+	if len(positional) > 1 {
+		render.Error(stderr, c.output, fmt.Sprintf("expected at most one host name, got %d", len(positional)))
+		return 1
 	}
 	cfg, err := loadConfig(c.config)
 	if err != nil {
 		render.Error(stderr, c.output, err.Error())
 		return 1
+	}
+	if len(positional) == 1 {
+		h, err := cfg.Host(positional[0])
+		if err != nil {
+			render.Error(stderr, c.output, err.Error())
+			return 1
+		}
+		return renderRows(hostDetailRows(h), c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
 	}
 	rows := adapter.Rows{Columns: []string{"host", "provider", "database"}}
 	for _, name := range cfg.HostNames() {
@@ -742,6 +779,43 @@ func runHosts(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 		rows.Rows = append(rows.Rows, []*string{&n, &p, &d})
 	}
 	return renderRows(rows, c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
+}
+
+// hostDetailRows renders one host's effective configuration as key/value/source
+// triples: core keys in a fixed order, then adapter keys sorted, so the output
+// is stable enough to read by eye and to diff between two hosts. Unset keys are
+// omitted.
+//
+// Nothing here is resolved: 'username' and 'credential' print as the literal
+// resolver URIs the config holds. Those are pointers, already visible in the
+// file, so listing a host never touches a keychain, a vault, or the network.
+func hostDetailRows(h config.HostConfig) adapter.Rows {
+	rows := adapter.Rows{Columns: []string{"key", "value", "source"}}
+	add := func(key, value string) {
+		if value == "" {
+			return
+		}
+		k, v, s := key, value, h.Origins[key]
+		rows.Rows = append(rows.Rows, []*string{&k, &v, &s})
+	}
+	add("provider", h.Provider)
+	add("host", h.Host)
+	if h.Port != 0 {
+		add("port", strconv.Itoa(h.Port))
+	}
+	add("database", h.Database)
+	add("username", h.Username)
+	add("credential", h.Credential)
+
+	extras := make([]string, 0, len(h.Extra))
+	for k := range h.Extra {
+		extras = append(extras, k)
+	}
+	sort.Strings(extras)
+	for _, k := range extras {
+		add(k, h.Extra[k])
+	}
+	return rows
 }
 
 func readSQL(positional []string, file string) (string, error) {

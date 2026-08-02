@@ -62,7 +62,7 @@ _db-query() {
         'list:list saved queries'
         'schema:show the cached schema, a table, or the table list'
         'introspect:list tables and columns, rebuild the schema cache'
-        'hosts:list configured hosts'
+        'hosts:list configured hosts, or show one host effective config'
         'version:print version information'
         'completion:print the zsh completion script'
         'help:show usage'
@@ -143,10 +143,14 @@ _dbq_cmd_introspect() {
     '--refresh-schema[rebuild the schema cache]'
 }
 
+# The optional positional reuses the same host candidates as --host, so it
+# offers exactly what `hosts <name>` can display — profiles are excluded there
+# because they are not connectable and cannot be shown as an effective config.
 _dbq_cmd_hosts() {
   _arguments \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
-    '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)'
+    '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)' \
+    '1:host:__dbq_hosts'
 }
 
 _dbq_cmd_completion() {
