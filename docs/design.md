@@ -139,6 +139,25 @@ encrypt    = true                     # provider-specific; the sqlcmd adapter re
 - `username` may be a resolver URI, a literal, or omitted if the record already carries it.
 - Keys the adapter understands but the core doesn't (`encrypt`, `instance`, `sslmode`) pass through untouched.
 
+### 5.1 Shared configuration (profiles)
+
+Hosts cluster: several boxes in one environment differ only by address while sharing provider, database, user, and credential. A `[profiles.<name>]` section holds what they share; a host claims it with `inherit = "<name>"`. Profiles may inherit profiles, so a base profile can carry the provider while narrower ones carry per-group credentials.
+
+**[LOCKED] Precedence, extending §3:** explicit host key → nearest profile in the chain → resolver `extra`. Inheritance sits in the middle because inherited config is still config, just less specific than what is written on the host itself; `extra` remains the last resort it was.
+
+**[LOCKED] Merge before interpretation.** The inherit chain is flattened as raw TOML keys, and only the merged map is then interpreted. Two consequences, both load-bearing:
+
+- An inherited key gets exactly the same validation as a literal one — port parsing, the `password`-typo trap, adapter passthrough — with no second code path to keep in step.
+- There is no need to distinguish "unset" from "explicitly set to the zero value", which merging typed `HostConfig` structs would have forced for every field.
+
+Each merged key carries the section that supplied it (`host lionel`, `profile eus`). Origins serve error messages, which must blame the section that actually holds the mistake, and `hosts <name>`, which reports the effective config.
+
+**Profiles are not connectable.** They live in their own map, so they cannot appear in `hosts`, in `--host` completion, or as a query target; naming one as a host produces a distinct error rather than "unknown host". `inherit` is consumed during flattening and never reaches an adapter.
+
+**Profiles are validated through the hosts that use them.** A profile is partial by design and cannot be checked for completeness alone, so one no host reaches is inert. `provider` is therefore required only *after* merging.
+
+Load-time failures — unknown profile, inherit cycle, empty `inherit`, non-string `inherit` — abort the whole config, consistent with every other config error.
+
 ## 6. Execution layer (central executor)
 
 **[LOCKED]** One `Run` at the bottom; every adapter funnels through it. Adapters *build* an `Invocation`; the executor *runs* it and returns raw bytes. Two responsibilities, two places. The executor is **provider-blind**.

@@ -67,6 +67,24 @@ database = "db1"
 	}
 }
 
+// Profiles are not connectable, so offering one as a --host candidate would
+// complete to something that can only fail. Inherited keys still show in the
+// description, which is what makes a deduplicated config completable at all.
+func TestCompleteHostExcludesProfiles(t *testing.T) {
+	cfg := writeFile(t, t.TempDir(), "config.toml", `
+[profiles.pg]
+provider = "postgres"
+database = "postgres"
+
+[hosts.node]
+inherit = "pg"
+host    = "node.internal"
+`, 0o600)
+	if got := complete(t, "--config", cfg, "host"); got != "node\tpostgres · postgres\n" {
+		t.Fatalf("host completion = %q", got)
+	}
+}
+
 func TestCompleteHostBadConfigIsSilent(t *testing.T) {
 	if got := complete(t, "--config", "/nope/does-not-exist.toml", "host"); got != "" {
 		t.Fatalf("a bad config must produce nothing, got %q", got)

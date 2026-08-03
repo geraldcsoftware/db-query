@@ -396,6 +396,134 @@ func TestHostsCommand(t *testing.T) {
 	}
 }
 
+// inheritedConfig is the two-level shape profiles exist for: a base profile
+// holding what every host shares, a narrower one holding per-group
+// credentials, and hosts carrying only their address.
+func inheritedConfig(t *testing.T) string {
+	t.Helper()
+	return writeFile(t, t.TempDir(), "config.toml", `
+[profiles.pg]
+provider = "postgres"
+database = "postgres"
+
+[profiles.eus]
+inherit    = "pg"
+username   = "gchifanzwa"
+credential = "env:DBQ_TEST_PW"
+
+[hosts.lionel]
+inherit = "eus"
+host    = "lionel.internal"
+sslmode = "require"
+`, 0o600)
+}
+
+func TestHostsCommandOneHostShowsEffectiveConfig(t *testing.T) {
+	cfg := inheritedConfig(t)
+	code, out, errb := run(t, "hosts", "lionel", "--config", cfg, "--output", "text")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	for _, want := range []string{
+		"provider\tpostgres\tprofile pg",
+		"database\tpostgres\tprofile pg",
+		"username\tgchifanzwa\tprofile eus",
+		"credential\tenv:DBQ_TEST_PW\tprofile eus",
+		"host\tlionel.internal\thost lionel",
+		"sslmode\trequire\thost lionel",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	// Core keys come first in a fixed order, then adapter keys — deterministic
+	// output is what makes this readable by eye and testable.
+	if i, j := strings.Index(out, "provider"), strings.Index(out, "host\t"); i > j {
+		t.Errorf("provider must precede host:\n%s", out)
+	}
+	if i, j := strings.Index(out, "credential"), strings.Index(out, "sslmode"); i > j {
+		t.Errorf("core keys must precede adapter keys:\n%s", out)
+	}
+	// An unset core key is omitted rather than shown blank.
+	if strings.Contains(out, "port") {
+		t.Errorf("unset port should not be listed:\n%s", out)
+	}
+}
+
+func TestHostsCommandOneHostAcrossFormats(t *testing.T) {
+	cfg := inheritedConfig(t)
+	t.Run("json", func(t *testing.T) {
+		code, out, errb := run(t, "hosts", "lionel", "--config", cfg, "--output", "json")
+		if code != 0 {
+			t.Fatalf("code=%d err=%q", code, errb)
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal([]byte(out), &rows); err != nil {
+			t.Fatalf("not JSON: %v\n%s", err, out)
+		}
+		found := false
+		for _, r := range rows {
+			if r["key"] == "username" {
+				found = true
+				if r["value"] != "gchifanzwa" || r["source"] != "profile eus" {
+					t.Errorf("username row = %+v", r)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("no username row in %s", out)
+		}
+	})
+	t.Run("table", func(t *testing.T) {
+		code, out, errb := run(t, "hosts", "lionel", "--config", cfg, "--output", "table")
+		if code != 0 {
+			t.Fatalf("code=%d err=%q", code, errb)
+		}
+		if !strings.Contains(out, "+--") || !strings.Contains(out, "| key") {
+			t.Fatalf("not tabular:\n%s", out)
+		}
+	})
+}
+
+func TestHostsCommandArgumentErrors(t *testing.T) {
+	cfg := inheritedConfig(t)
+	t.Run("unknown host", func(t *testing.T) {
+		code, _, errb := run(t, "hosts", "nope", "--config", cfg)
+		if code != 1 || !strings.Contains(errb, "unknown host") {
+			t.Fatalf("code=%d err=%q", code, errb)
+		}
+	})
+	t.Run("profile is not a host", func(t *testing.T) {
+		code, _, errb := run(t, "hosts", "eus", "--config", cfg)
+		if code != 1 || !strings.Contains(errb, "is a profile") {
+			t.Fatalf("code=%d err=%q", code, errb)
+		}
+	})
+	t.Run("too many positionals", func(t *testing.T) {
+		code, _, errb := run(t, "hosts", "lionel", "testpg", "--config", cfg)
+		if code != 1 || !strings.Contains(errb, "at most one host name") {
+			t.Fatalf("code=%d err=%q", code, errb)
+		}
+	})
+}
+
+// Profiles are not connectable and must not appear in the listing.
+func TestHostsListingExcludesProfiles(t *testing.T) {
+	cfg := inheritedConfig(t)
+	code, out, errb := run(t, "hosts", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if !strings.Contains(out, "lionel") {
+		t.Fatalf("host missing from listing:\n%s", out)
+	}
+	for _, p := range []string{"eus", " pg "} {
+		if strings.Contains(out, p) {
+			t.Errorf("profile %q leaked into the listing:\n%s", p, out)
+		}
+	}
+}
+
 func TestQueryHappyPath(t *testing.T) {
 	seedSchemaCache(t) // cache present → single invocation, the user query
 	dir := fakePsql(t, `

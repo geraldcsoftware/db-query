@@ -1,6 +1,9 @@
 // Package config loads host configuration. Host is the config key:
 // provider, credential source, and connection details vary together per
 // host. Provider behavior lives in adapters, shared across hosts.
+//
+// Hosts that share settings pull them from a named profile through inherit,
+// so a value common to several hosts is written once. See inherit.go.
 package config
 
 import (
@@ -28,6 +31,10 @@ type HostConfig struct {
 	Username   string // literal or resolver URI
 	Credential string // resolver URI for the password
 	Extra      map[string]string
+	// Origins maps each effective key to the section that supplied it —
+	// "host lionel" or "profile eus". Populated for every key, inherited
+	// or not.
+	Origins map[string]string
 }
 
 // BWSConfig configures the Bitwarden Secrets Manager backend. AccessToken is a
@@ -37,10 +44,14 @@ type BWSConfig struct {
 	AccessToken string
 }
 
-// Config is the full parsed configuration file.
+// Config is the full parsed configuration file. Profiles holds the names of
+// declared [profiles.*] sections — they supply shared keys to hosts through
+// inherit and are never connectable themselves, so only their names are kept,
+// to tell a mistaken --host <profile> from an unknown host.
 type Config struct {
-	Hosts map[string]HostConfig
-	BWS   BWSConfig
+	Hosts    map[string]HostConfig
+	Profiles map[string]bool
+	BWS      BWSConfig
 }
 
 // coreKeys are the host-config keys the core interprets; everything else
@@ -48,6 +59,7 @@ type Config struct {
 var coreKeys = map[string]bool{
 	"provider": true, "host": true, "port": true,
 	"database": true, "username": true, "credential": true,
+	"inherit": true,
 }
 
 // credentialMistakeKeys are the keys users reach for when they mean
@@ -80,18 +92,33 @@ func DefaultPath() string {
 // Load parses the TOML config at path.
 func Load(path string) (Config, error) {
 	var raw struct {
-		Hosts map[string]map[string]any `toml:"hosts"`
-		BWS   struct {
+		Hosts    map[string]map[string]any `toml:"hosts"`
+		Profiles map[string]map[string]any `toml:"profiles"`
+		BWS      struct {
 			AccessToken string `toml:"accessToken"`
 		} `toml:"bws"`
 	}
 	if _, err := toml.DecodeFile(path, &raw); err != nil {
 		return Config{}, fmt.Errorf("loading config %s: %w", path, err)
 	}
-	cfg := Config{Hosts: make(map[string]HostConfig, len(raw.Hosts)), BWS: BWSConfig{AccessToken: raw.BWS.AccessToken}}
-	for name, keys := range raw.Hosts {
-		h := HostConfig{Name: name, Extra: map[string]string{}}
-		for k, v := range keys {
+	cfg := Config{
+		Hosts:    make(map[string]HostConfig, len(raw.Hosts)),
+		Profiles: make(map[string]bool, len(raw.Profiles)),
+		BWS:      BWSConfig{AccessToken: raw.BWS.AccessToken},
+	}
+	for name := range raw.Profiles {
+		cfg.Profiles[name] = true
+	}
+	for name, own := range raw.Hosts {
+		// Merge the inherit chain first; the switch below then interprets
+		// inherited and literal keys identically, blaming whichever section
+		// origins says a bad value came from.
+		r, err := flatten("host "+name, own, raw.Profiles)
+		if err != nil {
+			return Config{}, err
+		}
+		h := HostConfig{Name: name, Extra: map[string]string{}, Origins: r.origins}
+		for k, v := range r.keys {
 			switch k {
 			case "provider":
 				h.Provider, _ = v.(string)
@@ -104,11 +131,11 @@ func Load(path string) (Config, error) {
 				case string:
 					p, err := strconv.Atoi(n)
 					if err != nil {
-						return Config{}, fmt.Errorf("host %s: port %q is not a number", name, n)
+						return Config{}, fmt.Errorf("%s: port %q is not a number", r.origins[k], n)
 					}
 					h.Port = p
 				default:
-					return Config{}, fmt.Errorf("host %s: port has unsupported type %T", name, v)
+					return Config{}, fmt.Errorf("%s: port has unsupported type %T", r.origins[k], v)
 				}
 			case "database":
 				h.Database, _ = v.(string)
@@ -119,12 +146,13 @@ func Load(path string) (Config, error) {
 			default:
 				if credentialMistakeKeys[strings.ToLower(k)] {
 					return Config{}, fmt.Errorf(
-						"host %s: unknown key %q — the password source belongs under 'credential' as a resolver URI (e.g. credential = %q)",
-						name, k, "bws:<secret-id>")
+						"%s: unknown key %q — the password source belongs under 'credential' as a resolver URI (e.g. credential = %q)",
+						r.origins[k], k, "bws:<secret-id>")
 				}
 				h.Extra[k] = stringify(v)
 			}
 		}
+		// Checked after merging, so a profile may be the one that supplies it.
 		if h.Provider == "" {
 			return Config{}, fmt.Errorf("host %s: provider is required", name)
 		}
@@ -152,6 +180,11 @@ func stringify(v any) string {
 func (c Config) Host(name string) (HostConfig, error) {
 	h, ok := c.Hosts[name]
 	if !ok {
+		if c.Profiles[name] {
+			return HostConfig{}, fmt.Errorf(
+				"%q is a profile, not a host — profiles supply shared keys to hosts via inherit (hosts: %v)",
+				name, c.HostNames())
+		}
 		return HostConfig{}, fmt.Errorf("unknown host %q (configured: %v)", name, c.HostNames())
 	}
 	return h, nil

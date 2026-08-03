@@ -27,6 +27,7 @@ db-query schema     --host prod-core people   # one table's columns (bare or sch
 db-query schema     --host prod-core --tables # one schema-qualified table name per line
 db-query introspect --host prod-core          # list tables + columns, always live
 db-query hosts                                # list configured hosts
+db-query hosts      lionel                    # one host's effective config, with each key's source
 ```
 
 - SQL is given as one positional argument, via `-f file` (`-` for stdin), piped on stdin,
@@ -222,6 +223,62 @@ The password source is always the **`credential`** key — a resolver URI, never
 a plaintext password. A host key named `password` (or `pwd`/`pass`/`passwd`) is
 rejected at load with a pointer to `credential`, so a value under the wrong key
 can't be silently ignored and leave the client prompting for a password.
+
+### Sharing configuration between hosts
+
+Hosts that differ only in their address don't need to repeat everything else. A
+`[profiles.<name>]` section holds the shared keys and a host picks them up with
+`inherit`:
+
+```toml
+[profiles.pg]
+provider   = "postgres"
+database   = "postgres"
+
+[profiles.eus]                        # profiles may inherit profiles
+inherit    = "pg"
+username   = "gchifanzwa"
+credential = "bws:<secret-id>"
+
+[hosts.lionel]
+inherit    = "eus"
+host       = "lionel.internal"
+
+[hosts.norton]
+inherit    = "eus"
+host       = "norton.internal"
+```
+
+A profile accepts every key a host does, including provider-specific ones, which
+merge key by key rather than wholesale. Precedence: **an explicit host key wins
+over the nearest profile in the chain, which wins over anything the resolved
+credential supplies.**
+
+A profile is not connectable — `--host eus` says so rather than reporting an
+unknown host, profiles never appear in `db-query hosts` or in `--host`
+completion, and `inherit` is consumed by the loader so it can never reach a
+client as a connection parameter. An `inherit` naming a profile that doesn't
+exist, a cycle, or a host left with no `provider` after merging all fail at load
+with the offending section named.
+
+Inheritance means a host's settings are no longer all in one place, so
+`db-query hosts <name>` prints the merged result and where each key came from:
+
+```
+$ db-query hosts lionel
++------------+-------------------+-------------+
+| key        | value             | source      |
++------------+-------------------+-------------+
+| provider   | postgres          | profile pg  |
+| database   | postgres          | profile pg  |
+| username   | gchifanzwa        | profile eus |
+| credential | bws:<secret-id>   | profile eus |
+| host       | lionel.internal   | host lionel |
++------------+-------------------+-------------+
+```
+
+It resolves nothing: `username` and `credential` print as the resolver URIs the
+config holds, so the command never opens a vault, a keychain, or a connection.
 
 ### Bitwarden Secrets Manager token
 
