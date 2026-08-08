@@ -4,9 +4,11 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/geraldcsoftware/db-query/internal/config"
+	"github.com/geraldcsoftware/db-query/internal/dblist"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 )
 
@@ -38,7 +40,7 @@ func runCompletion(args []string, stdout, stderr io.Writer) int {
 // returns 0 — a completion callback must never emit noise into the prompt or a
 // non-zero status. stderr is accepted for signature symmetry and never used.
 func runComplete(args []string, stdout, stderr io.Writer) int {
-	var target, cfgPath, category string
+	var target, cfgPath, category, host string
 	// Order-independent scan: the zsh script passes flags around the target,
 	// but keep parsing forgiving so the helper is also pleasant to invoke by
 	// hand when debugging.
@@ -54,11 +56,22 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 				i++
 				category = args[i]
 			}
+		case "--host", "-H":
+			if i+1 < len(args) {
+				i++
+				host = args[i]
+			}
 		default:
 			if target == "" && !strings.HasPrefix(args[i], "-") {
 				target = args[i]
 			}
 		}
+	}
+	// An exported host stands in for one not yet typed on the line; the helper
+	// is a subprocess, so it inherits it for free. The flag wins, matching the
+	// CLI's own flag-then-environment precedence.
+	if host == "" {
+		host = os.Getenv("DB_QUERY_HOST")
 	}
 	switch target {
 	case "host":
@@ -67,8 +80,29 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 		completeSources(category, stdout)
 	case "category":
 		completeCategories(stdout)
+	case "database":
+		completeDatabases(host, stdout)
 	}
 	return 0
+}
+
+// completeDatabases prints one cached database name per line for the given
+// host, with no description — so the candidate line carries no tab. The names
+// come from the cache `db-query <host> databases` wrote; nothing here connects,
+// resolves a credential, or even reads the config file. A host that has never
+// been listed, or a cache that will not parse, yields no output at all: zsh
+// then completes nothing rather than falling back to filenames.
+func completeDatabases(host string, stdout io.Writer) {
+	if host == "" {
+		return
+	}
+	names, err := dblist.Read(dblist.CachePath(host))
+	if err != nil {
+		return
+	}
+	for _, n := range names {
+		fmt.Fprintln(stdout, n)
+	}
 }
 
 // completeHosts prints each configured host as "name<TAB>provider · database"

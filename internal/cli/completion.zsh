@@ -7,15 +7,17 @@ compdef _db-query db-query
 #   source <(db-query completion zsh)                  # add to ~/.zshrc
 #   db-query completion zsh > "${fpath[1]}/_db-query"  # then run: compinit
 #
-# Dynamic values (hosts, saved queries, categories) are fetched at completion
-# time from the hidden `db-query __complete` command, which reads only local
-# config and saved-query files — never a credential or a database.
+# Dynamic values (hosts, databases, saved queries, categories) are fetched at
+# completion time from the hidden `db-query __complete` command, which reads
+# only local config, cache and saved-query files — never a credential or a
+# database. Database names come from the cache `db-query --host X databases`
+# writes; a host that has never been listed simply offers nothing.
 
 # __dbq_complete <target> asks the binary for candidates and adds them with
 # their descriptions. The helper prints "name<TAB>description" lines; splitting
 # on the literal tab keeps colons and spaces in a SQL preview from corrupting
-# the candidate list. An already-typed --config/--category is passed through so
-# completion reflects the configuration actually in effect.
+# the candidate list. An already-typed --config/--category/--host is passed
+# through so completion reflects the configuration actually in effect.
 __dbq_complete() {
   local target=$1
   local -a values displays ctx
@@ -24,15 +26,27 @@ __dbq_complete() {
   [[ -n ${opt_args[-c]} ]]         && ctx+=(--config "${opt_args[-c]}")
   [[ -n ${opt_args[--category]} ]] && ctx+=(--category "${opt_args[--category]}")
   [[ -n ${opt_args[-C]} ]]         && ctx+=(--category "${opt_args[-C]}")
+  # The long and short spellings land in separate opt_args keys — -H does not
+  # fold into --host — so both are tested, as with --config and --category
+  # above. Either is normalised to --host on the helper's argv.
+  [[ -n ${opt_args[--host]} ]]     && ctx+=(--host "${opt_args[--host]}")
+  [[ -n ${opt_args[-H]} ]]         && ctx+=(--host "${opt_args[-H]}")
   db-query __complete "${ctx[@]}" "$target" 2>/dev/null | while IFS=$'\t' read -r name desc; do
     values+=("$name")
-    displays+=("${name}  --  ${desc}")
+    # Database candidates carry no description, so the line has no tab and desc
+    # is empty; without this the display string would trail a bare "  --  ".
+    if [[ -n $desc ]]; then
+      displays+=("${name}  --  ${desc}")
+    else
+      displays+=("${name}")
+    fi
   done
   (( ${#values} )) && compadd -d displays -a values
 }
 __dbq_hosts()      { __dbq_complete host }
 __dbq_sources()    { __dbq_complete source }
 __dbq_categories() { __dbq_complete category }
+__dbq_databases()  { __dbq_complete database }
 
 _db-query() {
   local curcontext="$curcontext" state line
@@ -45,7 +59,7 @@ _db-query() {
   # is passed through to the dynamic helpers as well.
   _arguments -C \
     '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
-    '(-d --database)'{-d,--database}'[override the host database]:database:' \
+    '(-d --database)'{-d,--database}'[override the host database]:database:__dbq_databases' \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
     '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)' \
     '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:' \
@@ -62,6 +76,7 @@ _db-query() {
         'list:list saved queries'
         'schema:show the cached schema, a table, or the table list'
         'introspect:list tables and columns, rebuild the schema cache'
+        'databases:list databases on the host, caching them for --database completion'
         'hosts:list configured hosts, or show one host effective config'
         'version:print version information'
         'completion:print the zsh completion script'
@@ -84,6 +99,7 @@ _db-query() {
         list|ls|l)    _dbq_cmd_list ;;
         schema|s)     _dbq_cmd_schema ;;
         introspect|i) _dbq_cmd_introspect ;;
+        databases)    _dbq_cmd_databases ;;
         hosts)        _dbq_cmd_hosts ;;
         completion)   _dbq_cmd_completion ;;
       esac
@@ -94,7 +110,7 @@ _db-query() {
 _dbq_cmd_query() {
   _arguments \
     '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
-    '(-d --database)'{-d,--database}'[override the host database]:database:' \
+    '(-d --database)'{-d,--database}'[override the host database]:database:__dbq_databases' \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
     '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)' \
     '*'{-p,--param}'[bind a query parameter, k=v]:param:' \
@@ -121,7 +137,7 @@ _dbq_cmd_list() {
 _dbq_cmd_schema() {
   _arguments \
     '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
-    '(-d --database)'{-d,--database}'[override the host database]:database:' \
+    '(-d --database)'{-d,--database}'[override the host database]:database:__dbq_databases' \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
     '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)' \
     '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:' \
@@ -136,11 +152,23 @@ _dbq_cmd_schema() {
 _dbq_cmd_introspect() {
   _arguments \
     '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
-    '(-d --database)'{-d,--database}'[override the host database]:database:' \
+    '(-d --database)'{-d,--database}'[override the host database]:database:__dbq_databases' \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
     '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)' \
     '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:' \
     '--refresh-schema[rebuild the schema cache]'
+}
+
+# `databases` is what fills the cache --database completes from, so it offers no
+# --database of its own beyond the shared override: completing a database name
+# for the command that discovers database names would be circular.
+_dbq_cmd_databases() {
+  _arguments \
+    '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
+    '(-d --database)'{-d,--database}'[override which database to connect to]:database:__dbq_databases' \
+    '(-c --config)'{-c,--config}'[config file path]:file:_files' \
+    '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)' \
+    '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:'
 }
 
 # The optional positional reuses the same host candidates as --host, so it
