@@ -165,7 +165,7 @@ _dbq_cmd_introspect() {
 _dbq_cmd_databases() {
   _arguments \
     '(-H --host)'{-H,--host}'[host entry from config]:host:__dbq_hosts' \
-    '(-d --database)'{-d,--database}'[override which database to connect to]:database:__dbq_databases' \
+    '(-d --database)'{-d,--database}'[override which database to connect to]:database:' \
     '(-c --config)'{-c,--config}'[config file path]:file:_files' \
     '(-o --output)'{-o,--output}'[output format]:format:(json table text auto)' \
     '(-t --timeout)'{-t,--timeout}'[per-invocation deadline]:duration:'

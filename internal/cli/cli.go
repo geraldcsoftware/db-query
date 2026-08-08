@@ -44,7 +44,7 @@ Commands:
 
 Flags:
   --host (-H) <name>      : host entry from the config file
-  --database (-d) <db>    : override the host's configured database (query, schema, introspect)
+  --database (-d) <db>    : override the host's configured database (query, schema, introspect, databases)
   --config (-c) <path>    : config file (default: $DB_QUERY_CONFIG or ~/.config/db-query/config.toml)
   --output (-o) <format>  : json|table|text|auto (default auto)
   --param (-p) k=v        : bind a query parameter (repeatable); psql: :'k', sqlcmd: $(k)
@@ -767,15 +767,12 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 // text even under --output json, because the command is succeeding and stderr
 // carries structured errors only on failure.
 func refreshDatabaseList(r resolved, c commonFlags, stderr io.Writer) {
-	rows, code := runOnce(r, adapter.Query{SQL: r.adapter.ListDatabasesSQL()}, c, false, io.Discard)
-	if code != 0 {
+	// io.Discard: the underlying error must not print as though introspect
+	// itself had failed. The warning points at the command that will show it.
+	if _, code := listDatabases(r, c, io.Discard); code != 0 {
 		fmt.Fprintf(stderr, "db-query: warning: could not refresh the database list for %s; "+
 			"--database completion may be stale. Run 'db-query --host %s databases' to see why.\n",
 			r.host.Name, r.host.Name)
-		return
-	}
-	if err := dblist.Write(dblist.CachePath(r.host.Name), databaseNames(rows)); err != nil {
-		fmt.Fprintf(stderr, "db-query: warning: could not write the database-list cache: %v\n", err)
 	}
 }
 
@@ -796,19 +793,33 @@ func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) 
 		return code
 	}
 
-	rows, code := runOnce(r, adapter.Query{SQL: r.adapter.ListDatabasesSQL()}, c, false, stderr)
+	rows, code := listDatabases(r, c, stderr)
 	if code != 0 {
 		return code
 	}
-	rows = databaseListRows(rows)
+	return renderRows(databaseListRows(rows), c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
+}
 
-	// Keyed on the config label, not the resolved address: the address may come
-	// from the credential, which completion may never resolve.
-	if err := dblist.Write(dblist.CachePath(r.host.Name), databaseNames(rows)); err != nil {
-		render.Error(stderr, c.output, err.Error())
-		return 1
+// listDatabases runs a host's catalog listing and persists the names for
+// --database completion, returning the rows so a caller can render them too.
+// It pairs the adapter query with the cache write the same way buildSchema
+// does for introspection.
+//
+// The cache is keyed on the config label, not the resolved server address: the
+// address may come from the credential via MergeCredential, and completion may
+// never resolve one. Errors render to errOut, which a caller treating failure
+// as non-fatal sets to io.Discard so nothing prints as though the command it
+// was attached to had failed.
+func listDatabases(r resolved, c commonFlags, errOut io.Writer) (adapter.Rows, int) {
+	rows, code := runOnce(r, adapter.Query{SQL: r.adapter.ListDatabasesSQL()}, c, false, errOut)
+	if code != 0 {
+		return adapter.Rows{}, code
 	}
-	return renderRows(rows, c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
+	if err := dblist.Write(dblist.CachePath(r.host.Name), databaseNames(rows)); err != nil {
+		render.Error(errOut, c.output, err.Error())
+		return adapter.Rows{}, 1
+	}
+	return rows, 0
 }
 
 // databaseListRows renames the provider's column to a neutral "database".

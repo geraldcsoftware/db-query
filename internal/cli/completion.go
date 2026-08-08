@@ -35,10 +35,12 @@ func runCompletion(args []string, stdout, stderr io.Writer) int {
 
 // runComplete is the hidden dynamic-completion helper the zsh script shells
 // into on every TAB. It prints tab-delimited "name<TAB>description" candidate
-// lines for the requested target, reading only local files. It never resolves
-// a credential or opens a database, and on any error it prints nothing and
-// returns 0 — a completion callback must never emit noise into the prompt or a
-// non-zero status. stderr is accepted for signature symmetry and never used.
+// lines for the requested target — except the database target, whose
+// candidates are bare names carrying no description and so no tab — reading
+// only local files. It never resolves a credential or opens a database, and on
+// any error it prints nothing and returns 0 — a completion callback must never
+// emit noise into the prompt or a non-zero status. stderr is accepted for
+// signature symmetry and never used.
 func runComplete(args []string, stdout, stderr io.Writer) int {
 	var target, cfgPath, category, host string
 	// Order-independent scan: the zsh script passes flags around the target,
