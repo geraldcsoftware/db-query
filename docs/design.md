@@ -587,3 +587,169 @@ in go-pretty and are adapted:
 - **`none`** uses `OptionsNoBordersAndSeparators`, which leaves the cell padding
   hanging off both edges. The renderer trims one leading space and any trailing
   spaces per line so rows start at column zero, matching `text`.
+
+### 13.9 `--database` completion from a cached list (extends §13.2, §13.7)
+
+`--database` takes a value the shell cannot guess, so it completes to nothing.
+The obvious fix — have the completion callback ask the server what databases
+exist — is not available, because `runComplete` is bound by a rule stated in
+its own doc comment: it *never resolves a credential or opens a database, and
+on any error prints nothing and returns 0*. That rule is not fussiness. A
+credential may be a `bw:`/`bws:` URI, which shells out to the Bitwarden CLI;
+resolving one on a keystroke means a TAB that stalls for seconds, or a vault
+unlock prompt fighting the prompt line. **The rule is not relaxed here.**
+
+The list is instead produced by a visible command and read from a file, which
+is the same split §13.2 already draws between `schema` (reads the cache) and
+`introspect` (goes live and rebuilds it):
+
+```
+db-query --host X databases        connects, prints the list, writes the cache
+              │
+   ~/.cache/db-query/databases/X-<hash>.json      names only
+              │
+db-query __complete database       reads that file and nothing else
+              │
+       --database <TAB>
+```
+
+**The `databases` command.** Canonical form is `db-query --host X databases`,
+with the connection up front per §13.7; `databases --host X` is equally valid,
+since the five shared flags are accepted in both positions and this command is
+not an exception. It always goes live — there is no cached-read mode, because
+the only consumer of the cache is the completion helper, which reads the file
+directly. It honours `--output`, `--timeout` and `--config` like every other
+row-printing command (§8), renders one column headed `database`, and accepts
+`--database` to override which database it attaches to. Exit codes follow
+§13.3 unchanged.
+
+It attaches to `host.Database` (falling back to the provider's own default when
+that is unset, exactly as `Env` already arranges). It does **not** omit the
+database from the client invocation: `internal/adapter/postgres.go` sets every
+`PG*` var even to its default precisely so an inherited shell `PGDATABASE`
+cannot silently redirect a query, and skipping it would reopen that hole. The
+attach target does not affect the answer in any case — both catalogs below are
+server-scoped — so it only decides whether the connection succeeds at all.
+
+**Adapter surface.** `Adapter` gains `ListDatabasesSQL() string` beside
+`IntrospectSQL()`, so a third client remains one new adapter and zero executor
+changes (§7).
+
+```sql
+-- postgres
+SELECT datname
+FROM pg_database
+WHERE datallowconn
+  AND NOT datistemplate
+  AND has_database_privilege(current_user, datname, 'CONNECT')
+ORDER BY datname;
+```
+
+```sql
+-- sqlserver
+SELECT name
+FROM sys.databases
+WHERE state_desc = 'ONLINE'
+  AND name <> 'tempdb'
+  AND HAS_DBACCESS(name) = 1
+ORDER BY name;
+```
+
+`NOT datistemplate` is load-bearing rather than belt-and-braces: `template1`
+has `datallowconn = true` and passes the privilege check, so only the template
+flag excludes it. `tempdb` is excluded **by name**, not by `database_id` — the
+familiar `master=1, tempdb=2` mapping is not documented by Microsoft as a
+stable contract. Both queries need no privilege beyond an ordinary login, and
+both produce a single non-NULL column, so neither exercises the `0x01` NULL
+sentinel nor makes the `0x1f` separator load-bearing.
+
+**Both providers degrade to a short list, never an error.** A login with
+restricted visibility silently sees fewer databases; it does not fail. This is
+worth stating because it is the opposite of what "non-fatal refresh" below
+might imply — there is no error to warn about, and a truncated candidate list
+is indistinguishable from a complete one. No mitigation is proposed: a missing
+completion candidate is a minor harm, and inferring truncation would be worse.
+
+**Cache location and naming (`internal/dblist`).** A sibling to
+`internal/schema`, not a reuse of it — same shape, different key.
+
+- Directory: `$XDG_CACHE_HOME/db-query/databases/`, fallback
+  `~/.cache/db-query/databases/`.
+- Filename: `<sanitized-name>-<8hexhash>.json`, hash being the first 8 hex
+  characters of `sha256(name)`. As in §13.2 the hash carries uniqueness and the
+  readable part is legibility only; no NUL separator is needed, there being one
+  component.
+- Contents: a bare JSON array of names, `["postgres","reporting"]`. The command
+  builds `adapter.Rows` for the renderer and flattens to `[]string` for the
+  file. The two representations are accepted because the flat array is what the
+  helper wants and keeps the file trivially readable by eye.
+- No TTL. Nothing in this design auto-refreshes, so an expiry could only ever
+  remove candidates and never replace them with fresher ones. The cache lives
+  until `databases` runs again.
+
+**The key is the config label — `HostConfig.Name` — and this differs from
+§13.2 deliberately.** The schema cache keys on `HostConfig.Host`, the resolved
+*server address*, which is the better identity: repointing a host entry yields
+a different key, so a stale file is simply never read. That scheme cannot be
+used here. `MergeCredential` fills a blank `host`, `port` or `database` from
+the resolved secret's Extra bag, so for a credential-supplied host the address
+does not exist until a credential has been resolved — which the helper may not
+do. Keying on the address would leave `--database <TAB>` permanently and
+silently dead for exactly the `bws:`-backed hosts most worth completing.
+
+The cost is accepted and bounded. Repointing a host entry, or changing a
+`host`/`port` on a profile it inherits, leaves the previous server's names
+cached under that label until `databases` is run again; and two config files
+that define the same label share one file, the `--config` path being
+deliberately absent from the key. Both cost a stale *suggestion*. A name that
+no longer exists fails at connect time with the client's own error; nothing is
+silently corrupted. Stamping the resolved identity inside the file to detect
+drift was considered and rejected — it would catch only the edited-config case
+(never the changed-secret case, where there is nothing in config to compare
+against) and would force the file to become an object wrapping the array.
+
+`internal/schema` keeps its keying scheme untouched. Its consumers have already
+resolved a credential, so it can afford a key the helper cannot compute. Only
+the shared `CacheDir`/`sanitize` helpers move out, into a small `internal/cache`
+used by both — a mechanical extraction that changes no behaviour and no path.
+
+**`introspect` refreshes the list too** (§13.2). It already holds a live
+connection and already exists to rebuild caches, so a host that has ever been
+introspected has database completion without a separate step. `query` does not
+— it is the hot path and must not grow a second round-trip. A failure of this
+extra refresh is **non-fatal**: warn on stderr, still write the schema cache,
+still exit 0. `introspect`'s contract is to rebuild the schema, and a failed
+bonus must not break the command the user actually ran. Per the paragraph
+above, in practice this path catches transport failure — a client that exits
+non-zero or a broken pipe — not permission problems, which do not error.
+
+**Completion helper.** `runComplete` gains a `database` target. It determines
+the host from `--host` passed by the shell script, else `DB_QUERY_HOST`, which
+needs no work — the helper is a subprocess and inherits it. With no
+determinable host, or no cache file, it prints nothing and returns 0, as every
+other target already does. Candidates are names only: the helper's line format
+is `name<TAB>description` and the database target simply omits the tab.
+
+**`completion.zsh`.** Four changes:
+
+- A `__dbq_databases` function calling `__dbq_complete database`, and
+  `:database:__dbq_databases` replacing the empty `:database:` action in all
+  four specs — top-level, `query`, `schema`, `introspect`.
+- `--host` pass-through in `__dbq_complete`, testing **both** `opt_args[--host]`
+  and `opt_args[-H]` and normalising to `--host` on the helper's argv. The two
+  forms land in separate keys — `-H` does not fold into `--host` — which is why
+  the existing `--config`/`-c` and `--category`/`-C` pairs are each tested
+  twice, and this follows them.
+- A guard on the display string, so a candidate with no description renders as
+  a bare name rather than a dangling `name  --  `.
+- Nothing else. A cold cache adds no candidates, and verification against zsh
+  5.9 confirms this completes nothing rather than falling through to filenames
+  — under the default completer and under chains including `_expand`,
+  `_correct`, `_approximate` and an explicit `_files`. No `_message` fallback is
+  therefore needed.
+
+The top-level `_arguments -C` populates the same `opt_args` map the per-command
+functions read, so a host given before the command reaches a `--database`
+completing after it. Verified in all four orderings, including the
+`db-query --host X --database <TAB>` case with no command typed at all, which
+is the §13.7 workflow this feature most serves.
