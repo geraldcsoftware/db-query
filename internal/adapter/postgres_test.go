@@ -191,6 +191,29 @@ func TestPostgresIntrospectSQL(t *testing.T) {
 	}
 }
 
+// TestPostgresListDatabasesSQL pins the three predicates the candidate list
+// depends on. NOT datistemplate is load-bearing rather than belt-and-braces:
+// template1 has datallowconn = true and passes the privilege check, so only the
+// template flag keeps it out of completion.
+func TestPostgresListDatabasesSQL(t *testing.T) {
+	sql := postgresAdapter{}.ListDatabasesSQL()
+	for _, want := range []string{
+		"pg_database",
+		"datallowconn",
+		"NOT datistemplate",
+		"has_database_privilege(current_user, datname, 'CONNECT')",
+		"ORDER BY datname",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("list-databases sql missing %q:\n%s", want, sql)
+		}
+	}
+	// One column only: completion candidates are bare names (design.md §13.9).
+	if strings.Count(sql, "SELECT") != 1 || strings.Contains(sql, ",\n") {
+		t.Fatalf("list-databases sql must select exactly one column:\n%s", sql)
+	}
+}
+
 func TestAdapterRegistry(t *testing.T) {
 	for _, name := range []string{"postgres", "sqlserver"} {
 		a, err := For(name)

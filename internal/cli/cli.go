@@ -18,6 +18,7 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
+	"github.com/geraldcsoftware/db-query/internal/dblist"
 	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/render"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
@@ -34,6 +35,8 @@ Commands:
   list       (ls, l) [flags]                       list saved queries
   schema     (s)     --host <name> [flags] [table] show the cached schema; a table name restricts to that table
   introspect (i)     --host <name> [flags]         list tables and columns, rebuild the schema cache
+  databases          --host <name> [flags]         list databases on the host, caching the names for
+                                                   --database completion
   hosts              [flags] [name]                list configured hosts; a name shows that host's
                                                    effective config and where each key came from
   version                                          print version information
@@ -213,6 +216,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runSchema(cmdArgs, globals, stdout, stderr)
 	case "introspect":
 		return runIntrospect(cmdArgs, globals, stdout, stderr)
+	case "databases":
+		return runDatabases(cmdArgs, globals, stdout, stderr)
 	case "hosts":
 		return runHosts(cmdArgs, globals, stdout, stderr)
 	case "__complete":
@@ -744,7 +749,90 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 		render.Error(stderr, c.output, err.Error())
 		return 1
 	}
+	// The connection is already open and this command exists to rebuild caches,
+	// so the database list is refreshed in the same run. Failure is a warning.
+	refreshDatabaseList(r, c, stderr)
 	return renderRows(rows, c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
+}
+
+// refreshDatabaseList re-runs a host's catalog listing and persists the names
+// for --database completion. It is a bonus attached to introspect, so every
+// failure is a warning and never an exit code: introspect's contract is to
+// rebuild the schema, which has already succeeded by the time this runs.
+//
+// It only ever catches transport-level failure — a client that could not start
+// or exited nonzero. Neither provider errors on a permission shortfall; a
+// restricted login simply sees fewer databases, and a truncated list is
+// indistinguishable from a complete one (design.md §13.9). The warning is plain
+// text even under --output json, because the command is succeeding and stderr
+// carries structured errors only on failure.
+func refreshDatabaseList(r resolved, c commonFlags, stderr io.Writer) {
+	rows, code := runOnce(r, adapter.Query{SQL: r.adapter.ListDatabasesSQL()}, c, false, io.Discard)
+	if code != 0 {
+		fmt.Fprintf(stderr, "db-query: warning: could not refresh the database list for %s; "+
+			"--database completion may be stale. Run 'db-query --host %s databases' to see why.\n",
+			r.host.Name, r.host.Name)
+		return
+	}
+	if err := dblist.Write(dblist.CachePath(r.host.Name), databaseNames(rows)); err != nil {
+		fmt.Fprintf(stderr, "db-query: warning: could not write the database-list cache: %v\n", err)
+	}
+}
+
+// runDatabases lists the databases reachable on a host and persists the names
+// for shell completion. It is the only writer of that cache: the completion
+// helper reads the file and never opens a connection of its own, which is what
+// keeps a TAB from resolving a credential (design.md §13.9).
+func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) int {
+	var c commonFlags
+	fs := newFlagSet("databases", stderr)
+	addCommon(fs, &c, globals)
+	if err := fs.Parse(args); err != nil {
+		return exitParse(err, stdout)
+	}
+
+	r, code := setup(c, stderr)
+	if code != 0 {
+		return code
+	}
+
+	rows, code := runOnce(r, adapter.Query{SQL: r.adapter.ListDatabasesSQL()}, c, false, stderr)
+	if code != 0 {
+		return code
+	}
+	rows = databaseListRows(rows)
+
+	// Keyed on the config label, not the resolved address: the address may come
+	// from the credential, which completion may never resolve.
+	if err := dblist.Write(dblist.CachePath(r.host.Name), databaseNames(rows)); err != nil {
+		render.Error(stderr, c.output, err.Error())
+		return 1
+	}
+	return renderRows(rows, c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
+}
+
+// databaseListRows renames the provider's column to a neutral "database".
+// Postgres returns datname and SQL Server returns name; the CLI presents one
+// vocabulary so a caller parsing the output does not have to know the provider.
+func databaseListRows(rows adapter.Rows) adapter.Rows {
+	if len(rows.Columns) > 0 {
+		rows.Columns = append([]string{"database"}, rows.Columns[1:]...)
+	}
+	return rows
+}
+
+// databaseNames flattens the first column into the flat list the cache holds.
+// NULL and empty names cannot occur in either catalog, and are skipped rather
+// than cached as empty candidates.
+func databaseNames(rows adapter.Rows) []string {
+	names := make([]string, 0, len(rows.Rows))
+	for _, row := range rows.Rows {
+		if len(row) == 0 || row[0] == nil || *row[0] == "" {
+			continue
+		}
+		names = append(names, *row[0])
+	}
+	return names
 }
 
 func runHosts(args []string, globals commonFlags, stdout, stderr io.Writer) int {

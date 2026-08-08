@@ -131,6 +131,23 @@ func (sqlserverAdapter) IsSchemaError(r executor.RawResult) bool {
 	return r.ExitCode != 0 && (mssqlSchemaErr.Match(r.Stderr) || mssqlSchemaErr.Match(r.Stdout))
 }
 
+// ListDatabasesSQL lists the databases this login can actually connect to, one
+// bare name per row. HAS_DBACCESS is the real permission filter and needs only
+// public role membership; state_desc excludes RESTORING/SUSPECT/OFFLINE and the
+// rest, which matters for an elevated login that would otherwise see them.
+// tempdb is excluded by name rather than by database_id: the familiar
+// master=1, tempdb=2 mapping is not documented as a stable contract. Note
+// sys.databases is row-filtered by permission, so a restricted login sees a
+// shorter list rather than an error.
+func (sqlserverAdapter) ListDatabasesSQL() string {
+	return `SELECT name
+FROM sys.databases
+WHERE state_desc = 'ONLINE'
+  AND name <> 'tempdb'
+  AND HAS_DBACCESS(name) = 1
+ORDER BY name;`
+}
+
 func (sqlserverAdapter) IntrospectSQL() string {
 	return `SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
 FROM INFORMATION_SCHEMA.COLUMNS

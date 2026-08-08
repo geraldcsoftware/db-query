@@ -244,3 +244,27 @@ func TestSqlserverIsSchemaError(t *testing.T) {
 		t.Error("schema errors on stdout must also be detected")
 	}
 }
+
+// TestSQLServerListDatabasesSQL pins the candidate-list predicates. tempdb is
+// excluded by name rather than by database_id: the familiar master=1, tempdb=2
+// mapping is not documented by Microsoft as a stable contract (design.md §13.9).
+func TestSQLServerListDatabasesSQL(t *testing.T) {
+	sql := sqlserverAdapter{}.ListDatabasesSQL()
+	for _, want := range []string{
+		"sys.databases",
+		"state_desc = 'ONLINE'",
+		"name <> 'tempdb'",
+		"HAS_DBACCESS(name) = 1",
+		"ORDER BY name",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("list-databases sql missing %q:\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "database_id") {
+		t.Fatalf("tempdb must be excluded by name, not database_id:\n%s", sql)
+	}
+	if strings.Count(sql, "SELECT") != 1 || strings.Contains(sql, ",\n") {
+		t.Fatalf("list-databases sql must select exactly one column:\n%s", sql)
+	}
+}
