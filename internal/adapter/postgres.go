@@ -146,6 +146,22 @@ func (postgresAdapter) IsSchemaError(r executor.RawResult) bool {
 	return r.ExitCode != 0 && pgSchemaErr.Match(r.Stderr)
 }
 
+// ListDatabasesSQL lists the databases this login can actually connect to, one
+// bare name per row. datallowconn is the connect-level gate that protects
+// template0; NOT datistemplate is needed in addition because template1 allows
+// connections and would otherwise pass. has_database_privilege drops databases
+// the login holds no CONNECT grant on. pg_database is a shared catalog readable
+// by any role, so this needs no privilege an ordinary login lacks — a
+// restricted login sees a shorter list rather than an error.
+func (postgresAdapter) ListDatabasesSQL() string {
+	return `SELECT datname
+FROM pg_database
+WHERE datallowconn
+  AND NOT datistemplate
+  AND has_database_privilege(current_user, datname, 'CONNECT')
+ORDER BY datname;`
+}
+
 func (postgresAdapter) IntrospectSQL() string {
 	return `SELECT table_schema, table_name, column_name, data_type, is_nullable
 FROM information_schema.columns

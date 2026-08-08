@@ -37,6 +37,7 @@ type Adapter interface {
 	Parse(r executor.RawResult) (Rows, error)
 	IsSchemaError(r executor.RawResult) bool // gates re-introspection
 	IntrospectSQL() string                   // lists user tables + columns
+	ListDatabasesSQL() string                // lists connectable database names
 }
 
 var adapters = map[string]Adapter{

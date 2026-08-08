@@ -5,10 +5,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
+	"github.com/geraldcsoftware/db-query/internal/dblist"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 	"github.com/geraldcsoftware/db-query/internal/schema"
 )
@@ -650,8 +652,10 @@ func TestQueryClientNotFound(t *testing.T) {
 
 func TestIntrospectUsesAdapterSQL(t *testing.T) {
 	isolateCache(t)
+	// Appends rather than truncates: introspect makes two invocations, the
+	// catalog query and the database-list refresh that rides along with it.
 	fakePsql(t, `
-cat > "$TMPDIR_CAPTURE/stdin"
+cat >> "$TMPDIR_CAPTURE/stdin"
 printf 'table_name,column_name\npeople,id\n'
 `)
 	capture := t.TempDir()
@@ -668,6 +672,9 @@ printf 'table_name,column_name\npeople,id\n'
 	stdin, _ := os.ReadFile(filepath.Join(capture, "stdin"))
 	if !strings.Contains(string(stdin), "information_schema.columns") {
 		t.Fatalf("introspect must send the adapter's catalog query, sent %q", stdin)
+	}
+	if !strings.Contains(string(stdin), "pg_database") {
+		t.Fatalf("introspect must also send the database-list query, sent %q", stdin)
 	}
 	// introspect persists the cache as a side effect of printing it.
 	if !schema.Exists(schema.CachePath("localhost", "testdb")) {
@@ -1456,4 +1463,240 @@ credential = "bws:secret-id"
 			t.Fatalf("code=%d err=%q", code, errb)
 		}
 	})
+}
+
+// fakePsqlDatabases installs a psql stub answering the catalog list query with
+// two database names, recording stdin so the SQL actually sent can be asserted.
+func fakePsqlDatabases(t *testing.T) string {
+	t.Helper()
+	capture := t.TempDir()
+	t.Setenv("TMPDIR_CAPTURE", capture)
+	fakePsql(t, `
+cat >> "$TMPDIR_CAPTURE/stdin"
+printf 'datname\npostgres\ntestdb\n'
+`)
+	return capture
+}
+
+func TestDatabasesCommand(t *testing.T) {
+	isolateCache(t)
+	fakePsqlDatabases(t)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+
+	code, out, errb := run(t, "databases", "--host", "testpg", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if !strings.Contains(out, "postgres") || !strings.Contains(out, "testdb") {
+		t.Fatalf("out = %q", out)
+	}
+	// The column is renamed to a provider-neutral header: postgres returns
+	// datname and sqlserver returns name, but the CLI presents one vocabulary.
+	if !strings.Contains(out, "database") {
+		t.Fatalf("expected a 'database' column header, out = %q", out)
+	}
+	if strings.Contains(out, "datname") {
+		t.Fatalf("provider column name leaked into output: %q", out)
+	}
+}
+
+func TestDatabasesCommandSendsAdapterSQL(t *testing.T) {
+	isolateCache(t)
+	capture := fakePsqlDatabases(t)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+
+	if code, _, errb := run(t, "databases", "--host", "testpg", "--config", cfg); code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	stdin, _ := os.ReadFile(filepath.Join(capture, "stdin"))
+	if !strings.Contains(string(stdin), "pg_database") {
+		t.Fatalf("databases must send the adapter's list query, sent %q", stdin)
+	}
+}
+
+// TestDatabasesCommandWritesCacheKeyedOnConfigLabel pins the keying decision:
+// the file is named for the config label, not the resolved server address, so
+// the completion helper can find it without resolving a credential.
+func TestDatabasesCommandWritesCacheKeyedOnConfigLabel(t *testing.T) {
+	isolateCache(t)
+	fakePsqlDatabases(t)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+
+	if code, _, errb := run(t, "databases", "--host", "testpg", "--config", cfg); code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	path := dblist.CachePath("testpg")
+	if !dblist.Exists(path) {
+		t.Fatalf("no cache written at the config-label path %s", path)
+	}
+	if dblist.Exists(dblist.CachePath("localhost")) {
+		t.Fatal("cache must not be keyed on the resolved server address")
+	}
+	names, err := dblist.Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(names, []string{"postgres", "testdb"}) {
+		t.Fatalf("cached names = %#v", names)
+	}
+}
+
+// TestDatabasesCommandCanonicalFlagPosition covers the documented form, with
+// the connection given before the command, as well as the trailing form.
+func TestDatabasesCommandCanonicalFlagPosition(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"before the command", []string{"--host", "testpg", "databases"}},
+		{"after the command", []string{"databases", "--host", "testpg"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateCache(t)
+			fakePsqlDatabases(t)
+			t.Setenv("DBQ_TEST_PW", "pw")
+			cfg := testConfig(t)
+			code, out, errb := run(t, append(tc.args, "--config", cfg)...)
+			if code != 0 {
+				t.Fatalf("code=%d err=%q", code, errb)
+			}
+			if !strings.Contains(out, "postgres") {
+				t.Fatalf("out = %q", out)
+			}
+		})
+	}
+}
+
+func TestDatabasesCommandJSONOutput(t *testing.T) {
+	isolateCache(t)
+	fakePsqlDatabases(t)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+
+	code, out, errb := run(t, "databases", "--host", "testpg", "--config", cfg, "--output", "json")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("json: %v (out = %q)", err, out)
+	}
+	if len(rows) != 2 || rows[0]["database"] != "postgres" {
+		t.Fatalf("rows = %#v", rows)
+	}
+}
+
+// TestDatabasesCommandClientFailure: a failed listing is a plain command
+// failure here — the non-fatal path belongs to introspect's bonus refresh, not
+// to the command the user ran on purpose.
+func TestDatabasesCommandClientFailure(t *testing.T) {
+	isolateCache(t)
+	fakePsql(t, `
+cat > /dev/null
+echo 'FATAL: permission denied' >&2
+exit 1
+`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+
+	code, _, _ := run(t, "databases", "--host", "testpg", "--config", cfg)
+	if code == 0 {
+		t.Fatal("a failed listing must not exit 0")
+	}
+	if dblist.Exists(dblist.CachePath("testpg")) {
+		t.Fatal("a failed listing must not write a cache file")
+	}
+}
+
+// TestIntrospectAlsoRefreshesDatabaseList: introspect already holds a live
+// connection and exists to rebuild caches, so it refreshes the database list
+// too. query deliberately does not — see TestQueryDoesNotRefreshDatabaseList.
+func TestIntrospectAlsoRefreshesDatabaseList(t *testing.T) {
+	isolateCache(t)
+	fakePsql(t, `
+sql=$(cat)
+case "$sql" in
+  *information_schema*) printf 'table_name,column_name\npeople,id\n'; exit 0 ;;
+  *pg_database*)        printf 'datname\npostgres\ntestdb\n'; exit 0 ;;
+esac
+echo "unexpected sql: $sql" >&2
+exit 1
+`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+
+	code, _, errb := run(t, "introspect", "--host", "testpg", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if !schema.Exists(schema.CachePath("localhost", "testdb")) {
+		t.Fatal("introspect must still write the schema cache")
+	}
+	names, err := dblist.Read(dblist.CachePath("testpg"))
+	if err != nil {
+		t.Fatalf("introspect must also refresh the database list: %v", err)
+	}
+	if !reflect.DeepEqual(names, []string{"postgres", "testdb"}) {
+		t.Fatalf("cached names = %#v", names)
+	}
+}
+
+// TestIntrospectDatabaseListFailureIsNonFatal: the bonus refresh must not break
+// the command the user actually ran. introspect's contract is to rebuild the
+// schema; a failed extra is a warning, not a failure.
+func TestIntrospectDatabaseListFailureIsNonFatal(t *testing.T) {
+	isolateCache(t)
+	fakePsql(t, `
+sql=$(cat)
+case "$sql" in
+  *information_schema*) printf 'table_name,column_name\npeople,id\n'; exit 0 ;;
+esac
+echo 'FATAL: permission denied for pg_database' >&2
+exit 1
+`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+
+	code, out, errb := run(t, "introspect", "--host", "testpg", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("a failed database-list refresh must not fail introspect: code=%d err=%q", code, errb)
+	}
+	if !strings.Contains(out, "people") {
+		t.Fatalf("introspect must still print the schema: %q", out)
+	}
+	if !schema.Exists(schema.CachePath("localhost", "testdb")) {
+		t.Fatal("introspect must still write the schema cache")
+	}
+	if errb == "" {
+		t.Fatal("a skipped database-list refresh must warn on stderr")
+	}
+	if dblist.Exists(dblist.CachePath("testpg")) {
+		t.Fatal("a failed refresh must not write a cache file")
+	}
+}
+
+// TestQueryDoesNotRefreshDatabaseList pins the hot path: query must not grow a
+// second round-trip for a completion convenience.
+func TestQueryDoesNotRefreshDatabaseList(t *testing.T) {
+	seedSchemaCache(t)
+	fakePsql(t, `
+sql=$(cat)
+case "$sql" in
+  *pg_database*) echo 'query must not list databases' >&2; exit 9 ;;
+esac
+printf 'id\n1\n'
+`)
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+
+	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "SELECT 1")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if dblist.Exists(dblist.CachePath("testpg")) {
+		t.Fatal("query must not write the database-list cache")
+	}
 }

@@ -26,6 +26,7 @@ db-query schema     --host prod-core          # show the cached schema (tables +
 db-query schema     --host prod-core people   # one table's columns (bare or schema-qualified name)
 db-query schema     --host prod-core --tables # one schema-qualified table name per line
 db-query introspect --host prod-core          # list tables + columns, always live
+db-query --host prod-core databases           # list databases, caching them for --database completion
 db-query hosts                                # list configured hosts
 db-query hosts      lionel                    # one host's effective config, with each key's source
 ```
@@ -114,8 +115,10 @@ the host in effect is whatever `DB_QUERY_HOST` says until you override it.
   with `--no-headers` it emits data rows without the `---` rule, which appends
   to an existing table rather than standing alone.
 - `--database <db>` (`-d`) overrides the host's configured `database` for this
-  run (on `query`, `schema`, and `introspect`), so one host entry can reach
-  sibling databases on the same server without a second config block.
+  run (on `query`, `schema`, `introspect`, and `databases`), so one host entry
+  can reach sibling databases on the same server without a second config block.
+  Its value completes from the cached database list — see
+  [Shell completion](#shell-completion-zsh).
 - `--no-headers` omits the header line. In `text` it tab-separates the rows for
   any shape, so a 1×1 result prints just the bare value; in `table` it drops the
   header row and the row-count footer, leaving only the framed data. It is a
@@ -180,6 +183,25 @@ not run.
 - `db-query introspect` always rebuilds the cache and prints the schema.
 - A schema error (exit code `3`) does **not** auto-rebuild — re-run with
   `--refresh-schema`, the only trigger that rebuilds the cache.
+
+### Database list cache
+
+Separate from the schema cache and used only to complete `--database`:
+
+```sh
+db-query --host prod-core databases      # prints the list and caches the names
+```
+
+Names land in `$XDG_CACHE_HOME/db-query/databases/` (fallback
+`~/.cache/db-query/databases/`), one file per host, holding a plain JSON array.
+`db-query introspect` refreshes it too, since it already has a connection open;
+`query` does not. There is no expiry — the list is rebuilt when you next run
+`databases`. Only databases the login can actually connect to are listed.
+
+The file is keyed on the **host's config name**, not the server it resolves to,
+because completion must be able to find it without resolving a credential. So
+if you repoint a host entry at a different server, re-run `databases` to
+replace the previous server's names.
 
 ### Exit codes
 
@@ -299,10 +321,25 @@ section, the `BWS_ACCESS_TOKEN` environment variable is used.
 `db-query completion zsh` prints a zsh completion script. Completion covers
 subcommands (and their shorthands), flags — before or after the command — and
 the `--output` values, plus **dynamic** values read from your local files: host
-names (`--host`), saved queries (`--source`), and categories (`--category`) —
-each shown with a short description. These come
+names (`--host`), saved queries (`--source`), categories (`--category`) — each
+shown with a short description — and database names (`--database`). These come
 from a hidden `db-query __complete` command the script calls on TAB; it reads
-only config and saved-query files, never a credential or a database.
+only config, cache and saved-query files, never a credential or a database.
+
+`--database` completes from the list `db-query databases` cached for that host,
+so it needs the host to be known — given as `--host`/`-H` anywhere on the line,
+or exported as `DB_QUERY_HOST`:
+
+```sh
+db-query --host prod-core databases      # once, to populate the list
+db-query --host prod-core --database <TAB>
+```
+
+A host that has never been listed simply offers nothing. That is deliberate:
+completing it live would mean resolving a credential on a keystroke, and a
+`bws:`/`bw:` resolver shells out to the Bitwarden CLI — a TAB that stalls for
+seconds or prompts for a vault unlock. `db-query introspect` refreshes the list
+as well, so any host you have introspected already has it.
 
 Installed via Homebrew, completion is set up automatically — nothing to do.
 Otherwise, pick one route:

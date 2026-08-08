@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/geraldcsoftware/db-query/internal/dblist"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 )
 
@@ -169,5 +172,113 @@ func TestCompletionUnknownAndMissingShell(t *testing.T) {
 	code, _, errb = run(t, "completion")
 	if code != 1 || !strings.Contains(errb, "zsh") {
 		t.Fatalf("missing shell: code=%d err=%q", code, errb)
+	}
+}
+
+// seedDatabaseList isolates the cache and writes a database list for one host
+// label, standing in for a prior `db-query --host <label> databases` run.
+func seedDatabaseList(t *testing.T, label string, names ...string) {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := dblist.Write(dblist.CachePath(label), names); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCompleteDatabasesNamesOnly pins the candidate shape: bare names, one per
+// line, with no tab and so no description (design.md §13.9).
+func TestCompleteDatabasesNamesOnly(t *testing.T) {
+	seedDatabaseList(t, "lionel", "postgres", "testdb", "reporting")
+	got := complete(t, "--host", "lionel", "database")
+	want := "postgres\ntestdb\nreporting\n"
+	if got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	if strings.Contains(got, "\t") {
+		t.Fatalf("database candidates must carry no description: %q", got)
+	}
+}
+
+func TestCompleteDatabasesShorthandHostFlag(t *testing.T) {
+	seedDatabaseList(t, "lionel", "postgres")
+	if got := complete(t, "-H", "lionel", "database"); got != "postgres\n" {
+		t.Fatalf("-H must be accepted like --host, got %q", got)
+	}
+}
+
+// TestCompleteDatabasesFromEnvHost: the helper is a subprocess and inherits the
+// shell's exported host, so DB_QUERY_HOST works with no flag on the line.
+func TestCompleteDatabasesFromEnvHost(t *testing.T) {
+	seedDatabaseList(t, "lionel", "postgres", "testdb")
+	t.Setenv("DB_QUERY_HOST", "lionel")
+	if got := complete(t, "database"); got != "postgres\ntestdb\n" {
+		t.Fatalf("DB_QUERY_HOST must supply the host, got %q", got)
+	}
+}
+
+// TestCompleteDatabasesFlagBeatsEnvHost mirrors the CLI's own precedence.
+func TestCompleteDatabasesFlagBeatsEnvHost(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := dblist.Write(dblist.CachePath("flagged"), []string{"from-flag"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dblist.Write(dblist.CachePath("envd"), []string{"from-env"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DB_QUERY_HOST", "envd")
+	if got := complete(t, "--host", "flagged", "database"); got != "from-flag\n" {
+		t.Fatalf("--host must beat DB_QUERY_HOST, got %q", got)
+	}
+}
+
+// TestCompleteDatabasesColdCacheIsSilent is the case zsh was verified against:
+// no candidates and no message, which completes nothing rather than falling
+// through to filename completion.
+func TestCompleteDatabasesColdCacheIsSilent(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if got := complete(t, "--host", "never-listed", "database"); got != "" {
+		t.Fatalf("a cold cache must produce nothing, got %q", got)
+	}
+}
+
+func TestCompleteDatabasesNoHostIsSilent(t *testing.T) {
+	seedDatabaseList(t, "lionel", "postgres")
+	if got := complete(t, "database"); got != "" {
+		t.Fatalf("no determinable host must produce nothing, got %q", got)
+	}
+}
+
+func TestCompleteDatabasesCorruptCacheIsSilent(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	path := dblist.CachePath("lionel")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := complete(t, "--host", "lionel", "database"); got != "" {
+		t.Fatalf("a corrupt cache must produce nothing, got %q", got)
+	}
+}
+
+// TestCompleteDatabasesNeverConnects is the invariant the whole design exists
+// to preserve: a credential that would fail loudly if resolved is never
+// touched, and the database client is never invoked.
+func TestCompleteDatabasesNeverConnects(t *testing.T) {
+	seedDatabaseList(t, "lionel", "postgres")
+	marker := filepath.Join(t.TempDir(), "psql-was-called")
+	fakePsql(t, "touch "+marker+"\nexit 1\n")
+	cfg := writeFile(t, t.TempDir(), "config.toml", `
+[hosts.lionel]
+provider   = "postgres"
+host       = "lionel.internal"
+credential = "env:DBQ_NO_SUCH_VAR"
+`, 0o600)
+	if got := complete(t, "--config", cfg, "--host", "lionel", "database"); got != "postgres\n" {
+		t.Fatalf("got %q", got)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("completion must never invoke the database client")
 	}
 }
