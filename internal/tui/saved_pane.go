@@ -13,6 +13,17 @@ import (
 type savedPane struct {
 	queries []savedquery.SavedQuery
 	cursor  int
+
+	// scroll keeps the cursor on screen once the store holds more queries than
+	// the pane has rows.
+	scroll listScroll
+}
+
+// setSize records how many rows the layout gives the pane's content and keeps
+// the cursor visible in them.
+func (p *savedPane) setSize(h int) {
+	p.scroll.setHeight(h)
+	p.scroll.follow(p.cursor, len(p.queries))
 }
 
 func newSavedPane() savedPane {
@@ -35,6 +46,7 @@ func (p savedPane) update(msg tea.Msg) (savedPane, tea.Cmd) {
 			p.cursor++
 		}
 	}
+	p.scroll.follow(p.cursor, len(p.queries))
 	return p, nil
 }
 
@@ -46,11 +58,12 @@ func (p savedPane) selected() (savedquery.SavedQuery, bool) {
 }
 
 // view renders the store into a pane w cells wide, one category/name per row,
-// the row under the cursor drawn as a full-width bar.
+// the row under the cursor drawn as a full-width bar. Only the rows around the
+// cursor are returned, so a store longer than the pane scrolls.
 func (p savedPane) view(w int) string {
 	rows := make([]string, 0, len(p.queries))
 	for i, q := range p.queries {
 		rows = append(rows, listRow(w, i == p.cursor, "", q.Category+"/"+q.Name, ""))
 	}
-	return strings.Join(rows, "\n")
+	return strings.Join(p.scroll.window(rows), "\n")
 }

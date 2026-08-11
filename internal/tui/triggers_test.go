@@ -48,7 +48,7 @@ func TestRunQueryFromSchemaBuildsPreviewSQL(t *testing.T) {
 	}
 }
 
-func TestF5AndCtrlEnterBothTriggerQueryPaneRun(t *testing.T) {
+func TestEveryRunKeyTriggersQueryPaneRun(t *testing.T) {
 	m := newTestModel(t)
 	m.focus = paneQuery
 	m.query.setValue("select 1")
@@ -56,7 +56,7 @@ func TestF5AndCtrlEnterBothTriggerQueryPaneRun(t *testing.T) {
 	defer close(r.release)
 	m.runner = r.run
 
-	for _, msg := range []tea.KeyPressMsg{f5Msg(), ctrlEnterMsg()} {
+	for _, msg := range []tea.KeyPressMsg{f5Msg(), ctrlEnterMsg(), cmdEnterMsg()} {
 		mm := newTestModel(t)
 		mm.focus = paneQuery
 		mm.query.setValue("select 1")
@@ -72,6 +72,15 @@ func TestF5AndCtrlEnterBothTriggerQueryPaneRun(t *testing.T) {
 }
 
 func f5Msg() tea.KeyPressMsg { return tea.KeyPressMsg{Code: tea.KeyF5} }
+
+// cmdEnterMsg is Cmd+Enter: the Enter key code carrying the Super modifier,
+// which stringifies as "super+enter". Reaching the program at all depends on
+// the terminal not claiming the chord for itself first — Ghostty binds it to
+// toggle_fullscreen by default — which is why it is one of three bindings for
+// this action rather than the only one.
+func cmdEnterMsg() tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModSuper}
+}
 
 // ctrlEnterMsg is the Ctrl+Enter a terminal reports once the Kitty keyboard
 // protocol is negotiated: the Enter key code carrying a Ctrl modifier, which

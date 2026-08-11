@@ -20,6 +20,41 @@ type schemaPane struct {
 	cursor   int
 	expanded map[int]bool
 	hint     string
+
+	// scroll keeps the cursor on screen once the catalogue — table rows plus
+	// the columns of every expanded table — is taller than the pane.
+	scroll listScroll
+}
+
+// setSize records how many rows the layout gives the pane's content and keeps
+// the cursor visible in them, so a resize cannot leave it off screen.
+func (p *schemaPane) setSize(h int) {
+	p.scroll.setHeight(h)
+	p.scroll.follow(p.cursorLine(), p.totalLines())
+}
+
+// cursorLine is the rendered line the cursor's table sits on, which is its
+// index plus the columns of every expanded table above it.
+func (p schemaPane) cursorLine() int {
+	line := 0
+	for i := 0; i < p.cursor && i < len(p.tables); i++ {
+		line++
+		if p.expanded[i] {
+			line += len(p.tables[i].Columns)
+		}
+	}
+	return line
+}
+
+// totalLines is how many rows view renders in full.
+func (p schemaPane) totalLines() int {
+	n := len(p.tables)
+	for i, t := range p.tables {
+		if p.expanded[i] {
+			n += len(t.Columns)
+		}
+	}
+	return n
 }
 
 func newSchemaPane(host config.HostConfig) schemaPane {
@@ -59,6 +94,7 @@ func (p schemaPane) update(msg tea.Msg) (schemaPane, tea.Cmd) {
 		p.expanded = cloneExpanded(p.expanded)
 		p.expanded[p.cursor] = !p.expanded[p.cursor]
 	}
+	p.scroll.follow(p.cursorLine(), p.totalLines())
 	return p, nil
 }
 
@@ -91,7 +127,9 @@ const (
 // its column count against the pane's right edge, and an expanded table's
 // columns listed underneath with their data types. The count is len(Columns),
 // which the cache already holds — a per-table row count would mean a query
-// per table on every frame.
+// per table on every frame. Only the rows around the cursor are returned, so a
+// catalogue longer than the pane scrolls rather than being cut off at the row
+// the pane happens to end on.
 func (p schemaPane) view(w int) string {
 	if p.hint != "" {
 		return indentLines(hintStyle.Render(p.hint))
@@ -110,5 +148,5 @@ func (p schemaPane) view(w int) string {
 			rows = append(rows, listRow(w, false, markerColumn, c.Name, c.DataType))
 		}
 	}
-	return strings.Join(rows, "\n")
+	return strings.Join(p.scroll.window(rows), "\n")
 }

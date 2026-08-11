@@ -16,7 +16,7 @@ type hint struct{ key, desc string }
 var (
 	actionHints = []hint{
 		{"^h/j/k/l", "move"},
-		{"^Enter/F5", "run"},
+		{"^/⌘Enter/F5", "run"},
 		{"Enter", "load/expand"},
 		{"PgUp/PgDn", "page"},
 	}

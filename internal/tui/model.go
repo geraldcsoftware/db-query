@@ -108,14 +108,20 @@ func (m model) viewSize() (w, h int) {
 }
 
 // recomputeLayout rebuilds the pane rectangles for the current terminal size
-// and resizes the Query pane's textarea to fit its own rectangle.
+// and hands each pane the room it has to draw into. Every pane spends one of
+// its rows on its label, so content gets one fewer than the rectangle is tall.
 func (m *model) recomputeLayout() {
 	w, h := m.viewSize()
 	m.rects = layoutRects(w, h)
 	r := m.rects[paneQuery]
-	// The textarea gets the pane's full width and every row below its label.
-	m.query.setSize(max(0, r.x1-r.x0), max(0, r.y1-r.y0-1))
+	m.query.setSize(max(0, r.x1-r.x0), contentRows(r))
+	m.schema.setSize(contentRows(m.rects[paneSchema]))
+	m.saved.setSize(contentRows(m.rects[paneSaved]))
 }
+
+// contentRows is how many rows of a pane's rectangle are left for its content
+// once its label row is taken.
+func contentRows(r rect) int { return max(0, r.y1-r.y0-1) }
 
 // setFocusAt sets focus to whichever pane's rectangle contains (x, y), the
 // coordinates of a mouse click. No-op if the click lands outside every
@@ -224,13 +230,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "pgdown":
 			m.results.pageDown()
 			return m, nil
-		// Ctrl+Enter and F5 are one action deliberately reachable two ways. A
-		// terminal's legacy key encoding sends CR for plain Enter and for
-		// Ctrl+Enter alike, so the chord is only a distinct event where the
-		// Kitty keyboard protocol is negotiated — which View requests, and which
-		// not every terminal answers. F5 is the fallback that keeps the run
-		// action reachable on the ones that do not (spec §7).
-		case "ctrl+enter", "f5":
+		// One action, deliberately reachable several ways, because which of them
+		// a terminal can actually deliver varies. A terminal's legacy key
+		// encoding sends CR for plain Enter and for Ctrl+Enter alike, so the
+		// modified chords are distinct events only where the Kitty keyboard
+		// protocol is negotiated. Cmd+Enter additionally has to survive the
+		// terminal's own keybindings — Ghostty, for one, claims it for
+		// toggle_fullscreen by default — so it cannot be the only binding. F5
+		// needs none of that and is the fallback that always works (spec §7).
+		case "ctrl+enter", "super+enter", "f5":
 			switch m.focus {
 			case paneSchema:
 				if sql, ok := m.schemaRunSQL(); ok {
