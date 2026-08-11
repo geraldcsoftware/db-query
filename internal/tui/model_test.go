@@ -115,7 +115,7 @@ func TestMouseClickFocusesThePaneRenderedThere(t *testing.T) {
 		{paneSaved, "[Saved]"},
 	} {
 		r := base.rects[tc.p]
-		col := strings.Index(lines[r.y0], tc.title)
+		col := titleColumn(lines[r.y0], tc.title)
 		if col < 0 {
 			t.Fatalf("%s is not rendered on row %d", tc.title, r.y0)
 		}

@@ -7,6 +7,18 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+// titleColumn returns the display column sub starts at in line, or -1 if it is
+// absent. The column is the width of everything before the match, not its byte
+// offset: pane frames are drawn with multi-byte box-drawing runes, for which
+// the two differ.
+func titleColumn(line, sub string) int {
+	i := strings.Index(line, sub)
+	if i < 0 {
+		return -1
+	}
+	return ansi.StringWidth(line[:i])
+}
+
 func TestViewContainsAllFourPaneTitles(t *testing.T) {
 	m := newTestModel(t)
 	out := m.View()
@@ -99,9 +111,59 @@ func TestViewPlacesEachPaneInItsOwnRect(t *testing.T) {
 		{paneResults, "[Results]"},
 	} {
 		r := m.rects[tc.p]
-		col := strings.Index(lines[r.y0], tc.title)
+		col := titleColumn(lines[r.y0], tc.title)
 		if col < r.x0 || col >= r.x1 {
 			t.Errorf("%s is drawn at column %d of row %d, outside its rect %+v", tc.title, col, r.y0, r)
+		}
+	}
+}
+
+// TestFocusedPaneIsVisuallyDistinct pins the affordance that tells a user
+// which pane their next keystroke reaches. It asserts a difference rather than
+// a specific colour: lipgloss drops colour entirely when its output is not a
+// terminal (as under `go test`), so the frame's weight, not its colour, is
+// what must carry focus for this to hold everywhere.
+func TestFocusedPaneIsVisuallyDistinct(t *testing.T) {
+	m := newTestModel(t)
+	r := m.rects[paneSaved]
+	m.focus = paneSaved
+	focused := m.paneBlock(paneSaved, "Saved", m.saved.view(), r)
+	m.focus = paneSchema
+	unfocused := m.paneBlock(paneSaved, "Saved", m.saved.view(), r)
+
+	if strings.Join(focused, "\n") == strings.Join(unfocused, "\n") {
+		t.Fatal("a focused pane must render differently from the same pane unfocused")
+	}
+	if ansi.Strip(strings.Join(focused, "\n")) == ansi.Strip(strings.Join(unfocused, "\n")) {
+		t.Error("focus must survive a colourless terminal, so it cannot be signalled by colour alone")
+	}
+}
+
+// TestPaneBlockExactlyFillsItsRect is the per-pane half of the whole-screen
+// bound TestViewNeverExceedsTerminalHeight enforces: a framed pane must still
+// occupy exactly its rectangle, since View tiles the rectangles edge to edge
+// and any drift would push a later pane off screen. The sizes run down to
+// rectangles too small to frame at all.
+func TestPaneBlockExactlyFillsItsRect(t *testing.T) {
+	m := newTestModel(t)
+	m.results.showRows(rowsOf(50)) // content far taller and wider than the small rects
+	for _, size := range []struct{ w, h int }{{50, 19}, {20, 5}, {10, 3}, {4, 3}, {3, 3}, {6, 2}, {6, 1}, {1, 1}} {
+		r := rect{0, 0, size.w, size.h}
+		for _, focused := range []bool{true, false} {
+			m.focus = paneSchema
+			if focused {
+				m.focus = paneResults
+			}
+			got := m.paneBlock(paneResults, "Results", m.results.view(), r)
+			if len(got) != size.h {
+				t.Errorf("%dx%d focused=%v: %d lines, want %d", size.w, size.h, focused, len(got), size.h)
+				continue
+			}
+			for i, l := range got {
+				if w := ansi.StringWidth(l); w != size.w {
+					t.Errorf("%dx%d focused=%v: line %d is %d cells, want %d", size.w, size.h, focused, i, w, size.w)
+				}
+			}
 		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
@@ -144,7 +145,9 @@ func (m *model) recomputeLayout() {
 	w, h := m.viewSize()
 	m.rects = layoutRects(w, h)
 	r := m.rects[paneQuery]
-	m.query.setSize(r.x1-r.x0, r.y1-r.y0-1) // one row of the rect is the pane title
+	// The textarea occupies the pane's interior, which its frame insets by one
+	// cell on every side.
+	m.query.setSize(max(0, r.x1-r.x0-2), max(0, r.y1-r.y0-2))
 }
 
 // setFocusAt sets focus to whichever pane's rectangle contains (x, y), the
@@ -391,23 +394,46 @@ func (m model) View() string {
 }
 
 // paneBlock renders one pane as exactly as many lines as its rectangle is
-// tall, each padded to exactly its rectangle's width: a title line carrying
-// the focus marker, then the pane's own content clipped to whatever rows are
-// left. Content longer than the rectangle is cut off at the bottom — v1 has
-// no per-pane scrolling, so a result page taller than the Results pane is
-// paged through with PgUp/PgDn or shrunk with DB_QUERY_TUI_PAGE_SIZE.
+// tall, each exactly its rectangle's width: a frame whose top rule carries the
+// pane's title, wrapped around the pane's own content clipped to the rows the
+// frame leaves. Content longer than the rectangle is cut off at the bottom —
+// v1 has no per-pane scrolling, so a result page taller than the Results pane
+// is paged through with PgUp/PgDn or shrunk with DB_QUERY_TUI_PAGE_SIZE.
+//
+// Focus is carried entirely by the frame — a heavy accent-coloured border
+// against the dim rounded ones — rather than by a marker glyph in the title,
+// which the border makes redundant.
 func (m model) paneBlock(p pane, name, content string, r rect) []string {
 	w, h := r.x1-r.x0, r.y1-r.y0
 	if w <= 0 || h <= 0 {
 		return nil
 	}
-	marker := "  "
-	if p == m.focus {
-		marker = "> "
+	title := "[" + name + "]"
+	body := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	// A frame costs one cell per side; below that there is no room for both a
+	// frame and any content, so the pane degrades to bare text.
+	if w < 4 || h < 3 {
+		return fitBlock(append([]string{title}, body...), w, h)
 	}
-	lines := []string{marker + "[" + name + "]"}
-	lines = append(lines, strings.Split(strings.TrimRight(content, "\n"), "\n")...)
-	return fitBlock(lines, w, h)
+	frame, border, rule := paneFrame(p == m.focus)
+	inner := fitBlock(body, w-2, h-2)
+	lines := strings.Split(frame.Render(strings.Join(inner, "\n")), "\n")
+	lines[0] = titledTopRule(border, rule, title, w)
+	return lines
+}
+
+// titledTopRule builds a pane's top border rule with the pane's title set into
+// it, one rune in from the corner, and returns exactly w cells. The title is
+// clipped when the pane is too narrow to hold it whole, so the rule's width is
+// independent of the title's length.
+func titledTopRule(border lipgloss.Border, rule lipgloss.Style, title string, w int) string {
+	if room := w - 4; ansi.StringWidth(title) > room {
+		title = ansi.Truncate(title, room, "")
+	}
+	fill := w - 3 - ansi.StringWidth(title)
+	return rule.Render(border.TopLeft+border.Top) +
+		paneTitleStyle.Render(title) +
+		rule.Render(strings.Repeat(border.Top, fill)+border.TopRight)
 }
 
 // fitBlock forces lines into a block of exactly h rows of exactly w cells,
@@ -456,11 +482,13 @@ func joinColumns(left, right []string) []string {
 // connection is right-aligned against the terminal's width, falling back to a
 // single space when the two halves would not otherwise fit.
 func (m model) topBar(w int) string {
-	left := "db-query"
+	left := appNameStyle.Render("db-query")
 	if m.version != "" {
-		left += " " + m.version
+		left += " " + appVersionStyle.Render(m.version)
 	}
-	right := m.session.Host.Host + " · " + m.session.Host.Database + " (" + m.session.Host.Provider + ")"
+	right := connectionStyle.Render(m.session.Host.Host+" · ") +
+		databaseStyle.Render(m.session.Host.Database) +
+		connectionStyle.Render(" ("+m.session.Host.Provider+")")
 	gap := w - ansi.StringWidth(left) - ansi.StringWidth(right)
 	if gap < 1 {
 		gap = 1
@@ -475,11 +503,12 @@ func (m model) topBar(w int) string {
 func (m model) bottomBar() string {
 	switch {
 	case m.statusMsg != "":
-		return m.statusMsg
+		return statusStyle.Render(m.statusMsg)
 	case m.running:
-		return "running… · ^c cancel"
+		return runningStyle.Render("running…") + hintSepStyle.Render(" · ") +
+			hintKeyStyle.Render("^c") + " " + hintDescStyle.Render("cancel")
 	default:
-		return bottomBarHint
+		return bottomBarHint()
 	}
 }
 

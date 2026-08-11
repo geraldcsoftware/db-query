@@ -99,7 +99,10 @@ func (r resultsPane) currentSlice() adapter.Rows {
 // the table's alignment inside a fixed-size pane.
 func (r resultsPane) view() string {
 	if r.errText != "" {
-		return "error: " + r.errText
+		// Styled so a failed run reads as a failure at a glance rather than as
+		// another line of output; lipgloss applies the style per line, so a
+		// multi-line message (an error plus its hint) is marked throughout.
+		return errorStyle.Render("error: " + r.errText)
 	}
 	if len(r.rows.Columns) == 0 {
 		return ""
@@ -107,7 +110,7 @@ func (r resultsPane) view() string {
 	var b strings.Builder
 	_ = render.Render(&b, "table", r.currentSlice(), render.Options{MaxColWidth: tuiMaxColWidth})
 	if r.pageCount() > 1 {
-		b.WriteString(pageIndicator(r))
+		b.WriteString(pageIndicatorStyle.Render(pageIndicator(r)))
 	}
 	return b.String()
 }
