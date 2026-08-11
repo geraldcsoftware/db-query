@@ -1,26 +1,47 @@
 package tui
 
-import "strings"
+import (
+	"strings"
 
-// keyHints is the always-visible keybinding reference (design §5, §7), held as
-// key/effect pairs so the bottom bar can render the keystroke and its effect in
-// different styles. No command palette, no ? help overlay, no multiple result
-// tabs, no per-table row counts — all explicitly out of v1 scope (design §2),
-// even though the reference mockup shows them.
-var keyHints = []struct{ key, desc string }{
-	{"^h/j/k/l", "move"},
-	{"^Enter/F5", "run"},
-	{"Enter", "load/expand"},
-	{"PgUp/PgDn", "page"},
-	{"Esc", "quit"},
-	{"^c", "cancel/quit"},
+	"github.com/charmbracelet/x/ansi"
+)
+
+// hint is one keybinding and what it does, held as a pair so the bottom bar
+// can render the keystroke and its effect in different styles.
+type hint struct{ key, desc string }
+
+// The bottom bar splits into a left group of things to do and a right group of
+// ways out. No command palette and no ? help overlay — both are explicitly out
+// of scope, even though the reference mockup shows them.
+var (
+	actionHints = []hint{
+		{"^h/j/k/l", "move"},
+		{"^Enter/F5", "run"},
+		{"Enter", "load/expand"},
+		{"PgUp/PgDn", "page"},
+	}
+	exitHints = []hint{
+		{"^c", "cancel"},
+		{"Esc", "quit"},
+	}
+)
+
+// bottomBarHint renders the keybinding reference across the bar's full width,
+// the exits pushed to the right edge where a user looks for them.
+func bottomBarHint(w int) string {
+	left, right := renderHints(actionHints), renderHints(exitHints)
+	gap := w - ansi.StringWidth(left) - ansi.StringWidth(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
 }
 
-// bottomBarHint renders the keybinding reference as a single line, each
-// keystroke in the accent colour against its effect in muted text.
-func bottomBarHint() string {
-	parts := make([]string, 0, len(keyHints))
-	for _, h := range keyHints {
+// renderHints joins one group into a single line, each keystroke in the accent
+// colour against its effect in body text.
+func renderHints(hints []hint) string {
+	parts := make([]string, 0, len(hints))
+	for _, h := range hints {
 		parts = append(parts, hintKeyStyle.Render(h.key)+" "+hintDescStyle.Render(h.desc))
 	}
 	return strings.Join(parts, hintSepStyle.Render(" · "))

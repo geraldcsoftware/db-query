@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
@@ -43,14 +45,12 @@ func (p savedPane) selected() (savedquery.SavedQuery, bool) {
 	return p.queries[p.cursor], true
 }
 
-func (p savedPane) view() string {
-	var out string
+// view renders the store into a pane w cells wide, one category/name per row,
+// the row under the cursor drawn as a full-width bar.
+func (p savedPane) view(w int) string {
+	rows := make([]string, 0, len(p.queries))
 	for i, q := range p.queries {
-		cursor := "  "
-		if i == p.cursor {
-			cursor = "> "
-		}
-		out += cursor + q.Category + "/" + q.Name + "\n"
+		rows = append(rows, listRow(w, i == p.cursor, "", q.Category+"/"+q.Name, ""))
 	}
-	return out
+	return strings.Join(rows, "\n")
 }

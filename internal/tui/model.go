@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
@@ -83,12 +82,6 @@ type model struct {
 	rects map[pane]rect
 }
 
-type rect struct{ x0, y0, x1, y1 int }
-
-func (r rect) contains(x, y int) bool {
-	return x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1
-}
-
 func newModel(r session.Resolved, c session.CommonFlags, version string, stdout io.Writer) model {
 	m := model{session: r, flags: c, version: version, stdout: stdout, focus: paneSchema, query: newQueryPane(), schema: newSchemaPane(r.Host), saved: newSavedPane(), runner: execute, results: resultsPane{}}
 	// Lay out against viewSize's fallback dimensions so rects and the
@@ -114,40 +107,14 @@ func (m model) viewSize() (w, h int) {
 	return w, h
 }
 
-// layoutRects divides a w x h terminal into the four pane rectangles of the
-// spec's §5 layout: row 0 is the top bar, the last row is the bottom bar, and
-// the rows between them form a 2x2 grid — Schema top-left, Query top-right,
-// Saved bottom-left, Results bottom-right. View renders into exactly these
-// rectangles and setFocusAt hit-tests mouse clicks against them, so a click
-// always lands on the pane drawn under the pointer.
-func layoutRects(w, h int) map[pane]rect {
-	const bodyTop = 1 // row 0 is the top bar
-	bodyH := h - 2    // minus the top bar and the bottom bar
-	if bodyH < 0 {
-		bodyH = 0
-	}
-	leftW := w / 2
-	mid := bodyTop + bodyH/2
-	bot := bodyTop + bodyH
-	return map[pane]rect{
-		paneSchema:  {0, bodyTop, leftW, mid},
-		paneQuery:   {leftW, bodyTop, w, mid},
-		paneSaved:   {0, mid, leftW, bot},
-		paneResults: {leftW, mid, w, bot},
-	}
-}
-
 // recomputeLayout rebuilds the pane rectangles for the current terminal size
-// and resizes the Query pane's textarea to fit its own rectangle. Called on
-// tea.WindowSizeMsg; v1 does not reflow pane proportions mid-session (spec
-// §2), but recomputing is always safe.
+// and resizes the Query pane's textarea to fit its own rectangle.
 func (m *model) recomputeLayout() {
 	w, h := m.viewSize()
 	m.rects = layoutRects(w, h)
 	r := m.rects[paneQuery]
-	// The textarea occupies the pane's interior, which its frame insets by one
-	// cell on every side.
-	m.query.setSize(max(0, r.x1-r.x0-2), max(0, r.y1-r.y0-2))
+	// The textarea gets the pane's full width and every row below its label.
+	m.query.setSize(max(0, r.x1-r.x0), max(0, r.y1-r.y0-1))
 }
 
 // setFocusAt sets focus to whichever pane's rectangle contains (x, y), the
@@ -364,42 +331,78 @@ func (m *model) quit() tea.Cmd {
 	return tea.Quit
 }
 
-// View renders one full screen: a top bar, the four panes each drawn inside
-// the rectangle layoutRects assigns it, and a bottom bar (design §5). Its
-// content is exactly the terminal's height in lines and no line exceeds its
-// width — Bubble Tea's renderer resolves an over-tall view by keeping only its
-// last height lines, which would silently push the top bar and the upper panes
-// off screen on the first large result.
+// View renders one full screen: a top bar, a body of two columns separated by
+// rules, and a bottom bar. Its content is exactly the terminal's height in
+// lines and no line exceeds its width — Bubble Tea's renderer resolves an
+// over-tall view by keeping only its last height lines, which would silently
+// push the top bar and the upper panes off screen on the first large result.
 func (m model) View() tea.View {
 	w, h := m.viewSize()
-	top := ansi.Truncate(m.topBar(w), w, "")
-	if h <= 1 {
-		return screen(top)
+	lay := computeLayout(w, h)
+
+	rows := make([]string, h)
+	rows[0] = fitLine(m.topBar(w), w)
+	if h >= 2 {
+		rows[h-1] = fitLine(m.bottomBar(w), w)
 	}
-	rects := layoutRects(w, h)
+	// A body needs both bars, both full-width rules, and a row of its own; any
+	// shorter and the screen is the two bars alone.
+	if lay.bodyH > 0 {
+		rows[1] = fullRule(w, lay.ruleX, ruleTeeDown)
+		rows[h-2] = fullRule(w, lay.ruleX, ruleTeeUp)
+		copy(rows[lay.bodyTop:], m.bodyRows(lay))
+	}
+	for i, r := range rows {
+		rows[i] = strings.TrimRight(r, " ")
+	}
+	return screen(strings.Join(rows, "\n"))
+}
+
+// bodyRows renders the rows between the two full-width rules: the sidebar
+// column, the vertical rule carrying whichever junction the row calls for, and
+// the main column. Each column is built as its own block of fixed-width lines,
+// so concatenating them keeps the main column aligned.
+func (m model) bodyRows(lay layout) []string {
+	main := m.mainColumn(lay)
+	if lay.ruleX < 0 {
+		return main
+	}
+	sidebar := m.sidebarColumn(lay)
+	out := make([]string, lay.bodyH)
+	for i := range out {
+		y := lay.bodyTop + i
+		junction := junctionAt(y == lay.sidebarRuleY, y == lay.mainRuleY)
+		out[i] = sidebar[i] + ruleStyle.Render(junction) + main[i]
+	}
+	return out
+}
+
+// sidebarColumn stacks Schema over Saved, divided by the sidebar's own rule.
+func (m model) sidebarColumn(lay layout) []string {
+	r := lay.rects[paneSchema]
+	out := m.paneBlock(paneSchema, "SCHEMA", "", m.schema.view(r.x1-r.x0), r)
+	if lay.sidebarRuleY >= 0 {
+		out = append(out, hRule(r.x1-r.x0))
+	}
+	saved := lay.rects[paneSaved]
+	return append(out, m.paneBlock(paneSaved, "SAVED", "", m.saved.view(saved.x1-saved.x0), saved)...)
+}
+
+// mainColumn stacks Query over Results, divided by the main column's rule.
+func (m model) mainColumn(lay layout) []string {
 	// The Query pane's textarea keeps a visible cursor only while it is the
 	// focused pane; key routing is gated separately in Update.
 	q := m.query
 	if m.focus != paneQuery {
 		q = q.blurred()
 	}
-	left := append(
-		m.paneBlock(paneSchema, "Schema", m.schema.view(), rects[paneSchema]),
-		m.paneBlock(paneSaved, "Saved", m.saved.view(), rects[paneSaved])...,
-	)
-	right := append(
-		m.paneBlock(paneQuery, "Query", q.view(), rects[paneQuery]),
-		m.paneBlock(paneResults, "Results", m.results.view(), rects[paneResults])...,
-	)
-
-	rows := make([]string, 0, h)
-	rows = append(rows, top)
-	rows = append(rows, joinColumns(left, right)...)
-	rows = append(rows, ansi.Truncate(m.bottomBar(), w, ""))
-	for i, r := range rows {
-		rows[i] = strings.TrimRight(r, " ")
+	r := lay.rects[paneQuery]
+	out := m.paneBlock(paneQuery, "QUERY", "", q.view(), r)
+	if lay.mainRuleY >= 0 {
+		out = append(out, hRule(r.x1-r.x0))
 	}
-	return screen(strings.Join(rows, "\n"))
+	results := lay.rects[paneResults]
+	return append(out, m.paneBlock(paneResults, "RESULTS", m.results.meta(), m.results.view(), results)...)
 }
 
 // screen pairs rendered content with the terminal features the TUI runs on:
@@ -420,104 +423,93 @@ func screen(content string) tea.View {
 }
 
 // paneBlock renders one pane as exactly as many lines as its rectangle is
-// tall, each exactly its rectangle's width: a frame whose top rule carries the
-// pane's title, wrapped around the pane's own content clipped to the rows the
-// frame leaves. Content longer than the rectangle is cut off at the bottom —
-// v1 has no per-pane scrolling, so a result page taller than the Results pane
-// is paged through with PgUp/PgDn or shrunk with DB_QUERY_TUI_PAGE_SIZE.
+// tall, each exactly its rectangle's width: a label row, then the pane's own
+// content clipped to the rows below it. Content longer than the rectangle is
+// cut off at the bottom — there is no per-pane scrolling, so a result page
+// taller than the Results pane is paged through with PgUp/PgDn or shrunk with
+// DB_QUERY_TUI_PAGE_SIZE.
 //
-// Focus is carried entirely by the frame — a heavy accent-coloured border
-// against the dim rounded ones — rather than by a marker glyph in the title,
-// which the border makes redundant.
-func (m model) paneBlock(p pane, name, content string, r rect) []string {
+// meta is the pane's own summary, right-aligned on the label row; panes with
+// nothing to summarise pass an empty string.
+func (m model) paneBlock(p pane, label, meta, content string, r rect) []string {
 	w, h := r.x1-r.x0, r.y1-r.y0
 	if w <= 0 || h <= 0 {
 		return nil
 	}
-	title := "[" + name + "]"
-	body := strings.Split(strings.TrimRight(content, "\n"), "\n")
-	// A frame costs one cell per side; below that there is no room for both a
-	// frame and any content, so the pane degrades to bare text.
-	if w < 4 || h < 3 {
-		return fitBlock(append([]string{title}, body...), w, h)
-	}
-	frame, border, rule := paneFrame(p == m.focus)
-	inner := fitBlock(body, w-2, h-2)
-	lines := strings.Split(frame.Render(strings.Join(inner, "\n")), "\n")
-	lines[0] = titledTopRule(border, rule, title, w)
-	return lines
+	lines := append([]string{paneLabelRow(label, meta, w, p == m.focus)},
+		strings.Split(strings.TrimRight(content, "\n"), "\n")...)
+	return fitBlock(lines, w, h)
 }
 
-// titledTopRule builds a pane's top border rule with the pane's title set into
-// it, one rune in from the corner, and returns exactly w cells. The title is
-// clipped when the pane is too narrow to hold it whole, so the rule's width is
-// independent of the title's length.
-func titledTopRule(border lipgloss.Border, rule lipgloss.Style, title string, w int) string {
-	if room := w - 4; ansi.StringWidth(title) > room {
-		title = ansi.Truncate(title, room, "")
+// paneLabelRow draws a pane's heading: the focus marker and the uppercase
+// section label, with the pane's summary right-aligned against its far edge.
+// The marker is what carries focus through ansi.Strip, so a terminal that
+// cannot show colour still says which pane the next keystroke reaches; the
+// accent colour is the second, redundant cue.
+func paneLabelRow(label, meta string, w int, focused bool) string {
+	marker, style := " ", paneLabelStyle
+	if focused {
+		marker, style = focusMarker, paneLabelFocusedStyle
 	}
-	fill := w - 3 - ansi.StringWidth(title)
-	return rule.Render(border.TopLeft+border.Top) +
-		paneTitleStyle.Render(title) +
-		rule.Render(strings.Repeat(border.Top, fill)+border.TopRight)
+	head := style.Render(marker + label)
+	gap := w - ansi.StringWidth(marker+label) - ansi.StringWidth(meta) - 1
+	if meta == "" || gap < 1 {
+		return fitLine(head, w)
+	}
+	return head + strings.Repeat(" ", gap) + paneMetaStyle.Render(meta) + " "
 }
 
-// fitBlock forces lines into a block of exactly h rows of exactly w cells,
-// truncating and padding as needed. Truncation is ANSI-aware so clipping a
-// styled line (the textarea's, for one) cannot cut an escape sequence in half
-// and bleed its colour across the rest of the screen.
+// fitLine forces one line to exactly w cells. Truncation is ANSI-aware so
+// clipping a styled line (the textarea's, for one) cannot cut an escape
+// sequence in half and bleed its colour across the rest of the screen.
+func fitLine(s string, w int) string {
+	s = ansi.Truncate(s, w, "")
+	if pad := w - ansi.StringWidth(s); pad > 0 {
+		s += strings.Repeat(" ", pad)
+	}
+	return s
+}
+
+// fitBlock forces lines into a block of exactly h rows of exactly w cells.
 func fitBlock(lines []string, w, h int) []string {
 	out := make([]string, h)
 	for i := range out {
 		var s string
 		if i < len(lines) {
-			s = ansi.Truncate(lines[i], w, "")
+			s = lines[i]
 		}
-		if pad := w - ansi.StringWidth(s); pad > 0 {
-			s += strings.Repeat(" ", pad)
-		}
-		out[i] = s
+		out[i] = fitLine(s, w)
 	}
 	return out
 }
 
-// joinColumns places two blocks side by side, one row at a time. Each block's
-// rows are already padded to their own fixed width by fitBlock, so plain
-// concatenation keeps the right-hand column aligned.
-func joinColumns(left, right []string) []string {
-	n := len(left)
-	if len(right) > n {
-		n = len(right)
+// indentLines shifts a block one cell right, matching the indent the panes
+// give their own rows.
+func indentLines(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = " " + l
 	}
-	out := make([]string, n)
-	for i := range out {
-		var l, r string
-		if i < len(left) {
-			l = left[i]
-		}
-		if i < len(right) {
-			r = right[i]
-		}
-		out[i] = l + r
-	}
-	return out
+	return strings.Join(lines, "\n")
 }
 
-// topBar identifies the build and the resolved connection (host, database,
-// provider) so both stay visible regardless of which pane has focus. The
-// connection is right-aligned against the terminal's width, falling back to a
-// single space when the two halves would not otherwise fit.
+// topBar identifies the build and the resolved connection so both stay visible
+// regardless of which pane has focus. The connection is right-aligned against
+// the terminal's width and leads with the database, the field a user re-reads
+// before running something destructive.
 func (m model) topBar(w int) string {
 	left := appNameStyle.Render("db-query")
 	if m.version != "" {
 		left += " " + appVersionStyle.Render(m.version)
 	}
-	right := connectionStyle.Render(m.session.Host.Host+" · ") +
-		databaseStyle.Render(m.session.Host.Database) +
-		connectionStyle.Render(" ("+m.session.Host.Provider+")")
+	right := databaseStyle.Render(m.session.Host.Database+" ●") + " " +
+		connectionStyle.Render(m.session.Host.Provider) +
+		connectionSep.Render(" · ") +
+		connectionStyle.Render(m.session.Host.Host)
 	gap := w - ansi.StringWidth(left) - ansi.StringWidth(right)
 	if gap < 1 {
-		gap = 1
+		// The connection yields to the app name, which is clipped last.
+		return left + " " + ansi.Truncate(right, max(0, w-ansi.StringWidth(left)-1), "")
 	}
 	return left + strings.Repeat(" ", gap) + right
 }
@@ -526,7 +518,7 @@ func (m model) topBar(w int) string {
 // indicator while a query is in flight (without which an in-flight run is
 // indistinguishable from an idle screen with empty results), and otherwise
 // the keybinding hint.
-func (m model) bottomBar() string {
+func (m model) bottomBar(w int) string {
 	switch {
 	case m.statusMsg != "":
 		return statusStyle.Render(m.statusMsg)
@@ -534,6 +526,6 @@ func (m model) bottomBar() string {
 		return runningStyle.Render("running…") + hintSepStyle.Render(" · ") +
 			hintKeyStyle.Render("^c") + " " + hintDescStyle.Render("cancel")
 	default:
-		return bottomBarHint()
+		return bottomBarHint(w)
 	}
 }

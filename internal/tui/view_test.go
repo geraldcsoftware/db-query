@@ -9,8 +9,8 @@ import (
 
 // titleColumn returns the display column sub starts at in line, or -1 if it is
 // absent. The column is the width of everything before the match, not its byte
-// offset: pane frames are drawn with multi-byte box-drawing runes, for which
-// the two differ.
+// offset: the layout's rules and the focus marker are multi-byte runes, for
+// which the two differ.
 func titleColumn(line, sub string) int {
 	i := strings.Index(line, sub)
 	if i < 0 {
@@ -19,12 +19,12 @@ func titleColumn(line, sub string) int {
 	return ansi.StringWidth(line[:i])
 }
 
-func TestViewContainsAllFourPaneTitles(t *testing.T) {
+func TestViewContainsAllFourPaneLabels(t *testing.T) {
 	m := newTestModel(t)
 	out := m.View().Content
-	for _, want := range []string{"Schema", "Saved", "Query", "Results"} {
+	for _, want := range []string{"SCHEMA", "SAVED", "QUERY", "RESULTS"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("View() missing pane title %q:\n%s", want, out)
+			t.Errorf("View() missing pane label %q:\n%s", want, out)
 		}
 	}
 }
@@ -49,7 +49,7 @@ func TestViewShowsTopBarWithVersionAndConnection(t *testing.T) {
 			t.Errorf("top bar %q missing %q", first, want)
 		}
 	}
-	if !strings.HasSuffix(first, "(postgres)") {
+	if !strings.HasSuffix(first, "db.example") {
 		t.Errorf("connection must be right-aligned in the top bar, got %q", first)
 	}
 }
@@ -85,7 +85,7 @@ func TestViewKeepsEveryPaneVisibleWithALargeResult(t *testing.T) {
 	m.query.setValue("select * from orders")
 	m.results.showRows(rowsOf(432))
 	out := ansi.Strip(m.View().Content)
-	for _, want := range []string{"db-query", "[Schema]", "[Query]", "[Saved]", "[Results]", "select * from orders"} {
+	for _, want := range []string{"db-query", "SCHEMA", "QUERY", "SAVED", "RESULTS", "select * from orders"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("View() lost %q behind a large result:\n%s", want, out)
 		}
@@ -93,7 +93,7 @@ func TestViewKeepsEveryPaneVisibleWithALargeResult(t *testing.T) {
 }
 
 // TestViewPlacesEachPaneInItsOwnRect ties rendering to the geometry mouse
-// hit-testing uses: each pane's title must be drawn on its rectangle's first
+// hit-testing uses: each pane's label must be drawn on its rectangle's first
 // row, within its rectangle's columns.
 func TestViewPlacesEachPaneInItsOwnRect(t *testing.T) {
 	m := newTestModel(t)
@@ -103,17 +103,17 @@ func TestViewPlacesEachPaneInItsOwnRect(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		p     pane
-		title string
+		label string
 	}{
-		{paneSchema, "[Schema]"},
-		{paneQuery, "[Query]"},
-		{paneSaved, "[Saved]"},
-		{paneResults, "[Results]"},
+		{paneSchema, "SCHEMA"},
+		{paneQuery, "QUERY"},
+		{paneSaved, "SAVED"},
+		{paneResults, "RESULTS"},
 	} {
 		r := m.rects[tc.p]
-		col := titleColumn(lines[r.y0], tc.title)
+		col := titleColumn(lines[r.y0], tc.label)
 		if col < r.x0 || col >= r.x1 {
-			t.Errorf("%s is drawn at column %d of row %d, outside its rect %+v", tc.title, col, r.y0, r)
+			t.Errorf("%s is drawn at column %d of row %d, outside its rect %+v", tc.label, col, r.y0, r)
 		}
 	}
 }
@@ -121,15 +121,16 @@ func TestViewPlacesEachPaneInItsOwnRect(t *testing.T) {
 // TestFocusedPaneIsVisuallyDistinct pins the affordance that tells a user
 // which pane their next keystroke reaches. It asserts a difference rather than
 // a specific colour: colour is downsampled on the way to the terminal and
-// disappears altogether on one that cannot show any, so the frame's weight,
-// not its colour, is what must carry focus for this to hold everywhere.
+// disappears altogether on one that cannot show any, so the label row's marker
+// glyph, not its colour, is what must carry focus for this to hold everywhere.
 func TestFocusedPaneIsVisuallyDistinct(t *testing.T) {
 	m := newTestModel(t)
 	r := m.rects[paneSaved]
+	w := r.x1 - r.x0
 	m.focus = paneSaved
-	focused := m.paneBlock(paneSaved, "Saved", m.saved.view(), r)
+	focused := m.paneBlock(paneSaved, "SAVED", "", m.saved.view(w), r)
 	m.focus = paneSchema
-	unfocused := m.paneBlock(paneSaved, "Saved", m.saved.view(), r)
+	unfocused := m.paneBlock(paneSaved, "SAVED", "", m.saved.view(w), r)
 
 	if strings.Join(focused, "\n") == strings.Join(unfocused, "\n") {
 		t.Fatal("a focused pane must render differently from the same pane unfocused")
@@ -139,11 +140,37 @@ func TestFocusedPaneIsVisuallyDistinct(t *testing.T) {
 	}
 }
 
+// accentSGR, selectionSGR and numberSGR are the truecolor escape sequences
+// lipgloss v2 emits for the load-bearing colour cues. Render always writes
+// truecolor and downsampling happens later at the writer, so the sequences
+// appear in View().Content under go test with no harness.
+const (
+	accentSGR    = "38;2;74;222;155"  // colorAccent, mint
+	selectionSGR = "48;2;74;222;155"  // the selection bar's mint background
+	numberSGR    = "38;2;244;114;182" // colorNumber, pink
+	textSGR      = "38;2;229;231;235" // colorText
+)
+
+// TestFocusedPaneLabelIsAccented pins the second, redundant focus cue beside
+// the marker glyph TestFocusedPaneIsVisuallyDistinct covers.
+func TestFocusedPaneLabelIsAccented(t *testing.T) {
+	m := newTestModel(t)
+	r := m.rects[paneSaved]
+	m.focus = paneSaved
+	if got := m.paneBlock(paneSaved, "SAVED", "", "", r)[0]; !strings.Contains(got, accentSGR) {
+		t.Errorf("the focused label must carry the accent colour, got %q", got)
+	}
+	m.focus = paneSchema
+	if got := m.paneBlock(paneSaved, "SAVED", "", "", r)[0]; strings.Contains(got, accentSGR) {
+		t.Errorf("an unfocused label must not, got %q", got)
+	}
+}
+
 // TestPaneBlockExactlyFillsItsRect is the per-pane half of the whole-screen
-// bound TestViewNeverExceedsTerminalHeight enforces: a framed pane must still
-// occupy exactly its rectangle, since View tiles the rectangles edge to edge
-// and any drift would push a later pane off screen. The sizes run down to
-// rectangles too small to frame at all.
+// bound TestViewNeverExceedsTerminalHeight enforces: a pane must occupy
+// exactly its rectangle, since View tiles the rectangles edge to edge and any
+// drift would push a later pane off screen. The sizes run down to rectangles
+// too small to hold even the label row.
 func TestPaneBlockExactlyFillsItsRect(t *testing.T) {
 	m := newTestModel(t)
 	m.results.showRows(rowsOf(50)) // content far taller and wider than the small rects
@@ -154,7 +181,7 @@ func TestPaneBlockExactlyFillsItsRect(t *testing.T) {
 			if focused {
 				m.focus = paneResults
 			}
-			got := m.paneBlock(paneResults, "Results", m.results.view(), r)
+			got := m.paneBlock(paneResults, "RESULTS", m.results.meta(), m.results.view(), r)
 			if len(got) != size.h {
 				t.Errorf("%dx%d focused=%v: %d lines, want %d", size.w, size.h, focused, len(got), size.h)
 				continue

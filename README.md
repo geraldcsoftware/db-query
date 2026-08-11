@@ -233,16 +233,28 @@ Piped or redirected output is unaffected: the UI only opens when stdout is a
 terminal, so `db-query | cat` still prints usage and exits 1 exactly as before.
 
 ```
- db-query 1.4.0                              prod-core · orders (postgres)
- > [Schema]                    | [Query]
-   ▸ orders                    |   1 select * from orders limit 20;
-   ▾ people                    |
-       id     integer          |
-       name   text             |
-   [Saved]                     | [Results]
-     reports/people-by-name    |   +----+-------+
-     default/recent-orders     |   | id | name  |
+db-query 1.4.0                                                 orders ● postgres · prod-core
+───────────────────────┬────────────────────────────────────────────────────────────────────
+▌SCHEMA                │ QUERY
+ ▶ orders            5 │  1 select * from orders limit 20;
+ ▼ people            2 │
+   id          integer ├────────────────────────────────────────────────────────────────────
+   name           text │ RESULTS                                                     2 rows
+                       │ #  id  name
+                       │ 1   1  ada
+───────────────────────┤ 2   2  grace
+ SAVED                 │
+ default/recent-orders │
+ reports/people-by-name│
+                       │
+───────────────────────┴────────────────────────────────────────────────────────────────────
+^h/j/k/l move · ^Enter/F5 run · Enter load/expand · PgUp/PgDn page      ^c cancel · Esc quit
 ```
+
+The pane the next keystroke reaches is marked `▌` beside its label and drawn in
+the accent colour. The number beside a table is how many columns it has; the row
+under a sidebar cursor is a full-width bar; result columns whose every value is
+a number are right-aligned and coloured.
 
 | Pane | What it holds |
 |------|---------------|

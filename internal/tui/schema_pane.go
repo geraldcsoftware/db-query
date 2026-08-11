@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"strconv"
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/geraldcsoftware/db-query/internal/config"
@@ -75,26 +78,37 @@ func (p schemaPane) selectedTable() (schema.Table, bool) {
 	return p.tables[p.cursor], true
 }
 
-func (p schemaPane) view() string {
+// A table row leads with a disclosure marker and a column row with the blank
+// that stands in for one, so an expanded table's column names line up under
+// the table name rather than under its marker.
+const (
+	markerCollapsed = "▶ "
+	markerExpanded  = "▼ "
+	markerColumn    = "  "
+)
+
+// view renders the catalogue into a pane w cells wide: one row per table with
+// its column count against the pane's right edge, and an expanded table's
+// columns listed underneath with their data types. The count is len(Columns),
+// which the cache already holds — a per-table row count would mean a query
+// per table on every frame.
+func (p schemaPane) view(w int) string {
 	if p.hint != "" {
-		return p.hint
+		return indentLines(hintStyle.Render(p.hint))
 	}
-	var out string
+	rows := make([]string, 0, len(p.tables))
 	for i, t := range p.tables {
-		cursor := "  "
-		if i == p.cursor {
-			cursor = "> "
-		}
-		mark := "▸"
+		marker := markerCollapsed
 		if p.expanded[i] {
-			mark = "▾"
+			marker = markerExpanded
 		}
-		out += cursor + mark + " " + t.Name + "\n"
-		if p.expanded[i] {
-			for _, c := range t.Columns {
-				out += "      " + c.Name + " " + c.DataType + "\n"
-			}
+		rows = append(rows, listRow(w, i == p.cursor, marker, t.Name, strconv.Itoa(len(t.Columns))))
+		if !p.expanded[i] {
+			continue
+		}
+		for _, c := range t.Columns {
+			rows = append(rows, listRow(w, false, markerColumn, c.Name, c.DataType))
 		}
 	}
-	return out
+	return strings.Join(rows, "\n")
 }

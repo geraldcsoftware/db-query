@@ -3,10 +3,8 @@ package tui
 import (
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
-	"github.com/geraldcsoftware/db-query/internal/render"
 )
 
 const defaultTUIPageSize = 100
@@ -91,36 +89,44 @@ func (r resultsPane) currentSlice() adapter.Rows {
 	return adapter.Rows{Columns: r.rows.Columns, Rows: r.rows.Rows[start:end]}
 }
 
-// view renders the current page through the same table renderer the CLI's
-// --output table uses (internal/render), plus a page indicator when there
-// is more than one page. --output/--border/--max-col-width are not exposed
-// in the TUI: this always renders as a table, capping cells at
-// tuiMaxColWidth so one wide text column cannot wrap every row and destroy
-// the table's alignment inside a fixed-size pane.
+// view renders the current page as a borderless table. --output/--border/
+// --max-col-width are not exposed in the TUI: this always renders a table,
+// capping cells at tuiMaxColWidth so one wide text column cannot destroy the
+// table's alignment inside a fixed-size pane.
 func (r resultsPane) view() string {
 	if r.errText != "" {
 		// Styled so a failed run reads as a failure at a glance rather than as
 		// another line of output; lipgloss applies the style per line, so a
 		// multi-line message (an error plus its hint) is marked throughout.
-		return errorStyle.Render("error: " + r.errText)
+		return indentLines(errorStyle.Render("error: " + r.errText))
 	}
-	if len(r.rows.Columns) == 0 {
+	return renderResultTable(r.currentSlice(), r.page*pageSize()+1)
+}
+
+// meta is the summary right-aligned on the pane's label row: how many rows the
+// run returned, and where in them the current page sits once there is more
+// than one.
+func (r resultsPane) meta() string {
+	if r.errText != "" || len(r.rows.Columns) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	_ = render.Render(&b, "table", r.currentSlice(), render.Options{MaxColWidth: tuiMaxColWidth})
-	if r.pageCount() > 1 {
-		b.WriteString(pageIndicatorStyle.Render(pageIndicator(r)))
+	n := len(r.rows.Rows)
+	out := strconv.Itoa(n) + " rows"
+	if n == 1 {
+		out = "1 row"
 	}
-	return b.String()
+	if r.pageCount() > 1 {
+		out += " · " + pageIndicator(r)
+	}
+	return out
 }
 
 // pageIndicator summarizes the current page position, e.g.
-// "page 2/5 (rows 101-200 of 432)".
+// "page 2/5 (rows 101-200)".
 func pageIndicator(r resultsPane) string {
 	size := pageSize()
 	start := r.page*size + 1
 	end := start + len(r.currentSlice().Rows) - 1
 	return "page " + strconv.Itoa(r.page+1) + "/" + strconv.Itoa(r.pageCount()) +
-		" (rows " + strconv.Itoa(start) + "-" + strconv.Itoa(end) + " of " + strconv.Itoa(len(r.rows.Rows)) + ")"
+		" (rows " + strconv.Itoa(start) + "-" + strconv.Itoa(end) + ")"
 }

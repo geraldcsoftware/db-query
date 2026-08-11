@@ -109,24 +109,24 @@ func clickAt(x, y int) tea.MouseClickMsg {
 
 // TestMouseClickFocusesThePaneRenderedThere checks hit-testing against what is
 // actually on screen rather than against the rectangle map alone: for each
-// pane it finds that pane's title in the rendered frame, then clicks on the
-// title's own cell and asserts focus lands on the pane drawn there.
+// pane it finds that pane's label in the rendered frame, then clicks on the
+// label's own cell and asserts focus lands on the pane drawn there.
 func TestMouseClickFocusesThePaneRenderedThere(t *testing.T) {
 	base := newTestModel(t)
 	lines := strings.Split(ansi.Strip(base.View().Content), "\n")
 	for _, tc := range []struct {
 		p     pane
-		title string
+		label string
 	}{
-		{paneResults, "[Results]"},
-		{paneSchema, "[Schema]"},
-		{paneQuery, "[Query]"},
-		{paneSaved, "[Saved]"},
+		{paneResults, "RESULTS"},
+		{paneSchema, "SCHEMA"},
+		{paneQuery, "QUERY"},
+		{paneSaved, "SAVED"},
 	} {
 		r := base.rects[tc.p]
-		col := titleColumn(lines[r.y0], tc.title)
+		col := titleColumn(lines[r.y0], tc.label)
 		if col < 0 {
-			t.Fatalf("%s is not rendered on row %d", tc.title, r.y0)
+			t.Fatalf("%s is not rendered on row %d", tc.label, r.y0)
 		}
 		m := base
 		m.focus = paneSchema
@@ -135,7 +135,7 @@ func TestMouseClickFocusesThePaneRenderedThere(t *testing.T) {
 		}
 		updated, _ := m.Update(clickAt(col, r.y0))
 		if got := updated.(model).focus; got != tc.p {
-			t.Errorf("click on the rendered %s title focused %v", tc.title, got)
+			t.Errorf("click on the rendered %s label focused %v", tc.label, got)
 		}
 	}
 }
