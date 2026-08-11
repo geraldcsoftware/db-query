@@ -34,9 +34,9 @@ type model struct {
 	width  int
 	height int
 
-	// running/cancel/statusMsg are populated starting in Task 10; left as
-	// zero values here so this task's tests (which never trigger a run) are
-	// unaffected.
+	// running is false until a query starts executing; cancelRunning stops
+	// a run without exiting the program. This task's tests never trigger a
+	// run, so running stays at its zero value throughout.
 	running bool
 
 	// rects holds each pane's on-screen bounding box, set by
@@ -170,7 +170,8 @@ func (m model) View() string {
 		label(paneSaved, "Saved") + "  " + label(paneResults, "Results") + "\n"
 }
 
-// cancelRunning is implemented in run.go (Task 10); this file only calls it.
+// cancelRunning stops the in-flight run, if any, without quitting the
+// program. The real implementation lives in run.go.
 func (m model) cancelRunning() (tea.Model, tea.Cmd) {
 	m.running = false
 	return m, nil
