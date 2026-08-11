@@ -71,3 +71,13 @@ func TestExecuteCancellation(t *testing.T) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 	}
 }
+
+func TestExecuteExplicitCancel(t *testing.T) {
+	fakeBin(t, "psql", `sleep 5; printf 'id\n1\n'`)
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	_, _, err := execute(ctx, testResolved(t), "select 1")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}

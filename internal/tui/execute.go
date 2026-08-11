@@ -26,6 +26,15 @@ func execute(ctx context.Context, r session.Resolved, sql string) (adapter.Rows,
 	inv.Env = r.Adapter.Env(r.Cred, r.Host)
 
 	res, err := executor.Run(ctx, inv)
+	// executor.Run only wraps ctx.Err() into its returned error for a
+	// DeadlineExceeded timeout, not for an explicit CancelFunc call — a
+	// process killed by an explicit cancel exits nonzero with err == nil,
+	// which the res.ExitCode branch below would otherwise misreport as an
+	// ordinary SQL error. Checking ctx.Err() first, regardless of what Run
+	// returned, is what makes the context.Canceled case reach the caller.
+	if ctx.Err() != nil {
+		return adapter.Rows{}, false, ctx.Err()
+	}
 	if err != nil {
 		return adapter.Rows{}, false, err
 	}
