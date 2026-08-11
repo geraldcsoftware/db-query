@@ -213,6 +213,70 @@ replace the previous server's names.
 | `3`  | schema error — the query references an unknown table or column (re-run with `--refresh-schema`) |
 | `4`  | other SQL error — the client ran and exited nonzero |
 
+## Interactive mode
+
+Run `db-query` with no command, at a terminal, and it opens a four-pane
+interactive UI instead of printing usage:
+
+```sh
+db-query                      # host from --host/DB_QUERY_HOST/config, else a picker
+db-query --host prod-core     # skip the picker
+```
+
+The host is resolved the usual way — `--host`, then `DB_QUERY_HOST`, then the
+config file. When that resolves nothing, a picker lists the configured hosts
+first. The credential is then resolved **once**, at startup, and reused for
+every query in the session, so a `bw:`/`bws:` vault unlock happens at most once
+per session rather than on every run.
+
+Piped or redirected output is unaffected: the UI only opens when stdout is a
+terminal, so `db-query | cat` still prints usage and exits 1 exactly as before.
+
+```
+db-query 1.4.0                                                 orders ● postgres · prod-core
+───────────────────────┬────────────────────────────────────────────────────────────────────
+▌SCHEMA                │ QUERY
+ ▶ orders            5 │  1 select * from orders limit 20;
+ ▼ people            2 │
+   id          integer ├────────────────────────────────────────────────────────────────────
+   name           text │ RESULTS                                                     2 rows
+                       │ #  id  name
+                       │ 1   1  ada
+───────────────────────┤ 2   2  grace
+ SAVED                 │
+ default/recent-orders │
+ reports/people-by-name│
+                       │
+───────────────────────┴────────────────────────────────────────────────────────────────────
+^h/j/k/l move · ^Enter/F5 run · Enter load/expand · PgUp/PgDn page      ^c cancel · Esc quit
+```
+
+The pane the next keystroke reaches is marked `▌` beside its label and drawn in
+the accent colour. The number beside a table is how many columns it has; the row
+under a sidebar cursor is a full-width bar; result columns whose every value is
+a number are right-aligned and coloured.
+
+| Pane | What it holds |
+|------|---------------|
+| Schema | the host's **cached** catalogue (`db-query introspect` builds it; the UI never introspects on its own) |
+| Query | an editable SQL buffer |
+| Saved | the saved-query store, `category/name` |
+| Results | the last run's rows as a table, or its error text |
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+h/j/k/l` | move focus between panes (also: click a pane) |
+| `Ctrl+Enter` or `F5` | run — the Query pane's SQL, or a `SELECT` preview of the Schema pane's selected table |
+| `Enter` | Schema: expand/collapse a table · Saved: load the query into the Query pane |
+| `PgUp` / `PgDn` | page through the results |
+| `Ctrl+C` | cancel the running query, or quit when idle |
+| `Esc` | quit |
+
+Results are paged client-side over rows already fetched — your SQL is never
+rewritten with `LIMIT`/`OFFSET`. `DB_QUERY_TUI_PAGE_SIZE` sets the rows per page
+(default 100); there is no scrolling *within* a page, so on a short terminal set
+it to roughly what the Results pane can show.
+
 ## Configuration
 
 `~/.config/db-query/config.toml` (override with `--config` or `DB_QUERY_CONFIG`):

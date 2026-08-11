@@ -245,6 +245,20 @@ func TestSqlserverIsSchemaError(t *testing.T) {
 	}
 }
 
+func TestSQLServerPreviewSQL(t *testing.T) {
+	cases := map[string]string{
+		"dbo.orders":     `SELECT TOP 100 * FROM [dbo].[orders];`,
+		"orders":         `SELECT TOP 100 * FROM [orders];`,
+		"dbo.Order Item": `SELECT TOP 100 * FROM [dbo].[Order Item];`, // mixed case and a space survive quoting
+		"dbo.we]ird":     `SELECT TOP 100 * FROM [dbo].[we]]ird];`,    // an embedded bracket is doubled
+	}
+	for table, want := range cases {
+		if got := (sqlserverAdapter{}).PreviewSQL(table); got != want {
+			t.Errorf("PreviewSQL(%q) = %q, want %q", table, got, want)
+		}
+	}
+}
+
 // TestSQLServerListDatabasesSQL pins the candidate-list predicates. tempdb is
 // excluded by name rather than by database_id: the familiar master=1, tempdb=2
 // mapping is not documented by Microsoft as a stable contract (design.md §13.9).

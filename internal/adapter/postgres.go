@@ -168,3 +168,23 @@ FROM information_schema.columns
 WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
 ORDER BY table_schema, table_name, ordinal_position;`
 }
+
+// PreviewSQL is the TUI Schema pane's "Cmd+Enter on a table" shortcut:
+// postgres caps a row count with LIMIT. The name comes from the cached
+// catalogue, so each dot-separated part is double-quoted: without quoting, a
+// mixed-case, space-containing or reserved-word identifier — all legal in
+// postgres — would produce SQL that does not parse or that folds to the wrong
+// table.
+func (postgresAdapter) PreviewSQL(table string) string {
+	return fmt.Sprintf("SELECT * FROM %s LIMIT 100;", quotePostgresIdent(table))
+}
+
+// quotePostgresIdent double-quotes each dot-separated part of a qualified
+// name, doubling any embedded quote character as postgres requires.
+func quotePostgresIdent(name string) string {
+	parts := strings.Split(name, ".")
+	for i, p := range parts {
+		parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
+	}
+	return strings.Join(parts, ".")
+}

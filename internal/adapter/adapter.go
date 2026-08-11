@@ -38,6 +38,7 @@ type Adapter interface {
 	IsSchemaError(r executor.RawResult) bool // gates re-introspection
 	IntrospectSQL() string                   // lists user tables + columns
 	ListDatabasesSQL() string                // lists connectable database names
+	PreviewSQL(table string) string          // "first 100 rows" of one table, provider-native
 }
 
 var adapters = map[string]Adapter{

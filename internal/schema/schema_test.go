@@ -177,3 +177,59 @@ func TestCachePathFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestTables(t *testing.T) {
+	rows := adapter.Rows{
+		Columns: []string{"table_schema", "table_name", "column_name", "data_type", "is_nullable"},
+	}
+	add := func(schemaName, table, col, dtype, nullable string) {
+		s, tb, c, d, n := schemaName, table, col, dtype, nullable
+		rows.Rows = append(rows.Rows, []*string{&s, &tb, &c, &d, &n})
+	}
+	add("public", "orders", "id", "int8", "NO")
+	add("public", "orders", "status", "text", "YES")
+	add("public", "payments", "id", "int8", "NO")
+
+	tables, err := Tables(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 2 {
+		t.Fatalf("got %d tables, want 2", len(tables))
+	}
+	if tables[0].Name != "orders" || len(tables[0].Columns) != 2 {
+		t.Fatalf("tables[0] = %+v", tables[0])
+	}
+	if tables[0].Columns[0].Name != "id" || tables[0].Columns[0].Nullable {
+		t.Fatalf("orders.id = %+v, want non-nullable", tables[0].Columns[0])
+	}
+	if !tables[0].Columns[1].Nullable {
+		t.Fatalf("orders.status should be nullable")
+	}
+	if tables[1].Name != "payments" || len(tables[1].Columns) != 1 {
+		t.Fatalf("tables[1] = %+v", tables[1])
+	}
+}
+
+func TestTablesCaseInsensitiveColumns(t *testing.T) {
+	rows := adapter.Rows{
+		Columns: []string{"TABLE_SCHEMA", "TABLE_NAME", "COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE"},
+	}
+	s, tb, c, d, n := "dbo", "orders", "id", "int", "NO"
+	rows.Rows = append(rows.Rows, []*string{&s, &tb, &c, &d, &n})
+
+	tables, err := Tables(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 1 || tables[0].Schema != "dbo" {
+		t.Fatalf("tables = %+v", tables)
+	}
+}
+
+func TestTablesMissingColumns(t *testing.T) {
+	_, err := Tables(adapter.Rows{Columns: []string{"not", "a", "catalogue"}})
+	if err == nil {
+		t.Fatal("expected an error for a rowset that is not a catalogue")
+	}
+}
