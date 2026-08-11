@@ -37,6 +37,9 @@ type model struct {
 	// query is the Query pane's editable SQL buffer.
 	query queryPane
 
+	// schema is the Schema pane's cached table/column browser.
+	schema schemaPane
+
 	// running is false until a query starts executing; cancelRunning stops
 	// a run without exiting the program.
 	running bool
@@ -53,7 +56,7 @@ func (r rect) contains(x, y int) bool {
 }
 
 func newModel(r session.Resolved, c session.CommonFlags, stdout io.Writer) model {
-	return model{session: r, flags: c, stdout: stdout, focus: paneSchema, query: newQueryPane()}
+	return model{session: r, flags: c, stdout: stdout, focus: paneSchema, query: newQueryPane(), schema: newSchemaPane(r.Host)}
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -159,6 +162,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.focus == paneQuery {
 			var cmd tea.Cmd
 			m.query, cmd = m.query.update(msg)
+			return m, cmd
+		}
+		if m.focus == paneSchema {
+			var cmd tea.Cmd
+			m.schema, cmd = m.schema.update(msg)
 			return m, cmd
 		}
 		return m, nil
