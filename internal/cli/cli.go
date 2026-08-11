@@ -1090,21 +1090,28 @@ func renderRows(rows adapter.Rows, output string, noHeaders bool, maxColWidth in
 	return 0
 }
 
-// resolveOutput maps render.AutoFormat onto a concrete format: table when w is
-// a terminal, text otherwise. Any explicit format passes through untouched.
-//
-// The probe is a type assertion rather than a build-tagged isatty call, which
-// keeps it dependency-free and makes the piped path the default in tests: a
-// bytes.Buffer is not an *os.File, so it resolves to text exactly as a pipe or
-// a redirect does.
+// isTerminal reports whether w is a character device — the same class a
+// real terminal belongs to. It is a type assertion, not a build-tagged
+// isatty call: dependency-free, and a *bytes.Buffer or *strings.Builder in a
+// test is not an *os.File, so it reads false exactly like a pipe or redirect.
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// resolveOutput maps render.AutoFormat onto a concrete format: table when w
+// is a terminal, text otherwise. Any explicit format passes through
+// untouched.
 func resolveOutput(format string, w io.Writer) string {
 	if format != render.AutoFormat {
 		return format
 	}
-	if f, ok := w.(*os.File); ok {
-		if info, err := f.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
-			return "table"
-		}
+	if isTerminal(w) {
+		return "table"
 	}
 	return "text"
 }

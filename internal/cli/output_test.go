@@ -78,6 +78,38 @@ func TestResolveOutput(t *testing.T) {
 	})
 }
 
+func TestIsTerminal(t *testing.T) {
+	t.Run("false for a buffer", func(t *testing.T) {
+		var b strings.Builder
+		if isTerminal(&b) {
+			t.Fatal("a strings.Builder must not report as a terminal")
+		}
+	})
+
+	t.Run("false for a pipe", func(t *testing.T) {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close()
+		defer w.Close()
+		if isTerminal(w) {
+			t.Fatal("a pipe must not report as a terminal")
+		}
+	})
+
+	t.Run("true for a character device", func(t *testing.T) {
+		f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err != nil {
+			t.Skipf("no %s available: %v", os.DevNull, err)
+		}
+		defer f.Close()
+		if !isTerminal(f) {
+			t.Fatal("a character device must report as a terminal")
+		}
+	})
+}
+
 // TestAutoIsTextWhenNotATTY is the regression guard that matters most: the
 // default format must stay byte-identical to the pre-table behaviour whenever
 // output is not a terminal, so pipes, redirects and agent callers are unaffected.
