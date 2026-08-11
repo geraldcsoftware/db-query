@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/cache"
@@ -70,4 +71,80 @@ func Read(path string) (adapter.Rows, error) {
 		return adapter.Rows{}, fmt.Errorf("decoding schema cache %s: %w", path, err)
 	}
 	return rows, nil
+}
+
+// Column is one table column from a cached catalogue.
+type Column struct {
+	Name     string
+	DataType string
+	Nullable bool
+}
+
+// Table is one table's columns, derived from a cached catalogue, in cache
+// (ordinal-position) order.
+type Table struct {
+	Schema  string
+	Name    string
+	Columns []Column
+}
+
+// catalogueColumns are the five columns both providers' IntrospectSQL
+// produces. Matched case-insensitively: postgres's information_schema is
+// lowercase, sqlserver's INFORMATION_SCHEMA is uppercase.
+type catalogueColumns struct {
+	schema, table, column, dataType, nullable int
+}
+
+func findCatalogueColumns(cols []string) (catalogueColumns, error) {
+	idx := catalogueColumns{-1, -1, -1, -1, -1}
+	for i, c := range cols {
+		switch {
+		case strings.EqualFold(c, "table_schema"):
+			idx.schema = i
+		case strings.EqualFold(c, "table_name"):
+			idx.table = i
+		case strings.EqualFold(c, "column_name"):
+			idx.column = i
+		case strings.EqualFold(c, "data_type"):
+			idx.dataType = i
+		case strings.EqualFold(c, "is_nullable"):
+			idx.nullable = i
+		}
+	}
+	if idx.schema < 0 || idx.table < 0 || idx.column < 0 || idx.dataType < 0 || idx.nullable < 0 {
+		return catalogueColumns{}, fmt.Errorf("not a schema catalogue: missing one of table_schema/table_name/column_name/data_type/is_nullable")
+	}
+	return idx, nil
+}
+
+func cell(row []*string, i int) string {
+	if i >= len(row) || row[i] == nil {
+		return ""
+	}
+	return *row[i]
+}
+
+// Tables groups a cached catalogue's flat rows into one entry per table,
+// columns in the cache's own order (the introspection query orders by
+// ordinal position, so no re-sorting is needed here).
+func Tables(rows adapter.Rows) ([]Table, error) {
+	idx, err := findCatalogueColumns(rows.Columns)
+	if err != nil {
+		return nil, err
+	}
+	var out []Table
+	var cur *Table
+	for _, row := range rows.Rows {
+		schemaName, tableName := cell(row, idx.schema), cell(row, idx.table)
+		if cur == nil || cur.Schema != schemaName || cur.Name != tableName {
+			out = append(out, Table{Schema: schemaName, Name: tableName})
+			cur = &out[len(out)-1]
+		}
+		cur.Columns = append(cur.Columns, Column{
+			Name:     cell(row, idx.column),
+			DataType: cell(row, idx.dataType),
+			Nullable: strings.EqualFold(cell(row, idx.nullable), "YES"),
+		})
+	}
+	return out, nil
 }
