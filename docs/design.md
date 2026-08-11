@@ -774,6 +774,22 @@ never introspects on its own, so browsing costs no round trip. Results are paged
 client-side over rows already fetched — the user's SQL is never rewritten with
 `LIMIT`/`OFFSET` — with `DB_QUERY_TUI_PAGE_SIZE` (default 100) setting the page.
 
+Startup fills in what the invocation left open, with a name-only picker: no
+host resolved from flag, environment or config prompts for one of the
+configured hosts, and choosing a name behaves exactly as if `--host <name>` had
+been passed. A database picker follows when no `--database` was given and
+either the host was picked interactively or the host resolved no database at
+all — the first because choosing a host is already a "choose my session" flow,
+the second because a session with no database cannot run anything. A `--host`
+whose config block names a database launches straight in, unprompted. The
+picker's names come from the same live catalog listing the `databases` command
+runs, refreshing the §13.9 completion cache on the way past, and fall back to
+that cache when the host cannot be reached — a listing failure alone does not
+strand a session that has been listed before, though a host with neither is an
+error rather than a UI that cannot query. Neither picker writes anything back
+to config or the environment, and quitting either exits 0 without starting the
+UI: nothing to do is not a failure.
+
 **The credential is resolved once, at startup — a deliberate amendment to §9's
 "lazy, per-invocation resolution" rule.** The adapter's `Env(cred, host)` call
 runs a single time as the session starts, and the resulting environment overlay

@@ -1,11 +1,16 @@
 package session
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/geraldcsoftware/db-query/internal/adapter"
+	"github.com/geraldcsoftware/db-query/internal/dblist"
 )
 
 func writeFile(t *testing.T, dir, name, body string) string {
@@ -57,6 +62,61 @@ func TestSetupMissingHost(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "--host is required") {
 		t.Fatalf("stderr = %q", errb.String())
+	}
+}
+
+// fakePsql puts a psql stub on PATH, mirroring internal/cli's test helper of
+// the same shape.
+func fakePsql(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "psql"), []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestListDatabasesWritesCache pins the pairing that makes the listing worth
+// sharing: the rows come back untouched — renaming the provider's column is
+// the CLI's presentation concern — and the names land in the cache keyed on
+// the config label, which is what keeps --database completion current.
+func TestListDatabasesWritesCache(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("DBQ_SESSION_TEST_PW", "pw")
+	fakePsql(t, "cat > /dev/null\nprintf 'datname\\npostgres\\ntestdb\\n'")
+	c := CommonFlags{Host: "testpg", Config: testConfig(t), Output: "text", Timeout: 10 * time.Second}
+
+	r, code := Setup(c, io.Discard)
+	if code != 0 {
+		t.Fatalf("setup code=%d", code)
+	}
+	var errb strings.Builder
+	rows, code := ListDatabases(r, c, &errb)
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb.String())
+	}
+	if !reflect.DeepEqual(rows.Columns, []string{"datname"}) {
+		t.Fatalf("columns = %v, want the provider's own", rows.Columns)
+	}
+	names, err := dblist.Read(dblist.CachePath("testpg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(names, []string{"postgres", "testdb"}) {
+		t.Fatalf("cached names = %v", names)
+	}
+}
+
+// TestDatabaseNamesSkipsEmpty: an empty candidate would complete to nothing,
+// so it is dropped rather than cached.
+func TestDatabaseNamesSkipsEmpty(t *testing.T) {
+	name, empty := "keep", ""
+	rows := adapter.Rows{
+		Columns: []string{"datname"},
+		Rows:    [][]*string{{&name}, {&empty}, {nil}, {}},
+	}
+	if got := DatabaseNames(rows); !reflect.DeepEqual(got, []string{"keep"}) {
+		t.Fatalf("names = %v, want [keep]", got)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
+	"github.com/geraldcsoftware/db-query/internal/dblist"
 	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/render"
 	"github.com/geraldcsoftware/db-query/internal/schema"
@@ -157,6 +158,43 @@ func BuildSchema(r Resolved, cachePath string, c CommonFlags, stderr io.Writer) 
 		return 1
 	}
 	return 0
+}
+
+// ListDatabases runs a host's catalog listing and persists the names for
+// --database completion, returning the rows so a caller can render them too.
+// It pairs the adapter query with the cache write the same way BuildSchema
+// does for introspection, and lives here because both the CLI's databases
+// command and the TUI's startup picker need the same listing.
+//
+// The cache is keyed on the config label, not the resolved server address: the
+// address may come from the credential via MergeCredential, and completion may
+// never resolve one. Errors render to errOut, which a caller treating failure
+// as non-fatal sets to io.Discard so nothing prints as though the command it
+// was attached to had failed.
+func ListDatabases(r Resolved, c CommonFlags, errOut io.Writer) (adapter.Rows, int) {
+	rows, code := RunOnce(r, adapter.Query{SQL: r.Adapter.ListDatabasesSQL()}, c, false, errOut)
+	if code != 0 {
+		return adapter.Rows{}, code
+	}
+	if err := dblist.Write(dblist.CachePath(r.Host.Name), DatabaseNames(rows)); err != nil {
+		render.Error(errOut, c.Output, err.Error())
+		return adapter.Rows{}, 1
+	}
+	return rows, 0
+}
+
+// DatabaseNames flattens the first column of a catalog listing into the flat
+// list the cache holds. NULL and empty names cannot occur in either catalog,
+// and are skipped rather than cached as empty candidates.
+func DatabaseNames(rows adapter.Rows) []string {
+	names := make([]string, 0, len(rows.Rows))
+	for _, row := range rows.Rows {
+		if len(row) == 0 || row[0] == nil || *row[0] == "" {
+			continue
+		}
+		names = append(names, *row[0])
+	}
+	return names
 }
 
 // usesBWS reports whether the host resolves any secret through the bws: scheme,

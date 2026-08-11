@@ -16,7 +16,6 @@ import (
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/config"
-	"github.com/geraldcsoftware/db-query/internal/dblist"
 	"github.com/geraldcsoftware/db-query/internal/render"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 	"github.com/geraldcsoftware/db-query/internal/schema"
@@ -822,48 +821,22 @@ func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) 
 
 // listDatabases runs a host's catalog listing and persists the names for
 // --database completion, returning the rows so a caller can render them too.
-// It pairs the adapter query with the cache write the same way buildSchema
-// does for introspection.
-//
-// The cache is keyed on the config label, not the resolved server address: the
-// address may come from the credential via MergeCredential, and completion may
-// never resolve one. Errors render to errOut, which a caller treating failure
-// as non-fatal sets to io.Discard so nothing prints as though the command it
-// was attached to had failed.
+// The listing lives in internal/session so internal/tui's startup picker can
+// run the same one; this wrapper is only the commonFlags conversion.
 func listDatabases(r session.Resolved, c commonFlags, errOut io.Writer) (adapter.Rows, int) {
-	rows, code := session.RunOnce(r, adapter.Query{SQL: r.Adapter.ListDatabasesSQL()}, toSessionFlags(c), false, errOut)
-	if code != 0 {
-		return adapter.Rows{}, code
-	}
-	if err := dblist.Write(dblist.CachePath(r.Host.Name), databaseNames(rows)); err != nil {
-		render.Error(errOut, c.output, err.Error())
-		return adapter.Rows{}, 1
-	}
-	return rows, 0
+	return session.ListDatabases(r, toSessionFlags(c), errOut)
 }
 
 // databaseListRows renames the provider's column to a neutral "database".
 // Postgres returns datname and SQL Server returns name; the CLI presents one
 // vocabulary so a caller parsing the output does not have to know the provider.
+// It stays here rather than beside the listing because it is a presentation
+// concern of the databases command, not of the query the listing runs.
 func databaseListRows(rows adapter.Rows) adapter.Rows {
 	if len(rows.Columns) > 0 {
 		rows.Columns = append([]string{"database"}, rows.Columns[1:]...)
 	}
 	return rows
-}
-
-// databaseNames flattens the first column into the flat list the cache holds.
-// NULL and empty names cannot occur in either catalog, and are skipped rather
-// than cached as empty candidates.
-func databaseNames(rows adapter.Rows) []string {
-	names := make([]string, 0, len(rows.Rows))
-	for _, row := range rows.Rows {
-		if len(row) == 0 || row[0] == nil || *row[0] == "" {
-			continue
-		}
-		names = append(names, *row[0])
-	}
-	return names
 }
 
 func runHosts(args []string, globals commonFlags, stdout, stderr io.Writer) int {

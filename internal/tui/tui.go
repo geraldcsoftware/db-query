@@ -14,14 +14,14 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/session"
 )
 
-// Run resolves the session's host (prompting with a picker first if none
-// resolved from flags/env/config), then runs the interactive program. A
-// startup failure — no host chosen, or a credential that cannot be
-// resolved — is fatal: it is reported on stderr and Run returns 1 before
-// any Bubble Tea program starts, exactly like every other command's
-// credential-error path. version is displayed in the top bar; the caller
-// supplies it because internal/cli, which owns the build info, imports this
-// package and so cannot be imported back.
+// Run resolves the session's host and database (prompting with a picker for
+// whichever did not resolve from flags/env/config), then runs the interactive
+// program. A startup failure — a credential that cannot be resolved, or a
+// host with no database to offer — is fatal: it is reported on stderr and
+// Run returns a non-zero code before any Bubble Tea program starts, exactly
+// like every other command's credential-error path. version is displayed in
+// the top bar; the caller supplies it because internal/cli, which owns the
+// build info, imports this package and so cannot be imported back.
 func Run(c session.CommonFlags, version string, stdout, stderr io.Writer) int {
 	r, code := bootstrap(c, stderr)
 	if code != 0 {
@@ -42,7 +42,7 @@ func Run(c session.CommonFlags, version string, stdout, stderr io.Writer) int {
 
 // shouldLaunch reports whether bootstrap resolved a session worth launching
 // the interactive program against. bootstrap returns a zero-value
-// session.Resolved alongside a 0 exit code when the user quits the host
+// session.Resolved alongside a 0 exit code when the user quits a startup
 // picker without choosing (Esc/Ctrl+C) — that is "nothing to do", not an
 // error, so it can't be distinguished by exit code alone. session.Setup's
 // only success path sets Adapter via adapter.For, which never returns a nil
