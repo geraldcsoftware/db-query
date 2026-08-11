@@ -214,6 +214,14 @@ func TestPostgresListDatabasesSQL(t *testing.T) {
 	}
 }
 
+func TestPostgresPreviewSQL(t *testing.T) {
+	got := postgresAdapter{}.PreviewSQL("public.orders")
+	want := `SELECT * FROM public.orders LIMIT 100;`
+	if got != want {
+		t.Fatalf("PreviewSQL = %q, want %q", got, want)
+	}
+}
+
 func TestAdapterRegistry(t *testing.T) {
 	for _, name := range []string{"postgres", "sqlserver"} {
 		a, err := For(name)

@@ -168,3 +168,9 @@ FROM information_schema.columns
 WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
 ORDER BY table_schema, table_name, ordinal_position;`
 }
+
+// PreviewSQL is the TUI Schema pane's "Cmd+Enter on a table" shortcut:
+// postgres caps a row count with LIMIT.
+func (postgresAdapter) PreviewSQL(table string) string {
+	return fmt.Sprintf("SELECT * FROM %s LIMIT 100;", table)
+}

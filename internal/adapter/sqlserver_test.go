@@ -245,6 +245,14 @@ func TestSqlserverIsSchemaError(t *testing.T) {
 	}
 }
 
+func TestSQLServerPreviewSQL(t *testing.T) {
+	got := sqlserverAdapter{}.PreviewSQL("dbo.orders")
+	want := `SELECT TOP 100 * FROM dbo.orders;`
+	if got != want {
+		t.Fatalf("PreviewSQL = %q, want %q", got, want)
+	}
+}
+
 // TestSQLServerListDatabasesSQL pins the candidate-list predicates. tempdb is
 // excluded by name rather than by database_id: the familiar master=1, tempdb=2
 // mapping is not documented by Microsoft as a stable contract (design.md §13.9).

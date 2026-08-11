@@ -153,3 +153,9 @@ func (sqlserverAdapter) IntrospectSQL() string {
 FROM INFORMATION_SCHEMA.COLUMNS
 ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION;`
 }
+
+// PreviewSQL is the TUI Schema pane's "Cmd+Enter on a table" shortcut:
+// T-SQL caps a row count with TOP, not LIMIT.
+func (sqlserverAdapter) PreviewSQL(table string) string {
+	return fmt.Sprintf("SELECT TOP 100 * FROM %s;", table)
+}
