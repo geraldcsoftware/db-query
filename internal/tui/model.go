@@ -164,6 +164,20 @@ func (m *model) focusDown() {
 	}
 }
 
+// schemaRunSQL returns the provider-native preview query for the Schema
+// pane's currently selected table, and whether one is selected.
+func (m model) schemaRunSQL() (string, bool) {
+	t, ok := m.schema.selectedTable()
+	if !ok {
+		return "", false
+	}
+	name := t.Name
+	if t.Schema != "" {
+		name = t.Schema + "." + t.Name
+	}
+	return m.session.Adapter.PreviewSQL(name), true
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -196,6 +210,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case tea.KeyCtrlJ:
 			m.focusDown()
+			return m, nil
+		// Ctrl+Enter's exact tea.KeyMsg encoding is not consistent across terminal
+		// emulators — some report it identically to plain Enter, and Bubble Tea's
+		// enhanced keyboard protocol (Kitty) is required to disambiguate on
+		// terminals that support it. tea.KeyCtrlAt (NUL, 0x00) is one common
+		// encoding; verify against the actual terminal(s) in use with a throwaway
+		// debug print of msg.String() and adjust the matched key.Type/String()
+		// value here if it differs. F5 (tea.KeyF5) is wired to the identical branch
+		// specifically as the reliable fallback the spec calls for, so the run
+		// action is always reachable even where Ctrl+Enter does not arrive as a
+		// distinct event.
+		case tea.KeyF5, tea.KeyCtrlAt:
+			switch m.focus {
+			case paneSchema:
+				if sql, ok := m.schemaRunSQL(); ok {
+					return m, m.startRun(sql)
+				}
+			case paneQuery:
+				return m, m.startRun(m.query.value())
+			}
 			return m, nil
 		}
 		if m.focus == paneQuery {
