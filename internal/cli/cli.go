@@ -89,11 +89,12 @@ The same flag given after the command wins over one given before it. Only these
 five are accepted before the command; a command's own flags belong after it.
 
 Environment:
-  DB_QUERY_HOST        default for --host
-  DB_QUERY_DATABASE    default for --database
-  DB_QUERY_OUTPUT      default for --output
-  DB_QUERY_CONFIG      default config file path
-  DB_QUERY_QUERIES_DIR saved-query store directory
+  DB_QUERY_HOST          default for --host
+  DB_QUERY_DATABASE      default for --database
+  DB_QUERY_OUTPUT        default for --output
+  DB_QUERY_CONFIG        default config file path
+  DB_QUERY_QUERIES_DIR   saved-query store directory
+  DB_QUERY_TUI_PAGE_SIZE rows per page in the interactive mode's Results pane (default 100)
 
 A flag beats the environment, and the environment beats the config file, so an
 exported DB_QUERY_HOST/DB_QUERY_DATABASE pair makes every command in that shell

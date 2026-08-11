@@ -753,3 +753,44 @@ functions read, so a host given before the command reaches a `--database`
 completing after it. Verified in all four orderings, including the
 `db-query --host X --database <TAB>` case with no command typed at all, which
 is the §13.7 workflow this feature most serves.
+
+### 13.10 The no-args interactive mode (extends §6, amends §9)
+
+Invoked with no command **and** with stdout attached to a terminal, `db-query`
+opens a four-pane Bubble Tea UI — Schema, Query, Saved, Results — rather than
+printing usage. The TTY test is the same `*os.File` + `ModeCharDevice`
+assertion §13.8 uses for `auto` output, so a pipe, a redirect, or a program
+calling `db-query` still gets the usage text and exit 1 unchanged. That
+fallback is load-bearing: agent callers and scripts must never find themselves
+attached to an interactive program.
+
+The mode adds no new resolution, execution or rendering path. Host and database
+resolve through the ordinary precedence (§5, §13.7), rows come back through the
+same adapter parse (§7) and are rendered by the same table renderer (§8), and
+`--timeout` bounds each run exactly as it bounds a `query`. What it adds is a
+session: one host, held open, with the Query pane replacing the shell as the
+place SQL is edited between runs. The Schema pane reads the §13.2 cache and
+never introspects on its own, so browsing costs no round trip. Results are paged
+client-side over rows already fetched — the user's SQL is never rewritten with
+`LIMIT`/`OFFSET` — with `DB_QUERY_TUI_PAGE_SIZE` (default 100) setting the page.
+
+**The credential is resolved once, at startup — a deliberate amendment to §9's
+"lazy, per-invocation resolution" rule.** The adapter's `Env(cred, host)` call
+runs a single time as the session starts, and the resulting environment overlay
+is held for the life of the process and reused by every run in it. §9's rule
+exists to stop the tool *bulk*-resolving hosts nobody touched, so that unused
+vault paths are never hit; it is not a requirement to re-resolve the one host a
+session is already connected to. Honouring it literally here would mean a
+Bitwarden CLI shell-out or a Keychain prompt on every Ctrl+Enter, which is the
+wrong trade for an interactive session — functionally one connection, not a
+batch of independent invocations. The narrower guarantees §9 actually protects
+are all preserved: still exactly one host resolved, still no password on argv,
+still nothing written back to the config file or the environment. Startup
+credential failure stays fatal — the error prints on stderr and the process
+exits 1 before the Bubble Tea loop starts, matching every other command's
+credential-error path.
+
+The implementation lives in `internal/tui`, over an `internal/session` package
+holding the setup/run-once logic both it and `internal/cli` need. The import
+direction is `cli → tui → session`; `tui` never imports `cli`, which is what
+keeps that shared logic in `session` rather than duplicated.
