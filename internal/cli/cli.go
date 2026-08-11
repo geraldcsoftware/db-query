@@ -21,6 +21,7 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 	"github.com/geraldcsoftware/db-query/internal/schema"
 	"github.com/geraldcsoftware/db-query/internal/session"
+	"github.com/geraldcsoftware/db-query/internal/tui"
 )
 
 const usage = `db-query — run SQL against configured hosts via native clients
@@ -201,7 +202,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
-		// Shared flags but no command: nothing to run.
+		if isTerminal(stdout) {
+			return tui.Run(toSessionFlags(globals), stdout, stderr)
+		}
+		// Shared flags but no command, and not a terminal: nothing to run.
 		fmt.Fprint(stderr, usage)
 		return 1
 	}
