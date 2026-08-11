@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"io"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/session"
 )
 
@@ -47,10 +50,43 @@ type model struct {
 	// a run without exiting the program.
 	running bool
 
+	// runner performs a single query run; it defaults to execute and is
+	// swapped out in tests so run dispatch can be tested without invoking a
+	// real adapter subprocess.
+	runner func(ctx context.Context, r session.Resolved, sql string) (adapter.Rows, bool, error)
+
+	// cancel stops the currently in-flight run, if any. It is set by
+	// startRun and invoked by cancelRunning; nil whenever running is false.
+	cancel context.CancelFunc
+
+	// statusMsg is transient text shown in the status strip (e.g. a
+	// rejected single-flight attempt or a cancellation notice). statusGen
+	// increments on every new status message so a stale clearStatusMsg
+	// timer from an older message cannot erase a newer one.
+	statusMsg string
+	statusGen int
+
+	// results holds the last completed run's outcome for display in the
+	// Results pane.
+	results resultsPane
+
 	// rects holds each pane's on-screen bounding box, set by
 	// recomputeLayout. Used only by setFocusAt's hit-testing.
 	rects map[pane]rect
 }
+
+// resultsPane holds the last completed run's outcome for display: either
+// error text from a failed run or the columns/rows from a successful one,
+// never both at once.
+type resultsPane struct {
+	errText string
+	rows    adapter.Rows
+}
+
+func (r *resultsPane) clear()                     { *r = resultsPane{} }
+func (r resultsPane) hasContent() bool            { return r.errText != "" || len(r.rows.Columns) > 0 }
+func (r *resultsPane) showError(msg string)       { *r = resultsPane{errText: msg} }
+func (r *resultsPane) showRows(rows adapter.Rows) { *r = resultsPane{rows: rows} }
 
 type rect struct{ x0, y0, x1, y1 int }
 
@@ -59,7 +95,7 @@ func (r rect) contains(x, y int) bool {
 }
 
 func newModel(r session.Resolved, c session.CommonFlags, stdout io.Writer) model {
-	return model{session: r, flags: c, stdout: stdout, focus: paneSchema, query: newQueryPane(), schema: newSchemaPane(r.Host), saved: newSavedPane()}
+	return model{session: r, flags: c, stdout: stdout, focus: paneSchema, query: newQueryPane(), schema: newSchemaPane(r.Host), saved: newSavedPane(), runner: execute, results: resultsPane{}}
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -184,6 +220,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
+
+	case queryResultMsg:
+		m.running = false
+		switch {
+		case errors.Is(msg.err, context.Canceled), errors.Is(msg.err, context.DeadlineExceeded):
+			m.results.clear()
+			m.statusMsg = "query cancelled"
+			m.statusGen++
+			return m, clearStatusAfter(m.statusGen)
+		case msg.err != nil:
+			text := msg.err.Error()
+			if msg.schemaErr {
+				text += "\nhint: the schema may have changed — re-run 'db-query introspect' to rebuild the schema cache"
+			}
+			m.results.showError(text)
+			return m, nil
+		default:
+			m.results.showRows(msg.rows)
+			return m, nil
+		}
+
+	case clearStatusMsg:
+		if msg.gen == m.statusGen {
+			m.statusMsg = ""
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -198,13 +260,6 @@ func (m model) View() string {
 	}
 	return label(paneSchema, "Schema") + "  " + label(paneQuery, "Query") + "\n" +
 		label(paneSaved, "Saved") + "  " + label(paneResults, "Results") + "\n"
-}
-
-// cancelRunning stops the in-flight run, if any, without quitting the
-// program. The real implementation lives in run.go.
-func (m model) cancelRunning() (tea.Model, tea.Cmd) {
-	m.running = false
-	return m, nil
 }
 
 // mouseXY extracts click coordinates from a tea.MouseMsg. tea.MouseMsg is an
