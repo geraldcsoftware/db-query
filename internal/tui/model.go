@@ -223,6 +223,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case queryResultMsg:
 		m.running = false
+		m.cancel = nil
 		switch {
 		case errors.Is(msg.err, context.Canceled), errors.Is(msg.err, context.DeadlineExceeded):
 			m.results.clear()

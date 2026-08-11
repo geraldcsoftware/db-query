@@ -109,10 +109,14 @@ func TestCtrlCCancelsRunningQuery(t *testing.T) {
 func TestQueryResultMsgCancelledClearsRunningNoContent(t *testing.T) {
 	m := newTestModel()
 	m.running = true
+	m.cancel = func() {}
 	updated, _ := m.Update(queryResultMsg{err: context.Canceled})
 	mm := updated.(model)
 	if mm.running {
 		t.Fatal("running must clear on a cancelled result")
+	}
+	if mm.cancel != nil {
+		t.Fatal("cancel must clear to nil on a cancelled result")
 	}
 	if mm.results.hasContent() {
 		t.Fatal("results pane must stay empty after a cancel")
@@ -125,10 +129,14 @@ func TestQueryResultMsgCancelledClearsRunningNoContent(t *testing.T) {
 func TestQueryResultMsgErrorShowsInResults(t *testing.T) {
 	m := newTestModel()
 	m.running = true
+	m.cancel = func() {}
 	updated, _ := m.Update(queryResultMsg{err: errors.New("boom")})
 	mm := updated.(model)
 	if mm.running {
 		t.Fatal("running must clear on any terminal result")
+	}
+	if mm.cancel != nil {
+		t.Fatal("cancel must clear to nil on any terminal result")
 	}
 	if !mm.results.hasContent() {
 		t.Fatal("results pane must show the error text")
