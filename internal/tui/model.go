@@ -410,13 +410,12 @@ func screen(content string) tea.View {
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
-	// The zero value is the entire keyboard request, and it is the one that
-	// matters: Bubble Tea always asks the terminal for the Kitty protocol's key
-	// disambiguation, which is what reports Ctrl+Enter as its own key instead
-	// of as the bare CR plain Enter also sends. Nothing here wants the further
-	// enhancements — key release and repeat events, alternate key codes — so
-	// none are requested.
-	v.KeyboardEnhancements = tea.KeyboardEnhancements{}
+	// KeyboardEnhancements is deliberately left at its zero value. Bubble Tea
+	// always asks the terminal for the Kitty protocol's key disambiguation,
+	// which is what reports Ctrl+Enter as a key of its own rather than as the
+	// bare CR that plain Enter also sends; the field only adds enhancements on
+	// top of that, and nothing here wants key release events or alternate key
+	// codes.
 	return v
 }
 
