@@ -178,10 +178,12 @@ func canonicalCommand(name string) string {
 // reintrospect-worthy signal; 4 other SQL error (client ran, exited
 // nonzero, but not a schema error).
 func Run(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprint(stderr, usage)
-		return 1
-	}
+	// No arguments at all is not a special case: it parses to no shared flags
+	// and no command, which the len(rest) == 0 branch below already handles —
+	// opening the TUI on a terminal and printing usage anywhere else. Returning
+	// early here instead would make the bare `db-query` the one invocation that
+	// could never reach the TUI.
+	//
 	// The shared flags are parsed off the front of the command line before the
 	// command is chosen. Go's flag package stops at the first non-flag token,
 	// which is exactly the command name, so `--host h schema --tables` leaves
@@ -204,7 +206,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	rest := fs.Args()
 	if len(rest) == 0 {
 		if isTerminal(stdout) {
-			return tui.Run(toSessionFlags(globals), buildInfo.Version, stdout, stderr)
+			return launchTUI(toSessionFlags(globals), buildInfo.Version, stdout, stderr)
 		}
 		// Shared flags but no command, and not a terminal: nothing to run.
 		fmt.Fprint(stderr, usage)
@@ -988,7 +990,10 @@ func renderRows(rows adapter.Rows, output string, noHeaders bool, maxColWidth in
 // real terminal belongs to. It is a type assertion, not a build-tagged
 // isatty call: dependency-free, and a *bytes.Buffer or *strings.Builder in a
 // test is not an *os.File, so it reads false exactly like a pipe or redirect.
-func isTerminal(w io.Writer) bool {
+// isTerminal and launchTUI are variables rather than plain functions so a test
+// can exercise the branch that only exists on a terminal — running no command
+// at all opens the interactive mode — without needing a real one.
+var isTerminal = func(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	if !ok {
 		return false
@@ -996,6 +1001,8 @@ func isTerminal(w io.Writer) bool {
 	info, err := f.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
+
+var launchTUI = tui.Run
 
 // resolveOutput maps render.AutoFormat onto a concrete format: table when w
 // is a terminal, text otherwise. Any explicit format passes through
