@@ -75,19 +75,6 @@ type model struct {
 	rects map[pane]rect
 }
 
-// resultsPane holds the last completed run's outcome for display: either
-// error text from a failed run or the columns/rows from a successful one,
-// never both at once.
-type resultsPane struct {
-	errText string
-	rows    adapter.Rows
-}
-
-func (r *resultsPane) clear()                     { *r = resultsPane{} }
-func (r resultsPane) hasContent() bool            { return r.errText != "" || len(r.rows.Columns) > 0 }
-func (r *resultsPane) showError(msg string)       { *r = resultsPane{errText: msg} }
-func (r *resultsPane) showRows(rows adapter.Rows) { *r = resultsPane{rows: rows} }
-
 type rect struct{ x0, y0, x1, y1 int }
 
 func (r rect) contains(x, y int) bool {
@@ -210,6 +197,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case tea.KeyCtrlJ:
 			m.focusDown()
+			return m, nil
+		case tea.KeyPgUp:
+			m.results.pageUp()
+			return m, nil
+		case tea.KeyPgDown:
+			m.results.pageDown()
 			return m, nil
 		// Ctrl+Enter's exact tea.KeyMsg encoding is not consistent across terminal
 		// emulators — some report it identically to plain Enter, and Bubble Tea's
