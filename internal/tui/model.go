@@ -38,8 +38,7 @@ type model struct {
 	query queryPane
 
 	// running is false until a query starts executing; cancelRunning stops
-	// a run without exiting the program. This task's tests never trigger a
-	// run, so running stays at its zero value throughout.
+	// a run without exiting the program.
 	running bool
 
 	// rects holds each pane's on-screen bounding box, set by
