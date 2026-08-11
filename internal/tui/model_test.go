@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/geraldcsoftware/db-query/internal/session"
@@ -24,22 +24,31 @@ func newTestModel(t *testing.T) model {
 	return m
 }
 
-func key(s string) tea.KeyMsg {
+// key builds the key press a terminal reports for the named keystroke, in the
+// same shape Update matches on: a key code plus its modifiers, whose String()
+// is the name given here.
+func key(s string) tea.KeyPressMsg {
 	switch s {
 	case "ctrl+h":
-		return tea.KeyMsg{Type: tea.KeyCtrlH}
+		return tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl}
 	case "ctrl+j":
-		return tea.KeyMsg{Type: tea.KeyCtrlJ}
+		return tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl}
 	case "ctrl+k":
-		return tea.KeyMsg{Type: tea.KeyCtrlK}
+		return tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl}
 	case "ctrl+l":
-		return tea.KeyMsg{Type: tea.KeyCtrlL}
+		return tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}
 	case "esc":
-		return tea.KeyMsg{Type: tea.KeyEsc}
+		return tea.KeyPressMsg{Code: tea.KeyEscape}
 	case "ctrl+c":
-		return tea.KeyMsg{Type: tea.KeyCtrlC}
+		return tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
 	}
 	panic("unhandled key " + s)
+}
+
+// runeKey builds the key press a terminal reports for one printable
+// character: the character itself in Text alongside its key code.
+func runeKey(r rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: r, Text: string(r)}
 }
 
 func TestFocusGridNavigation(t *testing.T) {
@@ -94,8 +103,8 @@ func TestCtrlCQuitsWhenIdle(t *testing.T) {
 	}
 }
 
-func clickAt(x, y int) tea.MouseMsg {
-	return tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+func clickAt(x, y int) tea.MouseClickMsg {
+	return tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
 }
 
 // TestMouseClickFocusesThePaneRenderedThere checks hit-testing against what is
@@ -104,7 +113,7 @@ func clickAt(x, y int) tea.MouseMsg {
 // title's own cell and asserts focus lands on the pane drawn there.
 func TestMouseClickFocusesThePaneRenderedThere(t *testing.T) {
 	base := newTestModel(t)
-	lines := strings.Split(ansi.Strip(base.View()), "\n")
+	lines := strings.Split(ansi.Strip(base.View().Content), "\n")
 	for _, tc := range []struct {
 		p     pane
 		title string
@@ -131,19 +140,19 @@ func TestMouseClickFocusesThePaneRenderedThere(t *testing.T) {
 	}
 }
 
-// TestNonPressMouseEventsDoNotChangeFocus guards the gate on mouse actions:
-// tui.Run enables cell-motion reporting, so wheel, motion and release events
-// all arrive as tea.MouseMsg and none of them may steal focus.
+// TestNonPressMouseEventsDoNotChangeFocus guards the gate on mouse events:
+// View enables cell-motion reporting, so wheel, motion and release events all
+// arrive as their own tea.MouseMsg types and none of them may steal focus.
 func TestNonPressMouseEventsDoNotChangeFocus(t *testing.T) {
 	m := newTestModel(t)
 	m.focus = paneQuery
 	r := m.rects[paneResults]
 	x, y := (r.x0+r.x1)/2, (r.y0+r.y1)/2
 	for _, msg := range []tea.MouseMsg{
-		{X: x, Y: y, Action: tea.MouseActionMotion, Button: tea.MouseButtonNone},
-		{X: x, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft},
-		{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown},
-		{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp},
+		tea.MouseMotionMsg{X: x, Y: y, Button: tea.MouseNone},
+		tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft},
+		tea.MouseWheelMsg{X: x, Y: y, Button: tea.MouseWheelDown},
+		tea.MouseWheelMsg{X: x, Y: y, Button: tea.MouseWheelUp},
 	} {
 		updated, _ := m.Update(msg)
 		if got := updated.(model).focus; got != paneQuery {

@@ -1,7 +1,7 @@
 package tui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/schema"
@@ -39,20 +39,20 @@ func newSchemaPane(host config.HostConfig) schemaPane {
 }
 
 func (p schemaPane) update(msg tea.Msg) (schemaPane, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
+	keyMsg, ok := msg.(tea.KeyPressMsg)
 	if !ok || len(p.tables) == 0 {
 		return p, nil
 	}
-	switch keyMsg.Type {
-	case tea.KeyUp:
+	switch keyMsg.String() {
+	case "up":
 		if p.cursor > 0 {
 			p.cursor--
 		}
-	case tea.KeyDown:
+	case "down":
 		if p.cursor < len(p.tables)-1 {
 			p.cursor++
 		}
-	case tea.KeyEnter:
+	case "enter":
 		p.expanded = cloneExpanded(p.expanded)
 		p.expanded[p.cursor] = !p.expanded[p.cursor]
 	}

@@ -3,20 +3,27 @@ package tui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
+// typeInto feeds s to the pane the way a terminal reports typing it: one key
+// press per character.
+func typeInto(q queryPane, s string) queryPane {
+	for _, r := range s {
+		q, _ = q.update(runeKey(r))
+	}
+	return q
+}
+
 func TestQueryPaneAcceptsInputWhenFocused(t *testing.T) {
-	q := newQueryPane()
-	q, _ = q.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("select 1")})
+	q := typeInto(newQueryPane(), "select 1")
 	if q.value() != "select 1" {
 		t.Fatalf("value = %q, want %q", q.value(), "select 1")
 	}
 }
 
 func TestQueryPaneSetValueReplacesContent(t *testing.T) {
-	q := newQueryPane()
-	q, _ = q.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("old")})
+	q := typeInto(newQueryPane(), "old")
 	q.setValue("select * from orders")
 	if q.value() != "select * from orders" {
 		t.Fatalf("value = %q, want the replaced text", q.value())
@@ -26,14 +33,35 @@ func TestQueryPaneSetValueReplacesContent(t *testing.T) {
 func TestModelRoutesInputOnlyToFocusedQueryPane(t *testing.T) {
 	m := newTestModel(t)
 	m.focus = paneSchema // not the query pane
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	updated, _ := m.Update(runeKey('x'))
 	if updated.(model).query.value() != "" {
 		t.Fatal("query pane must not receive input while unfocused")
 	}
 
 	m.focus = paneQuery
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("select 1")})
+	updated = m
+	for _, r := range "select 1" {
+		updated, _ = updated.Update(runeKey(r))
+	}
 	if updated.(model).query.value() != "select 1" {
 		t.Fatalf("value = %q, want select 1", updated.(model).query.value())
+	}
+}
+
+// TestPasteReachesTheFocusedQueryPane covers the one input path that is not a
+// key press: a bracketed paste is its own message type, so it only lands in
+// the buffer if Update routes it there deliberately.
+func TestPasteReachesTheFocusedQueryPane(t *testing.T) {
+	m := newTestModel(t)
+	m.focus = paneSchema
+	updated, _ := m.Update(tea.PasteMsg{Content: "select * from orders"})
+	if got := updated.(model).query.value(); got != "" {
+		t.Fatalf("query pane = %q, want nothing pasted while unfocused", got)
+	}
+
+	m.focus = paneQuery
+	updated, _ = m.Update(tea.PasteMsg{Content: "select * from orders"})
+	if got := updated.(model).query.value(); got != "select * from orders" {
+		t.Fatalf("query pane = %q, want the pasted text", got)
 	}
 }

@@ -21,7 +21,7 @@ func titleColumn(line, sub string) int {
 
 func TestViewContainsAllFourPaneTitles(t *testing.T) {
 	m := newTestModel(t)
-	out := m.View()
+	out := m.View().Content
 	for _, want := range []string{"Schema", "Saved", "Query", "Results"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("View() missing pane title %q:\n%s", want, out)
@@ -32,7 +32,7 @@ func TestViewContainsAllFourPaneTitles(t *testing.T) {
 func TestViewShowsStatusMsgOverBottomBarWhenSet(t *testing.T) {
 	m := newTestModel(t)
 	m.statusMsg = "query already running — Ctrl+C to cancel"
-	out := m.View()
+	out := m.View().Content
 	if !strings.Contains(out, "query already running") {
 		t.Fatalf("View() must show the active status message:\n%s", out)
 	}
@@ -43,7 +43,7 @@ func TestViewShowsTopBarWithVersionAndConnection(t *testing.T) {
 	m.session.Host.Host = "db.example"
 	m.session.Host.Database = "orders"
 	m.session.Host.Provider = "postgres"
-	first := strings.Split(ansi.Strip(m.View()), "\n")[0]
+	first := strings.Split(ansi.Strip(m.View().Content), "\n")[0]
 	for _, want := range []string{"db-query", "1.2.3", "db.example", "orders", "postgres"} {
 		if !strings.Contains(first, want) {
 			t.Errorf("top bar %q missing %q", first, want)
@@ -65,7 +65,7 @@ func TestViewNeverExceedsTerminalHeight(t *testing.T) {
 	for _, size := range []struct{ w, h int }{{100, 40}, {80, 24}, {120, 60}, {60, 10}, {40, 4}, {40, 2}, {40, 1}} {
 		m.width, m.height = size.w, size.h
 		m.recomputeLayout()
-		lines := strings.Split(m.View(), "\n")
+		lines := strings.Split(m.View().Content, "\n")
 		if len(lines) > size.h {
 			t.Errorf("%dx%d: View() rendered %d lines, want at most %d", size.w, size.h, len(lines), size.h)
 		}
@@ -84,7 +84,7 @@ func TestViewKeepsEveryPaneVisibleWithALargeResult(t *testing.T) {
 	m := newTestModel(t)
 	m.query.setValue("select * from orders")
 	m.results.showRows(rowsOf(432))
-	out := ansi.Strip(m.View())
+	out := ansi.Strip(m.View().Content)
 	for _, want := range []string{"db-query", "[Schema]", "[Query]", "[Saved]", "[Results]", "select * from orders"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("View() lost %q behind a large result:\n%s", want, out)
@@ -97,7 +97,7 @@ func TestViewKeepsEveryPaneVisibleWithALargeResult(t *testing.T) {
 // row, within its rectangle's columns.
 func TestViewPlacesEachPaneInItsOwnRect(t *testing.T) {
 	m := newTestModel(t)
-	lines := strings.Split(ansi.Strip(m.View()), "\n")
+	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
 	if len(lines) != m.height {
 		t.Fatalf("View() rendered %d lines, want exactly %d", len(lines), m.height)
 	}
@@ -120,9 +120,9 @@ func TestViewPlacesEachPaneInItsOwnRect(t *testing.T) {
 
 // TestFocusedPaneIsVisuallyDistinct pins the affordance that tells a user
 // which pane their next keystroke reaches. It asserts a difference rather than
-// a specific colour: lipgloss drops colour entirely when its output is not a
-// terminal (as under `go test`), so the frame's weight, not its colour, is
-// what must carry focus for this to hold everywhere.
+// a specific colour: colour is downsampled on the way to the terminal and
+// disappears altogether on one that cannot show any, so the frame's weight,
+// not its colour, is what must carry focus for this to hold everywhere.
 func TestFocusedPaneIsVisuallyDistinct(t *testing.T) {
 	m := newTestModel(t)
 	r := m.rects[paneSaved]
@@ -170,9 +170,9 @@ func TestPaneBlockExactlyFillsItsRect(t *testing.T) {
 
 func TestViewShowsRunningIndicator(t *testing.T) {
 	m := newTestModel(t)
-	idle := ansi.Strip(m.View())
+	idle := ansi.Strip(m.View().Content)
 	m.running = true
-	busy := ansi.Strip(m.View())
+	busy := ansi.Strip(m.View().Content)
 	if idle == busy {
 		t.Fatal("a running query must look different from an idle screen")
 	}
@@ -192,9 +192,9 @@ func TestViewBlursTheQueryPaneWhenAnotherPaneHasFocus(t *testing.T) {
 	m.query.setValue("select 1")
 
 	m.focus = paneQuery
-	focused := m.View()
+	focused := m.View().Content
 	m.focus = paneSchema
-	blurred := m.View()
+	blurred := m.View().Content
 
 	if !strings.Contains(ansi.Strip(blurred), "select 1") {
 		t.Fatalf("the query text must stay visible while another pane has focus:\n%s", blurred)

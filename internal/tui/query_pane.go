@@ -1,15 +1,15 @@
 package tui
 
 import (
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // queryPane wraps bubbles/textarea: the editable SQL buffer. Plain Enter
 // inserts a newline (textarea's default); this pane does not intercept
-// Enter combinations — running the query, if wired, belongs one level up
-// in model.Update, since it would need to dispatch a tea.Cmd this pane
-// has no business owning.
+// Enter combinations — running the query belongs one level up in
+// model.Update, since it dispatches a tea.Cmd this pane has no business
+// owning.
 type queryPane struct {
 	area textarea.Model
 }

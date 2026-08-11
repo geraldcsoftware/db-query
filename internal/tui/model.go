@@ -6,8 +6,8 @@ import (
 	"io"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
@@ -219,54 +219,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recomputeLayout()
 		return m, nil
 
-	case tea.MouseMsg:
-		// tui.Run enables cell-motion reporting, so motion, wheel and release
-		// events arrive here too; only a left-button press moves focus.
-		if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+	case tea.MouseClickMsg:
+		// View enables cell-motion reporting, so motion, wheel and release
+		// events arrive too — as their own message types, which this case does
+		// not match. Of the clicks that do reach here, only the left button
+		// moves focus.
+		if msg.Button != tea.MouseLeft {
 			return m, nil
 		}
-		x, y := mouseXY(msg)
-		m.setFocusAt(x, y)
+		m.setFocusAt(msg.X, msg.Y)
 		return m, nil
 
-	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyEsc:
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "esc":
 			return m, m.quit()
-		case tea.KeyCtrlC:
+		case "ctrl+c":
 			if m.running {
 				return m.cancelRunning()
 			}
 			return m, m.quit()
-		case tea.KeyCtrlH:
+		case "ctrl+h":
 			m.focusLeft()
 			return m, nil
-		case tea.KeyCtrlL:
+		case "ctrl+l":
 			m.focusRight()
 			return m, nil
-		case tea.KeyCtrlK:
+		case "ctrl+k":
 			m.focusUp()
 			return m, nil
-		case tea.KeyCtrlJ:
+		case "ctrl+j":
 			m.focusDown()
 			return m, nil
-		case tea.KeyPgUp:
+		case "pgup":
 			m.results.pageUp()
 			return m, nil
-		case tea.KeyPgDown:
+		case "pgdown":
 			m.results.pageDown()
 			return m, nil
-		// Ctrl+Enter's exact tea.KeyMsg encoding is not consistent across terminal
-		// emulators — some report it identically to plain Enter, and Bubble Tea's
-		// enhanced keyboard protocol (Kitty) is required to disambiguate on
-		// terminals that support it. tea.KeyCtrlAt (NUL, 0x00) is one common
-		// encoding; verify against the actual terminal(s) in use with a throwaway
-		// debug print of msg.String() and adjust the matched key.Type/String()
-		// value here if it differs. F5 (tea.KeyF5) is wired to the identical branch
-		// specifically as the reliable fallback the spec calls for, so the run
-		// action is always reachable even where Ctrl+Enter does not arrive as a
-		// distinct event.
-		case tea.KeyF5, tea.KeyCtrlAt:
+		// Ctrl+Enter and F5 are one action deliberately reachable two ways. A
+		// terminal's legacy key encoding sends CR for plain Enter and for
+		// Ctrl+Enter alike, so the chord is only a distinct event where the
+		// Kitty keyboard protocol is negotiated — which View requests, and which
+		// not every terminal answers. F5 is the fallback that keeps the run
+		// action reachable on the ones that do not (spec §7).
+		case "ctrl+enter", "f5":
 			switch m.focus {
 			case paneSchema:
 				if sql, ok := m.schemaRunSQL(); ok {
@@ -288,7 +285,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		if m.focus == paneSaved {
-			if msg.Type == tea.KeyEnter {
+			if msg.String() == "enter" {
 				if sq, ok := m.saved.selected(); ok {
 					m.query.setValue(sq.SQL)
 				}
@@ -296,6 +293,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.saved, cmd = m.saved.update(msg)
+			return m, cmd
+		}
+		return m, nil
+
+	case tea.PasteMsg:
+		// Bracketed paste is on by default and arrives as its own message
+		// rather than as a key press, so it needs routing by hand. The Query
+		// pane is the only pane that takes text, so a paste anywhere else is
+		// dropped rather than silently landing in the buffer.
+		if m.focus == paneQuery {
+			var cmd tea.Cmd
+			m.query, cmd = m.query.update(msg)
 			return m, cmd
 		}
 		return m, nil
@@ -356,16 +365,16 @@ func (m *model) quit() tea.Cmd {
 }
 
 // View renders one full screen: a top bar, the four panes each drawn inside
-// the rectangle layoutRects assigns it, and a bottom bar (design §5). Output
-// is exactly the terminal's height in lines and no line exceeds its width —
-// Bubble Tea's renderer resolves an over-tall view by keeping only its last
-// height lines, which would silently push the top bar and the upper panes off
-// screen on the first large result.
-func (m model) View() string {
+// the rectangle layoutRects assigns it, and a bottom bar (design §5). Its
+// content is exactly the terminal's height in lines and no line exceeds its
+// width — Bubble Tea's renderer resolves an over-tall view by keeping only its
+// last height lines, which would silently push the top bar and the upper panes
+// off screen on the first large result.
+func (m model) View() tea.View {
 	w, h := m.viewSize()
 	top := ansi.Truncate(m.topBar(w), w, "")
 	if h <= 1 {
-		return top
+		return screen(top)
 	}
 	rects := layoutRects(w, h)
 	// The Query pane's textarea keeps a visible cursor only while it is the
@@ -390,7 +399,25 @@ func (m model) View() string {
 	for i, r := range rows {
 		rows[i] = strings.TrimRight(r, " ")
 	}
-	return strings.Join(rows, "\n")
+	return screen(strings.Join(rows, "\n"))
+}
+
+// screen pairs rendered content with the terminal features the TUI runs on:
+// the alternate screen, and cell-motion mouse reporting so a click can pick a
+// pane. Bubble Tea reads both off the view it is handed each frame, which is
+// why they live here rather than as options on the program.
+func screen(content string) tea.View {
+	v := tea.NewView(content)
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	// The zero value is the entire keyboard request, and it is the one that
+	// matters: Bubble Tea always asks the terminal for the Kitty protocol's key
+	// disambiguation, which is what reports Ctrl+Enter as its own key instead
+	// of as the bare CR plain Enter also sends. Nothing here wants the further
+	// enhancements — key release and repeat events, alternate key codes — so
+	// none are requested.
+	v.KeyboardEnhancements = tea.KeyboardEnhancements{}
+	return v
 }
 
 // paneBlock renders one pane as exactly as many lines as its rectangle is
@@ -510,10 +537,4 @@ func (m model) bottomBar() string {
 	default:
 		return bottomBarHint()
 	}
-}
-
-// mouseXY extracts click coordinates from a tea.MouseMsg. tea.MouseMsg is an
-// alias for tea.MouseEvent, which carries X, Y directly (bubbletea v1.3.10).
-func mouseXY(msg tea.MouseMsg) (x, y int) {
-	return msg.X, msg.Y
 }

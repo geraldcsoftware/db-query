@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 )
 
@@ -92,12 +94,14 @@ func TestResultsViewCapsColumnWidth(t *testing.T) {
 
 // TestResultsViewHasNoTrailingBlankLine keeps the pane's block exactly as
 // tall as its content: a trailing newline would cost a row of the Results
-// pane to a blank line.
+// pane to a blank line. The indicator is styled, so the check is on the text
+// the terminal actually shows rather than on the escape sequence that closes
+// the style.
 func TestResultsViewHasNoTrailingBlankLine(t *testing.T) {
 	t.Setenv("DB_QUERY_TUI_PAGE_SIZE", "10")
 	var p resultsPane
 	p.showRows(rowsOf(25))
-	out := p.view()
+	out := ansi.Strip(p.view())
 	if !strings.HasSuffix(out, ")") {
 		t.Fatalf("view must end with the page indicator and nothing after it, got %q", out[len(out)-20:])
 	}

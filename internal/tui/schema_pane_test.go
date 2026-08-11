@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/config"
@@ -54,11 +54,11 @@ func TestSchemaPaneEnterExpandsColumns(t *testing.T) {
 	if p.expanded[p.cursor] {
 		t.Fatal("must start collapsed")
 	}
-	p, _ = p.update(tea.KeyMsg{Type: tea.KeyEnter})
+	p, _ = p.update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !p.expanded[p.cursor] {
 		t.Fatal("Enter must expand the selected table")
 	}
-	p, _ = p.update(tea.KeyMsg{Type: tea.KeyEnter})
+	p, _ = p.update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if p.expanded[p.cursor] {
 		t.Fatal("a second Enter must collapse it again")
 	}
@@ -67,7 +67,7 @@ func TestSchemaPaneEnterExpandsColumns(t *testing.T) {
 func TestSchemaPaneSelectedTable(t *testing.T) {
 	seedSchemaCache(t, "lionel", "reporting")
 	p := newSchemaPane(config.HostConfig{Host: "lionel", Database: "reporting"})
-	p, _ = p.update(tea.KeyMsg{Type: tea.KeyDown})
+	p, _ = p.update(tea.KeyPressMsg{Code: tea.KeyDown})
 	tbl, ok := p.selectedTable()
 	if !ok || tbl.Name != "payments" {
 		t.Fatalf("selectedTable = %+v, %v, want payments", tbl, ok)

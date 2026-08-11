@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/geraldcsoftware/db-query/internal/session"
 )
@@ -65,29 +65,32 @@ func (p hostPicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // update is the unexported body Update delegates to, so tests can drive it
 // without going through the tea.Model interface's Model-typed return.
 func (p hostPicker) update(msg tea.Msg) (hostPicker, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
+	keyMsg, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return p, nil
 	}
-	switch keyMsg.Type {
-	case tea.KeyUp:
+	switch keyMsg.String() {
+	case "up":
 		if p.cursor > 0 {
 			p.cursor--
 		}
-	case tea.KeyDown:
+	case "down":
 		if p.cursor < len(p.names)-1 {
 			p.cursor++
 		}
-	case tea.KeyEnter:
+	case "enter":
 		p.chosen = p.names[p.cursor]
 		return p, tea.Quit
-	case tea.KeyEsc, tea.KeyCtrlC:
+	case "esc", "ctrl+c":
 		return p, tea.Quit
 	}
 	return p, nil
 }
 
-func (p hostPicker) View() string {
+// View leaves every terminal feature at its default: the picker is a short
+// prompt printed inline, so it wants neither the alternate screen nor mouse
+// reporting, both of which the main model's View turns on for itself.
+func (p hostPicker) View() tea.View {
 	var b []byte
 	b = append(b, "Select a host:\n\n"...)
 	for i, name := range p.names {
@@ -98,5 +101,5 @@ func (p hostPicker) View() string {
 		b = append(b, cursor+name+"\n"...)
 	}
 	b = append(b, "\n(enter to select, esc to quit)\n"...)
-	return string(b)
+	return tea.NewView(string(b))
 }

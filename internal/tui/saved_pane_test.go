@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 )
@@ -35,7 +35,7 @@ func TestSavedPaneEnterLoadsIntoQueryPane(t *testing.T) {
 	m.saved = newSavedPane()
 	m.focus = paneSaved
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if got := updated.(model).query.value(); got != "select * from orders" {
 		t.Fatalf("query pane = %q, want the saved query's SQL", got)
 	}

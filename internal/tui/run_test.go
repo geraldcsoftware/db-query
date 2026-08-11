@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/session"
@@ -52,12 +52,10 @@ func TestStartRunSetsRunningAndClearsResults(t *testing.T) {
 	m.query.setValue("select 1")
 	m.focus = paneQuery
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: false})
-	// Cmd+Enter is asserted via the exported trigger method directly
-	// (terminal key-modifier reporting varies — see startRun's own doc
-	// comment for how this is dispatched in production); here we call
-	// startRun directly to stay independent of that terminal-specific
-	// detail.
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	// Plain Enter only edits the buffer; the run itself is dispatched by
+	// startRun, which is what this test is about. Ctrl+Enter's own routing
+	// through Update is covered by triggers_test.go.
 	mm := updated.(model)
 	cmd = mm.startRun(mm.query.value())
 	if !mm.running {
@@ -98,7 +96,7 @@ func TestCtrlCCancelsRunningQuery(t *testing.T) {
 	canceled := false
 	m.cancel = func() { canceled = true }
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	updated, _ := m.Update(key("ctrl+c"))
 	if !canceled {
 		t.Fatal("Ctrl+C while running must call the stored cancel func")
 	}

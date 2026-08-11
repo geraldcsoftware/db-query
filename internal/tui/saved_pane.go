@@ -1,7 +1,7 @@
 package tui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 )
@@ -19,16 +19,16 @@ func newSavedPane() savedPane {
 }
 
 func (p savedPane) update(msg tea.Msg) (savedPane, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
+	keyMsg, ok := msg.(tea.KeyPressMsg)
 	if !ok || len(p.queries) == 0 {
 		return p, nil
 	}
-	switch keyMsg.Type {
-	case tea.KeyUp:
+	switch keyMsg.String() {
+	case "up":
 		if p.cursor > 0 {
 			p.cursor--
 		}
-	case tea.KeyDown:
+	case "down":
 		if p.cursor < len(p.queries)-1 {
 			p.cursor++
 		}

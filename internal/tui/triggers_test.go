@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 )
@@ -56,7 +56,7 @@ func TestF5AndCtrlEnterBothTriggerQueryPaneRun(t *testing.T) {
 	defer close(r.release)
 	m.runner = r.run
 
-	for _, msg := range []tea.KeyMsg{f5Msg(), ctrlEnterMsg()} {
+	for _, msg := range []tea.KeyPressMsg{f5Msg(), ctrlEnterMsg()} {
 		mm := newTestModel(t)
 		mm.focus = paneQuery
 		mm.query.setValue("select 1")
@@ -71,5 +71,13 @@ func TestF5AndCtrlEnterBothTriggerQueryPaneRun(t *testing.T) {
 	}
 }
 
-func f5Msg() tea.KeyMsg        { return tea.KeyMsg{Type: tea.KeyF5} }
-func ctrlEnterMsg() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyCtrlAt} }
+func f5Msg() tea.KeyPressMsg { return tea.KeyPressMsg{Code: tea.KeyF5} }
+
+// ctrlEnterMsg is the Ctrl+Enter a terminal reports once the Kitty keyboard
+// protocol is negotiated: the Enter key code carrying a Ctrl modifier, which
+// stringifies as "ctrl+enter". Without that protocol the chord is
+// indistinguishable from plain Enter, which is why F5 stays bound to the same
+// action.
+func ctrlEnterMsg() tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}
+}

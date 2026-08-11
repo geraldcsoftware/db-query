@@ -9,7 +9,7 @@ package tui
 import (
 	"io"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/geraldcsoftware/db-query/internal/session"
 )
@@ -31,7 +31,9 @@ func Run(c session.CommonFlags, version string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	m := newModel(r, c, version, stdout)
-	if _, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run(); err != nil {
+	// The alternate screen and mouse reporting are declared by the model's
+	// View, not by program options, so the program itself takes none.
+	if _, err := tea.NewProgram(m).Run(); err != nil {
 		io.WriteString(stderr, "db-query: "+err.Error()+"\n")
 		return 1
 	}

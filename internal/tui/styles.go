@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import "charm.land/lipgloss/v2"
 
 // The palette is a dark-terminal scheme: a teal/green accent for structure
 // (pane titles, the focused frame, keybinding keys), pink for emphasised
@@ -17,9 +17,9 @@ var (
 	colorBusy   = lipgloss.Color("#FBBF24")
 )
 
-// Focus is signalled by two independent cues so it survives a terminal (or a
-// test harness) that renders without colour: the focused pane is drawn with a
-// heavy frame, every other pane with a light rounded one.
+// Focus is signalled by two independent cues so it survives a terminal that
+// renders without colour: the focused pane is drawn with a heavy frame, every
+// other pane with a light rounded one.
 var (
 	borderFocused   = lipgloss.ThickBorder()
 	borderUnfocused = lipgloss.RoundedBorder()
