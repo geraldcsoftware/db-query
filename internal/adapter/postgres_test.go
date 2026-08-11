@@ -215,10 +215,16 @@ func TestPostgresListDatabasesSQL(t *testing.T) {
 }
 
 func TestPostgresPreviewSQL(t *testing.T) {
-	got := postgresAdapter{}.PreviewSQL("public.orders")
-	want := `SELECT * FROM public.orders LIMIT 100;`
-	if got != want {
-		t.Fatalf("PreviewSQL = %q, want %q", got, want)
+	cases := map[string]string{
+		"public.orders":     `SELECT * FROM "public"."orders" LIMIT 100;`,
+		"orders":            `SELECT * FROM "orders" LIMIT 100;`,
+		"public.Order Item": `SELECT * FROM "public"."Order Item" LIMIT 100;`, // mixed case and a space survive quoting
+		`public.we"ird`:     `SELECT * FROM "public"."we""ird" LIMIT 100;`,    // an embedded quote is doubled
+	}
+	for table, want := range cases {
+		if got := (postgresAdapter{}).PreviewSQL(table); got != want {
+			t.Errorf("PreviewSQL(%q) = %q, want %q", table, got, want)
+		}
 	}
 }
 

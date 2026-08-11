@@ -246,10 +246,16 @@ func TestSqlserverIsSchemaError(t *testing.T) {
 }
 
 func TestSQLServerPreviewSQL(t *testing.T) {
-	got := sqlserverAdapter{}.PreviewSQL("dbo.orders")
-	want := `SELECT TOP 100 * FROM dbo.orders;`
-	if got != want {
-		t.Fatalf("PreviewSQL = %q, want %q", got, want)
+	cases := map[string]string{
+		"dbo.orders":     `SELECT TOP 100 * FROM [dbo].[orders];`,
+		"orders":         `SELECT TOP 100 * FROM [orders];`,
+		"dbo.Order Item": `SELECT TOP 100 * FROM [dbo].[Order Item];`, // mixed case and a space survive quoting
+		"dbo.we]ird":     `SELECT TOP 100 * FROM [dbo].[we]]ird];`,    // an embedded bracket is doubled
+	}
+	for table, want := range cases {
+		if got := (sqlserverAdapter{}).PreviewSQL(table); got != want {
+			t.Errorf("PreviewSQL(%q) = %q, want %q", table, got, want)
+		}
 	}
 }
 
