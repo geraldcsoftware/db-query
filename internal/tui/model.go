@@ -40,6 +40,9 @@ type model struct {
 	// schema is the Schema pane's cached table/column browser.
 	schema schemaPane
 
+	// saved is the Saved-queries pane's cached list of stored queries.
+	saved savedPane
+
 	// running is false until a query starts executing; cancelRunning stops
 	// a run without exiting the program.
 	running bool
@@ -56,7 +59,7 @@ func (r rect) contains(x, y int) bool {
 }
 
 func newModel(r session.Resolved, c session.CommonFlags, stdout io.Writer) model {
-	return model{session: r, flags: c, stdout: stdout, focus: paneSchema, query: newQueryPane(), schema: newSchemaPane(r.Host)}
+	return model{session: r, flags: c, stdout: stdout, focus: paneSchema, query: newQueryPane(), schema: newSchemaPane(r.Host), saved: newSavedPane()}
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -167,6 +170,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.focus == paneSchema {
 			var cmd tea.Cmd
 			m.schema, cmd = m.schema.update(msg)
+			return m, cmd
+		}
+		if m.focus == paneSaved {
+			if msg.Type == tea.KeyEnter {
+				if sq, ok := m.saved.selected(); ok {
+					m.query.setValue(sq.SQL)
+				}
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.saved, cmd = m.saved.update(msg)
 			return m, cmd
 		}
 		return m, nil
