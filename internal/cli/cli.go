@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -17,18 +16,18 @@ import (
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/config"
-	"github.com/geraldcsoftware/db-query/internal/credential"
 	"github.com/geraldcsoftware/db-query/internal/dblist"
-	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/render"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 	"github.com/geraldcsoftware/db-query/internal/schema"
+	"github.com/geraldcsoftware/db-query/internal/session"
 )
 
 const usage = `db-query — run SQL against configured hosts via native clients
 
 Usage:
   db-query [shared flags] <command> [flags] [args]
+  db-query [shared flags]                          on a terminal, opens the interactive TUI
 
 Commands:
   query      (q)     --host <name> [flags] [SQL]   run ad-hoc SQL (positional, -f file, stdin) or a saved query
@@ -244,6 +243,20 @@ type commonFlags struct {
 	database string
 }
 
+// toSessionFlags converts the CLI's commonFlags into session.CommonFlags at
+// the boundary into the session package — the two types are kept separate so
+// commonFlags's field names (used pervasively across every command's flag
+// parsing) never need renaming.
+func toSessionFlags(c commonFlags) session.CommonFlags {
+	return session.CommonFlags{
+		Host:     c.host,
+		Config:   c.config,
+		Output:   c.output,
+		Timeout:  c.timeout,
+		Database: c.database,
+	}
+}
+
 const (
 	defaultOutput  = render.AutoFormat
 	defaultTimeout = 30 * time.Second
@@ -411,7 +424,7 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 		}
 	}
 
-	r, code := setup(c, stderr)
+	r, code := session.Setup(toSessionFlags(c), stderr)
 	if code != 0 {
 		return code
 	}
@@ -425,10 +438,10 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 		// A saved query is provider-bound; running it against a host of a
 		// different provider would send provider-specific SQL to the wrong
 		// client. Refuse rather than let it fail obscurely mid-flight.
-		if sq.Provider != r.host.Provider {
+		if sq.Provider != r.Host.Provider {
 			render.Error(stderr, c.output, fmt.Sprintf(
 				"saved query %s/%s is bound to provider %q, but host %q uses provider %q; refusing to run",
-				sq.Category, sq.Name, sq.Provider, r.host.Name, r.host.Provider))
+				sq.Category, sq.Name, sq.Provider, r.Host.Name, r.Host.Provider))
 			return 1
 		}
 		sql = sq.SQL
@@ -438,14 +451,14 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	// host+database is seen, or when --refresh-schema forces a rebuild,
 	// before the user query runs. A build failure stops here — the user
 	// query never runs against a schema we could not introspect.
-	cachePath := schema.CachePath(r.host.Host, r.host.Database)
+	cachePath := schema.CachePath(r.Host.Host, r.Host.Database)
 	if refreshSchema || !schema.Exists(cachePath) {
-		if code := buildSchema(r, cachePath, c, stderr); code != 0 {
+		if code := session.BuildSchema(r, cachePath, toSessionFlags(c), stderr); code != 0 {
 			return code
 		}
 	}
 
-	rows, code := runOnce(r, adapter.Query{SQL: sql, Params: params}, c, true, stderr)
+	rows, code := session.RunOnce(r, adapter.Query{SQL: sql, Params: params}, toSessionFlags(c), true, stderr)
 	if code != 0 {
 		return code // a non-zero run saves nothing and returns its own code
 	}
@@ -459,7 +472,7 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	// usage error surfaced on stderr honouring --output — the run itself already
 	// stands, so its output is not retracted.
 	if set["save"] {
-		sq, err := savedquery.Save(saveName, category, r.host.Provider, sql, force)
+		sq, err := savedquery.Save(saveName, category, r.Host.Provider, sql, force)
 		if err != nil {
 			render.Error(stderr, c.output, "saving query: "+err.Error())
 			return 1
@@ -605,14 +618,14 @@ func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) int
 		return 1
 	}
 
-	r, code := setup(c, stderr)
+	r, code := session.Setup(toSessionFlags(c), stderr)
 	if code != 0 {
 		return code
 	}
 
-	cachePath := schema.CachePath(r.host.Host, r.host.Database)
+	cachePath := schema.CachePath(r.Host.Host, r.Host.Database)
 	if refreshSchema || !schema.Exists(cachePath) {
-		if code := buildSchema(r, cachePath, c, stderr); code != 0 {
+		if code := session.BuildSchema(r, cachePath, toSessionFlags(c), stderr); code != 0 {
 			return code
 		}
 	}
@@ -734,18 +747,18 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 		return exitParse(err, stdout)
 	}
 
-	r, code := setup(c, stderr)
+	r, code := session.Setup(toSessionFlags(c), stderr)
 	if code != 0 {
 		return code
 	}
 
 	// introspect always rebuilds: run the provider catalog query, persist
 	// it to the cache, then print it.
-	rows, code := runOnce(r, adapter.Query{SQL: r.adapter.IntrospectSQL()}, c, false, stderr)
+	rows, code := session.RunOnce(r, adapter.Query{SQL: r.Adapter.IntrospectSQL()}, toSessionFlags(c), false, stderr)
 	if code != 0 {
 		return code
 	}
-	if err := schema.Write(schema.CachePath(r.host.Host, r.host.Database), rows); err != nil {
+	if err := schema.Write(schema.CachePath(r.Host.Host, r.Host.Database), rows); err != nil {
 		render.Error(stderr, c.output, err.Error())
 		return 1
 	}
@@ -766,13 +779,13 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 // indistinguishable from a complete one (design.md §13.9). The warning is plain
 // text even under --output json, because the command is succeeding and stderr
 // carries structured errors only on failure.
-func refreshDatabaseList(r resolved, c commonFlags, stderr io.Writer) {
+func refreshDatabaseList(r session.Resolved, c commonFlags, stderr io.Writer) {
 	// io.Discard: the underlying error must not print as though introspect
 	// itself had failed. The warning points at the command that will show it.
 	if _, code := listDatabases(r, c, io.Discard); code != 0 {
 		fmt.Fprintf(stderr, "db-query: warning: could not refresh the database list for %s; "+
 			"--database completion may be stale. Run 'db-query --host %s databases' to see why.\n",
-			r.host.Name, r.host.Name)
+			r.Host.Name, r.Host.Name)
 	}
 }
 
@@ -788,7 +801,7 @@ func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) 
 		return exitParse(err, stdout)
 	}
 
-	r, code := setup(c, stderr)
+	r, code := session.Setup(toSessionFlags(c), stderr)
 	if code != 0 {
 		return code
 	}
@@ -810,12 +823,12 @@ func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) 
 // never resolve one. Errors render to errOut, which a caller treating failure
 // as non-fatal sets to io.Discard so nothing prints as though the command it
 // was attached to had failed.
-func listDatabases(r resolved, c commonFlags, errOut io.Writer) (adapter.Rows, int) {
-	rows, code := runOnce(r, adapter.Query{SQL: r.adapter.ListDatabasesSQL()}, c, false, errOut)
+func listDatabases(r session.Resolved, c commonFlags, errOut io.Writer) (adapter.Rows, int) {
+	rows, code := session.RunOnce(r, adapter.Query{SQL: r.Adapter.ListDatabasesSQL()}, toSessionFlags(c), false, errOut)
 	if code != 0 {
 		return adapter.Rows{}, code
 	}
-	if err := dblist.Write(dblist.CachePath(r.host.Name), databaseNames(rows)); err != nil {
+	if err := dblist.Write(dblist.CachePath(r.Host.Name), databaseNames(rows)); err != nil {
 		render.Error(errOut, c.output, err.Error())
 		return adapter.Rows{}, 1
 	}
@@ -858,7 +871,7 @@ func runHosts(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 		render.Error(stderr, c.output, fmt.Sprintf("expected at most one host name, got %d", len(positional)))
 		return 1
 	}
-	cfg, err := loadConfig(c.config)
+	cfg, err := session.LoadConfig(c.config)
 	if err != nil {
 		render.Error(stderr, c.output, err.Error())
 		return 1
@@ -949,130 +962,6 @@ func readSQL(positional []string, file string) (string, error) {
 	}
 }
 
-func loadConfig(path string) (config.Config, error) {
-	if path == "" {
-		path = config.DefaultPath()
-	}
-	if path == "" {
-		return config.Config{}, fmt.Errorf("cannot determine config path; set --config or DB_QUERY_CONFIG")
-	}
-	return config.Load(path)
-}
-
-// resolved bundles a host's adapter, its resolved credential, and the
-// merged host config — the setup shared by the query and introspect paths.
-type resolved struct {
-	adapter adapter.Adapter
-	cred    credential.Credential
-	host    config.HostConfig // after MergeCredential; Host/Database are final
-}
-
-// setup validates the output format and host flag, loads config, selects
-// the adapter, resolves the credential lazily (only this host's secret is
-// touched), and merges it into the host config. On any failure it renders
-// the error and returns exit code 1.
-func setup(c commonFlags, stderr io.Writer) (resolved, int) {
-	if err := render.Valid(c.output); err != nil {
-		render.Error(stderr, c.output, err.Error())
-		return resolved{}, 1
-	}
-	if c.host == "" {
-		render.Error(stderr, c.output, "--host is required (pass --host/-H before or after the command, or export DB_QUERY_HOST)")
-		return resolved{}, 1
-	}
-	cfg, err := loadConfig(c.config)
-	if err != nil {
-		render.Error(stderr, c.output, err.Error())
-		return resolved{}, 1
-	}
-	host, err := cfg.Host(c.host)
-	if err != nil {
-		render.Error(stderr, c.output, err.Error())
-		return resolved{}, 1
-	}
-	a, err := adapter.For(host.Provider)
-	if err != nil {
-		render.Error(stderr, c.output, err.Error())
-		return resolved{}, 1
-	}
-	cred, err := resolveCredential(cfg, host)
-	if err != nil {
-		render.Error(stderr, c.output, err.Error())
-		return resolved{}, 1
-	}
-	host = config.MergeCredential(host, cred)
-	// --database/-d overrides the host's configured database (and any value a
-	// resolver supplied), so one host entry can reach sibling databases on the
-	// same server without a second config block.
-	if c.database != "" {
-		host.Database = c.database
-	}
-	return resolved{adapter: a, cred: cred, host: host}, 0
-}
-
-// runOnce builds, runs, and parses a single invocation against a resolved
-// host, applying the exit-code contract: 1 (build/parse failure), 2 (client
-// could not start), 3 (schema error), 4 (other SQL error), 0 (rows valid).
-// It renders any error itself. When hintRefresh is set a schema error also
-// hints at --refresh-schema; the internal schema build passes false, since
-// that hint only makes sense for the user's query.
-func runOnce(r resolved, q adapter.Query, c commonFlags, hintRefresh bool, stderr io.Writer) (adapter.Rows, int) {
-	inv, err := r.adapter.Build(r.host, q)
-	if err != nil {
-		render.Error(stderr, c.output, err.Error())
-		return adapter.Rows{}, 1
-	}
-	inv.Env = r.adapter.Env(r.cred, r.host)
-
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
-	defer cancel()
-	res, err := executor.Run(ctx, inv)
-	if err != nil {
-		render.Error(stderr, c.output, err.Error())
-		return adapter.Rows{}, 2
-	}
-	if res.ExitCode != 0 {
-		// go-sqlcmd prints login/connection errors to stdout even with
-		// -r 1, so fall back to stdout when stderr is empty.
-		detail := strings.TrimSpace(string(res.Stderr))
-		if detail == "" {
-			detail = strings.TrimSpace(string(res.Stdout))
-		}
-		msg := fmt.Sprintf("%s exited %d: %s", inv.Argv[0], res.ExitCode, detail)
-		if r.adapter.IsSchemaError(res) {
-			if hintRefresh {
-				msg += "\nhint: the schema may have changed — re-run with --refresh-schema to rebuild the schema cache"
-			}
-			render.Error(stderr, c.output, msg)
-			return adapter.Rows{}, 3
-		}
-		render.Error(stderr, c.output, msg)
-		return adapter.Rows{}, 4
-	}
-	rows, err := r.adapter.Parse(res)
-	if err != nil {
-		render.Error(stderr, c.output, err.Error())
-		return adapter.Rows{}, 1
-	}
-	return rows, 0
-}
-
-// buildSchema runs the provider introspection and persists the result to
-// the schema cache. It is a silent side effect of the query path: the rows
-// are cached, never rendered. It returns 0 on success or the runOnce exit
-// code on failure.
-func buildSchema(r resolved, cachePath string, c commonFlags, stderr io.Writer) int {
-	rows, code := runOnce(r, adapter.Query{SQL: r.adapter.IntrospectSQL()}, c, false, stderr)
-	if code != 0 {
-		return code
-	}
-	if err := schema.Write(cachePath, rows); err != nil {
-		render.Error(stderr, c.output, err.Error())
-		return 1
-	}
-	return 0
-}
-
 // renderRows writes rows through the single render pivot, honouring the
 // output format and cross-format options. It returns 0 or exit code 1.
 //
@@ -1114,64 +1003,4 @@ func resolveOutput(format string, w io.Writer) string {
 		return "table"
 	}
 	return "text"
-}
-
-// usesBWS reports whether the host resolves any secret through the bws: scheme,
-// so the configured access token is fetched only when it is actually needed.
-func usesBWS(host config.HostConfig) bool {
-	return strings.HasPrefix(host.Credential, "bws:") || strings.HasPrefix(host.Username, "bws:")
-}
-
-// bwsOptions resolves the configured Bitwarden Secrets Manager access token
-// into resolver Options, lazily: only when the host uses a bws: URI and a
-// [bws].accessToken is set. The token source must be a resolver URI and must
-// not itself be bws: (chicken-and-egg); an empty section leaves the token
-// empty so the resolver falls back to BWS_ACCESS_TOKEN.
-func bwsOptions(cfg config.Config, host config.HostConfig) (credential.Options, error) {
-	if !usesBWS(host) || cfg.BWS.AccessToken == "" {
-		return credential.Options{}, nil
-	}
-	uri := cfg.BWS.AccessToken
-	if strings.HasPrefix(uri, "bws:") {
-		return credential.Options{}, fmt.Errorf("bws.accessToken must not be a bws: URI (chicken-and-egg); use env:, keychain:, etc.")
-	}
-	if !credential.IsURI(uri) {
-		return credential.Options{}, fmt.Errorf("bws.accessToken must be a credential URI (e.g. env:NAME or keychain:service), not a raw value")
-	}
-	tok, err := credential.ResolveScalar(uri)
-	if err != nil {
-		return credential.Options{}, fmt.Errorf("resolving bws.accessToken: %w", err)
-	}
-	return credential.Options{BWSAccessToken: tok}, nil
-}
-
-// resolveCredential produces the final neutral record for a host: password
-// from the credential URI; username from explicit host config (literal or
-// URI) with the resolver's own username filling the gap. The BWS access
-// token is resolved lazily via bwsOptions and injected into resolution.
-func resolveCredential(cfg config.Config, host config.HostConfig) (credential.Credential, error) {
-	opts, err := bwsOptions(cfg, host)
-	if err != nil {
-		return credential.Credential{}, err
-	}
-	var cred credential.Credential
-	if host.Credential != "" {
-		cred, err = credential.ResolveWith(host.Credential, opts)
-		if err != nil {
-			return credential.Credential{}, fmt.Errorf("resolving credential for host %s: %w", host.Name, err)
-		}
-	}
-	switch {
-	case host.Username == "":
-		// keep cred.Username (resolver-supplied, e.g. bw: or keychain:)
-	case credential.IsURI(host.Username):
-		u, err := credential.ResolveScalarWith(host.Username, opts)
-		if err != nil {
-			return credential.Credential{}, fmt.Errorf("resolving username for host %s: %w", host.Name, err)
-		}
-		cred.Username = u
-	default:
-		cred.Username = host.Username
-	}
-	return cred, nil
 }
