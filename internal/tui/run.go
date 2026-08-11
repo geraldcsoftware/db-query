@@ -20,8 +20,9 @@ type queryResultMsg struct {
 }
 
 // startRun begins a query run if none is already in flight (single-flight).
-// It clears the Results pane and starts the spinner immediately — before the
-// tea.Cmd it returns has even been scheduled — and stores a CancelFunc so
+// It clears the Results pane and marks the model running immediately — before
+// the tea.Cmd it returns has even been scheduled, so the next frame already
+// shows the running indicator in the bottom bar — and stores a CancelFunc so
 // Ctrl+C can cancel it. A second call while one is already running does not
 // start anything; it sets a transient status message instead.
 func (m *model) startRun(sql string) tea.Cmd {

@@ -24,7 +24,7 @@ func TestQueryPaneSetValueReplacesContent(t *testing.T) {
 }
 
 func TestModelRoutesInputOnlyToFocusedQueryPane(t *testing.T) {
-	m := newTestModel()
+	m := newTestModel(t)
 	m.focus = paneSchema // not the query pane
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	if updated.(model).query.value() != "" {

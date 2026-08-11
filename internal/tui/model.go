@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/session"
@@ -33,6 +34,11 @@ type model struct {
 	session session.Resolved
 	flags   session.CommonFlags
 	stdout  io.Writer
+
+	// version is the build's version string, shown in the top bar. It is
+	// passed in from the caller because internal/cli imports this package
+	// and so cannot be imported back.
+	version string
 
 	focus  pane
 	width  int
@@ -82,26 +88,63 @@ func (r rect) contains(x, y int) bool {
 	return x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1
 }
 
-func newModel(r session.Resolved, c session.CommonFlags, stdout io.Writer) model {
-	return model{session: r, flags: c, stdout: stdout, focus: paneSchema, query: newQueryPane(), schema: newSchemaPane(r.Host), saved: newSavedPane(), runner: execute, results: resultsPane{}}
+func newModel(r session.Resolved, c session.CommonFlags, version string, stdout io.Writer) model {
+	m := model{session: r, flags: c, version: version, stdout: stdout, focus: paneSchema, query: newQueryPane(), schema: newSchemaPane(r.Host), saved: newSavedPane(), runner: execute, results: resultsPane{}}
+	// Lay out against viewSize's fallback dimensions so rects and the
+	// textarea are already consistent with the first frame, which may render
+	// before the initial tea.WindowSizeMsg arrives.
+	m.recomputeLayout()
+	return m
 }
 
 func (m model) Init() tea.Cmd { return nil }
 
-// recomputeLayout splits the terminal into a 2x2 grid: Schema/Saved stacked
-// on the left half, Query/Results stacked on the right half — matching the
-// spec's §5 layout. Called on tea.WindowSizeMsg; no-op (v1 does not reflow
-// mid-session, spec §2) if called again with the same dimensions, but is
-// always safe to call.
-func (m *model) recomputeLayout() {
-	leftW, rightW := m.width/2, m.width-m.width/2
-	topH, botH := m.height/2, m.height-m.height/2
-	m.rects = map[pane]rect{
-		paneSchema:  {0, 0, leftW, topH},
-		paneSaved:   {0, topH, leftW, topH + botH},
-		paneQuery:   {leftW, 0, leftW + rightW, topH},
-		paneResults: {leftW, topH, leftW + rightW, topH + botH},
+// viewSize is the terminal size to lay out against: the dimensions from the
+// last tea.WindowSizeMsg, falling back to a conservative 80x24 before the
+// first one arrives so an early frame still renders something sane.
+func (m model) viewSize() (w, h int) {
+	w, h = m.width, m.height
+	if w <= 0 {
+		w = 80
 	}
+	if h <= 0 {
+		h = 24
+	}
+	return w, h
+}
+
+// layoutRects divides a w x h terminal into the four pane rectangles of the
+// spec's §5 layout: row 0 is the top bar, the last row is the bottom bar, and
+// the rows between them form a 2x2 grid — Schema top-left, Query top-right,
+// Saved bottom-left, Results bottom-right. View renders into exactly these
+// rectangles and setFocusAt hit-tests mouse clicks against them, so a click
+// always lands on the pane drawn under the pointer.
+func layoutRects(w, h int) map[pane]rect {
+	const bodyTop = 1 // row 0 is the top bar
+	bodyH := h - 2    // minus the top bar and the bottom bar
+	if bodyH < 0 {
+		bodyH = 0
+	}
+	leftW := w / 2
+	mid := bodyTop + bodyH/2
+	bot := bodyTop + bodyH
+	return map[pane]rect{
+		paneSchema:  {0, bodyTop, leftW, mid},
+		paneQuery:   {leftW, bodyTop, w, mid},
+		paneSaved:   {0, mid, leftW, bot},
+		paneResults: {leftW, mid, w, bot},
+	}
+}
+
+// recomputeLayout rebuilds the pane rectangles for the current terminal size
+// and resizes the Query pane's textarea to fit its own rectangle. Called on
+// tea.WindowSizeMsg; v1 does not reflow pane proportions mid-session (spec
+// §2), but recomputing is always safe.
+func (m *model) recomputeLayout() {
+	w, h := m.viewSize()
+	m.rects = layoutRects(w, h)
+	r := m.rects[paneQuery]
+	m.query.setSize(r.x1-r.x0, r.y1-r.y0-1) // one row of the rect is the pane title
 }
 
 // setFocusAt sets focus to whichever pane's rectangle contains (x, y), the
@@ -174,6 +217,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
+		// tui.Run enables cell-motion reporting, so motion, wheel and release
+		// events arrive here too; only a left-button press moves focus.
+		if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+			return m, nil
+		}
 		x, y := mouseXY(msg)
 		m.setFocusAt(x, y)
 		return m, nil
@@ -181,12 +229,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyEsc:
-			return m, tea.Quit
+			return m, m.quit()
 		case tea.KeyCtrlC:
 			if m.running {
 				return m.cancelRunning()
 			}
-			return m, tea.Quit
+			return m, m.quit()
 		case tea.KeyCtrlH:
 			m.focusLeft()
 			return m, nil
@@ -251,13 +299,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case queryResultMsg:
 		m.running = false
+		// Invoking the CancelFunc, rather than only dropping it, releases the
+		// context.WithTimeout timer startRun armed; otherwise it stays alive
+		// until the full --timeout elapses.
+		if m.cancel != nil {
+			m.cancel()
+		}
 		m.cancel = nil
 		switch {
-		case errors.Is(msg.err, context.Canceled), errors.Is(msg.err, context.DeadlineExceeded):
+		case errors.Is(msg.err, context.Canceled):
+			// The user asked for this, so it is not an error: leave the
+			// Results pane empty and say so in the status strip (spec §8).
 			m.results.clear()
 			m.statusMsg = "query cancelled"
 			m.statusGen++
 			return m, clearStatusAfter(m.statusGen)
+		case errors.Is(msg.err, context.DeadlineExceeded):
+			// A --timeout expiry is a genuine failure nobody asked for, so it
+			// belongs on the error path (spec §9), not the cancellation one.
+			m.results.showError("query timed out after " + m.flags.Timeout.String())
+			return m, nil
 		case msg.err != nil:
 			text := msg.err.Error()
 			if msg.schemaErr {
@@ -279,36 +340,147 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// View renders the top bar (host/database/provider), the 2x2 pane grid with
-// focus markers, each pane's own content, and a bottom bar that shows either
-// the keybinding hint or a transient status message (design §5).
-func (m model) View() string {
-	title := func(p pane, name string) string {
-		if p == m.focus {
-			return "> [" + name + "]"
-		}
-		return "  [" + name + "]"
+// quit cancels any in-flight run before asking Bubble Tea to exit. The held
+// CancelFunc is the only path to the adapter's child process (started with
+// exec.CommandContext), so skipping it would leave a slow psql/sqlcmd running
+// after the TUI is gone.
+func (m *model) quit() tea.Cmd {
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
 	}
-	var b strings.Builder
-	b.WriteString(topBar(m) + "\n")
-	b.WriteString(title(paneSchema, "Schema") + "  " + title(paneQuery, "Query") + "\n")
-	b.WriteString(m.schema.view() + "\n")
-	b.WriteString(m.query.view() + "\n")
-	b.WriteString(title(paneSaved, "Saved") + "  " + title(paneResults, "Results") + "\n")
-	b.WriteString(m.saved.view() + "\n")
-	b.WriteString(m.results.view() + "\n")
-	if m.statusMsg != "" {
-		b.WriteString(m.statusMsg + "\n")
-	} else {
-		b.WriteString(bottomBarHint + "\n")
-	}
-	return b.String()
+	return tea.Quit
 }
 
-// topBar identifies the resolved connection (host, database, provider) so
-// it stays visible regardless of which pane has focus.
-func topBar(m model) string {
-	return "db-query   " + m.session.Host.Host + " · " + m.session.Host.Database + " (" + m.session.Host.Provider + ")"
+// View renders one full screen: a top bar, the four panes each drawn inside
+// the rectangle layoutRects assigns it, and a bottom bar (design §5). Output
+// is exactly the terminal's height in lines and no line exceeds its width —
+// Bubble Tea's renderer resolves an over-tall view by keeping only its last
+// height lines, which would silently push the top bar and the upper panes off
+// screen on the first large result.
+func (m model) View() string {
+	w, h := m.viewSize()
+	top := ansi.Truncate(m.topBar(w), w, "")
+	if h <= 1 {
+		return top
+	}
+	rects := layoutRects(w, h)
+	// The Query pane's textarea keeps a visible cursor only while it is the
+	// focused pane; key routing is gated separately in Update.
+	q := m.query
+	if m.focus != paneQuery {
+		q = q.blurred()
+	}
+	left := append(
+		m.paneBlock(paneSchema, "Schema", m.schema.view(), rects[paneSchema]),
+		m.paneBlock(paneSaved, "Saved", m.saved.view(), rects[paneSaved])...,
+	)
+	right := append(
+		m.paneBlock(paneQuery, "Query", q.view(), rects[paneQuery]),
+		m.paneBlock(paneResults, "Results", m.results.view(), rects[paneResults])...,
+	)
+
+	rows := make([]string, 0, h)
+	rows = append(rows, top)
+	rows = append(rows, joinColumns(left, right)...)
+	rows = append(rows, ansi.Truncate(m.bottomBar(), w, ""))
+	for i, r := range rows {
+		rows[i] = strings.TrimRight(r, " ")
+	}
+	return strings.Join(rows, "\n")
+}
+
+// paneBlock renders one pane as exactly as many lines as its rectangle is
+// tall, each padded to exactly its rectangle's width: a title line carrying
+// the focus marker, then the pane's own content clipped to whatever rows are
+// left. Content longer than the rectangle is cut off at the bottom — v1 has
+// no per-pane scrolling, so a result page taller than the Results pane is
+// paged through with PgUp/PgDn or shrunk with DB_QUERY_TUI_PAGE_SIZE.
+func (m model) paneBlock(p pane, name, content string, r rect) []string {
+	w, h := r.x1-r.x0, r.y1-r.y0
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+	marker := "  "
+	if p == m.focus {
+		marker = "> "
+	}
+	lines := []string{marker + "[" + name + "]"}
+	lines = append(lines, strings.Split(strings.TrimRight(content, "\n"), "\n")...)
+	return fitBlock(lines, w, h)
+}
+
+// fitBlock forces lines into a block of exactly h rows of exactly w cells,
+// truncating and padding as needed. Truncation is ANSI-aware so clipping a
+// styled line (the textarea's, for one) cannot cut an escape sequence in half
+// and bleed its colour across the rest of the screen.
+func fitBlock(lines []string, w, h int) []string {
+	out := make([]string, h)
+	for i := range out {
+		var s string
+		if i < len(lines) {
+			s = ansi.Truncate(lines[i], w, "")
+		}
+		if pad := w - ansi.StringWidth(s); pad > 0 {
+			s += strings.Repeat(" ", pad)
+		}
+		out[i] = s
+	}
+	return out
+}
+
+// joinColumns places two blocks side by side, one row at a time. Each block's
+// rows are already padded to their own fixed width by fitBlock, so plain
+// concatenation keeps the right-hand column aligned.
+func joinColumns(left, right []string) []string {
+	n := len(left)
+	if len(right) > n {
+		n = len(right)
+	}
+	out := make([]string, n)
+	for i := range out {
+		var l, r string
+		if i < len(left) {
+			l = left[i]
+		}
+		if i < len(right) {
+			r = right[i]
+		}
+		out[i] = l + r
+	}
+	return out
+}
+
+// topBar identifies the build and the resolved connection (host, database,
+// provider) so both stay visible regardless of which pane has focus. The
+// connection is right-aligned against the terminal's width, falling back to a
+// single space when the two halves would not otherwise fit.
+func (m model) topBar(w int) string {
+	left := "db-query"
+	if m.version != "" {
+		left += " " + m.version
+	}
+	right := m.session.Host.Host + " · " + m.session.Host.Database + " (" + m.session.Host.Provider + ")"
+	gap := w - ansi.StringWidth(left) - ansi.StringWidth(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+// bottomBar shows a transient status message when one is set, a running
+// indicator while a query is in flight (without which an in-flight run is
+// indistinguishable from an idle screen with empty results), and otherwise
+// the keybinding hint.
+func (m model) bottomBar() string {
+	switch {
+	case m.statusMsg != "":
+		return m.statusMsg
+	case m.running:
+		return "running… · ^c cancel"
+	default:
+		return bottomBarHint
+	}
 }
 
 // mouseXY extracts click coordinates from a tea.MouseMsg. tea.MouseMsg is an

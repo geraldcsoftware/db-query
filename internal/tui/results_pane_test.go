@@ -72,6 +72,37 @@ func TestResultsViewShowsOnlyCurrentPageRows(t *testing.T) {
 	}
 }
 
+// TestResultsViewCapsColumnWidth pins the pane's column cap: unbounded
+// columns let one wide text value wrap every row and destroy the table's
+// alignment inside a fixed-size pane.
+func TestResultsViewCapsColumnWidth(t *testing.T) {
+	wide := strings.Repeat("x", 200)
+	var p resultsPane
+	p.showRows(adapter.Rows{Columns: []string{"note"}, Rows: [][]*string{{&wide}}})
+	out := p.view()
+	if strings.Contains(out, wide) {
+		t.Fatalf("a 200-cell value must be truncated to %d cells:\n%s", tuiMaxColWidth, out)
+	}
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if len(line) > tuiMaxColWidth+8 { // the cell plus the border/padding go-pretty adds
+			t.Fatalf("line is %d cells wide, want the %d-cell cap to hold:\n%s", len(line), tuiMaxColWidth, out)
+		}
+	}
+}
+
+// TestResultsViewHasNoTrailingBlankLine keeps the pane's block exactly as
+// tall as its content: a trailing newline would cost a row of the Results
+// pane to a blank line.
+func TestResultsViewHasNoTrailingBlankLine(t *testing.T) {
+	t.Setenv("DB_QUERY_TUI_PAGE_SIZE", "10")
+	var p resultsPane
+	p.showRows(rowsOf(25))
+	out := p.view()
+	if !strings.HasSuffix(out, ")") {
+		t.Fatalf("view must end with the page indicator and nothing after it, got %q", out[len(out)-20:])
+	}
+}
+
 func TestResultsClearAndError(t *testing.T) {
 	var p resultsPane
 	p.showRows(rowsOf(5))

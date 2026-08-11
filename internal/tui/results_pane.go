@@ -11,6 +11,12 @@ import (
 
 const defaultTUIPageSize = 100
 
+// tuiMaxColWidth caps a rendered cell's display width. It mirrors the value
+// internal/cli uses for --max-col-width's default so the Results pane and
+// `db-query query --output table` truncate identically; the constant is
+// duplicated rather than shared because internal/cli imports this package.
+const tuiMaxColWidth = 50
+
 // pageSize reads DB_QUERY_TUI_PAGE_SIZE, defaulting to 100. An unset, empty,
 // non-numeric, or non-positive value all fall back to the default rather
 // than erroring — this is a display convenience, not a flag worth failing
@@ -87,9 +93,10 @@ func (r resultsPane) currentSlice() adapter.Rows {
 
 // view renders the current page through the same table renderer the CLI's
 // --output table uses (internal/render), plus a page indicator when there
-// is more than one page. --output/--border/--max-col-width are not
-// exposed in the TUI: this always renders as a table with the renderer's
-// defaults.
+// is more than one page. --output/--border/--max-col-width are not exposed
+// in the TUI: this always renders as a table, capping cells at
+// tuiMaxColWidth so one wide text column cannot wrap every row and destroy
+// the table's alignment inside a fixed-size pane.
 func (r resultsPane) view() string {
 	if r.errText != "" {
 		return "error: " + r.errText
@@ -98,7 +105,7 @@ func (r resultsPane) view() string {
 		return ""
 	}
 	var b strings.Builder
-	_ = render.Render(&b, "table", r.currentSlice(), render.Options{})
+	_ = render.Render(&b, "table", r.currentSlice(), render.Options{MaxColWidth: tuiMaxColWidth})
 	if r.pageCount() > 1 {
 		b.WriteString(pageIndicator(r))
 	}
@@ -112,5 +119,5 @@ func pageIndicator(r resultsPane) string {
 	start := r.page*size + 1
 	end := start + len(r.currentSlice().Rows) - 1
 	return "page " + strconv.Itoa(r.page+1) + "/" + strconv.Itoa(r.pageCount()) +
-		" (rows " + strconv.Itoa(start) + "-" + strconv.Itoa(end) + " of " + strconv.Itoa(len(r.rows.Rows)) + ")\n"
+		" (rows " + strconv.Itoa(start) + "-" + strconv.Itoa(end) + " of " + strconv.Itoa(len(r.rows.Rows)) + ")"
 }

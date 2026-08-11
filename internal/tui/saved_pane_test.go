@@ -25,11 +25,13 @@ func TestSavedPaneLoadsFromStore(t *testing.T) {
 }
 
 func TestSavedPaneEnterLoadsIntoQueryPane(t *testing.T) {
-	isolateStore(t)
+	// newTestModel isolates the store itself, so the query is saved after it
+	// is built — saving first would write to a directory the model's own
+	// isolation then replaces.
+	m := newTestModel(t)
 	if _, err := savedquery.Save("pending-ct", "default", "postgres", "select * from orders", false); err != nil {
 		t.Fatal(err)
 	}
-	m := newTestModel()
 	m.saved = newSavedPane()
 	m.focus = paneSaved
 

@@ -203,7 +203,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	rest := fs.Args()
 	if len(rest) == 0 {
 		if isTerminal(stdout) {
-			return tui.Run(toSessionFlags(globals), stdout, stderr)
+			return tui.Run(toSessionFlags(globals), buildInfo.Version, stdout, stderr)
 		}
 		// Shared flags but no command, and not a terminal: nothing to run.
 		fmt.Fprint(stderr, usage)

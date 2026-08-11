@@ -19,8 +19,10 @@ import (
 // startup failure — no host chosen, or a credential that cannot be
 // resolved — is fatal: it is reported on stderr and Run returns 1 before
 // any Bubble Tea program starts, exactly like every other command's
-// credential-error path.
-func Run(c session.CommonFlags, stdout, stderr io.Writer) int {
+// credential-error path. version is displayed in the top bar; the caller
+// supplies it because internal/cli, which owns the build info, imports this
+// package and so cannot be imported back.
+func Run(c session.CommonFlags, version string, stdout, stderr io.Writer) int {
 	r, code := bootstrap(c, stderr)
 	if code != 0 {
 		return code
@@ -28,7 +30,7 @@ func Run(c session.CommonFlags, stdout, stderr io.Writer) int {
 	if !shouldLaunch(r) {
 		return 0
 	}
-	m := newModel(r, c, stdout)
+	m := newModel(r, c, version, stdout)
 	if _, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run(); err != nil {
 		io.WriteString(stderr, "db-query: "+err.Error()+"\n")
 		return 1

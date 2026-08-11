@@ -13,7 +13,7 @@ type fakeAdapter struct{ adapter.Adapter }
 func (fakeAdapter) PreviewSQL(table string) string { return "SELECT * FROM " + table + " LIMIT 100;" }
 
 func TestSchemaShortcutTriggersRun(t *testing.T) {
-	m := newTestModel()
+	m := newTestModel(t)
 	m.session.Adapter = fakeAdapter{}
 	seedSchemaCache(t, "", "") // matches m.session.Host's zero-value Host/Database
 	m.schema = newSchemaPane(m.session.Host)
@@ -32,7 +32,7 @@ func TestSchemaShortcutTriggersRun(t *testing.T) {
 }
 
 func TestRunQueryFromSchemaBuildsPreviewSQL(t *testing.T) {
-	m := newTestModel()
+	m := newTestModel(t)
 	m.session.Adapter = fakeAdapter{}
 	seedSchemaCache(t, "", "")
 	m.schema = newSchemaPane(m.session.Host)
@@ -49,7 +49,7 @@ func TestRunQueryFromSchemaBuildsPreviewSQL(t *testing.T) {
 }
 
 func TestF5AndCtrlEnterBothTriggerQueryPaneRun(t *testing.T) {
-	m := newTestModel()
+	m := newTestModel(t)
 	m.focus = paneQuery
 	m.query.setValue("select 1")
 	r := &controlledRunner{release: make(chan struct{})}
@@ -57,7 +57,7 @@ func TestF5AndCtrlEnterBothTriggerQueryPaneRun(t *testing.T) {
 	m.runner = r.run
 
 	for _, msg := range []tea.KeyMsg{f5Msg(), ctrlEnterMsg()} {
-		mm := newTestModel()
+		mm := newTestModel(t)
 		mm.focus = paneQuery
 		mm.query.setValue("select 1")
 		mm.runner = r.run

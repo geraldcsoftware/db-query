@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -37,8 +39,8 @@ func (r *controlledRunner) run(ctx context.Context, _ session.Resolved, _ string
 	return adapter.Rows{Columns: []string{"id"}}, false, nil
 }
 
-func newRunnerTestModel(r *controlledRunner) model {
-	m := newTestModel()
+func newRunnerTestModel(t *testing.T, r *controlledRunner) model {
+	m := newTestModel(t)
 	m.runner = r.run
 	return m
 }
@@ -46,7 +48,7 @@ func newRunnerTestModel(r *controlledRunner) model {
 func TestStartRunSetsRunningAndClearsResults(t *testing.T) {
 	r := &controlledRunner{release: make(chan struct{})}
 	defer close(r.release)
-	m := newRunnerTestModel(r)
+	m := newRunnerTestModel(t, r)
 	m.query.setValue("select 1")
 	m.focus = paneQuery
 
@@ -72,7 +74,7 @@ func TestStartRunSetsRunningAndClearsResults(t *testing.T) {
 func TestSingleFlightRejectsSecondRun(t *testing.T) {
 	r := &controlledRunner{release: make(chan struct{})}
 	defer close(r.release)
-	m := newRunnerTestModel(r)
+	m := newRunnerTestModel(t, r)
 	m.startRun("select 1")
 	m.running = true // startRun's own effect, set explicitly since startRun returns a new value
 
@@ -91,7 +93,7 @@ func TestSingleFlightRejectsSecondRun(t *testing.T) {
 
 func TestCtrlCCancelsRunningQuery(t *testing.T) {
 	r := &controlledRunner{release: make(chan struct{})}
-	m := newRunnerTestModel(r)
+	m := newRunnerTestModel(t, r)
 	m.running = true
 	canceled := false
 	m.cancel = func() { canceled = true }
@@ -107,7 +109,7 @@ func TestCtrlCCancelsRunningQuery(t *testing.T) {
 }
 
 func TestQueryResultMsgCancelledClearsRunningNoContent(t *testing.T) {
-	m := newTestModel()
+	m := newTestModel(t)
 	m.running = true
 	m.cancel = func() {}
 	updated, _ := m.Update(queryResultMsg{err: context.Canceled})
@@ -126,8 +128,51 @@ func TestQueryResultMsgCancelledClearsRunningNoContent(t *testing.T) {
 	}
 }
 
+// TestQueryResultMsgTimeoutIsAnErrorNotACancellation separates the two
+// context errors: a cancellation is something the user asked for, a --timeout
+// expiry is a failure they did not, and reporting the latter as "query
+// cancelled" leaves no trace of what actually went wrong.
+func TestQueryResultMsgTimeoutIsAnErrorNotACancellation(t *testing.T) {
+	m := newTestModel(t)
+	m.flags.Timeout = 30 * time.Second
+	m.running = true
+	m.cancel = func() {}
+	updated, _ := m.Update(queryResultMsg{err: fmt.Errorf("psql: %w", context.DeadlineExceeded)})
+	mm := updated.(model)
+	if mm.statusMsg == "query cancelled" {
+		t.Fatal("a timeout must not be reported as a user cancellation")
+	}
+	if !mm.results.hasContent() {
+		t.Fatal("a timeout must surface on the Results pane's error path")
+	}
+	if got := mm.results.view(); !strings.Contains(got, "timed out after 30s") {
+		t.Fatalf("results = %q, want the timeout duration", got)
+	}
+}
+
+func TestQueryResultMsgInvokesTheHeldCancelFunc(t *testing.T) {
+	// A completed run's context.WithTimeout timer stays armed until the full
+	// --timeout elapses unless its CancelFunc is actually called.
+	for name, msg := range map[string]queryResultMsg{
+		"success": {rows: adapter.Rows{Columns: []string{"id"}}},
+		"error":   {err: errors.New("boom")},
+	} {
+		m := newTestModel(t)
+		m.running = true
+		canceled := false
+		m.cancel = func() { canceled = true }
+		updated, _ := m.Update(msg)
+		if !canceled {
+			t.Errorf("%s: the held CancelFunc must be invoked, not merely dropped", name)
+		}
+		if updated.(model).cancel != nil {
+			t.Errorf("%s: cancel must clear to nil", name)
+		}
+	}
+}
+
 func TestQueryResultMsgErrorShowsInResults(t *testing.T) {
-	m := newTestModel()
+	m := newTestModel(t)
 	m.running = true
 	m.cancel = func() {}
 	updated, _ := m.Update(queryResultMsg{err: errors.New("boom")})
@@ -148,9 +193,9 @@ func TestQueryResultTimingOut(t *testing.T) {
 	// accidentally made synchronous in a future edit.
 	r := &controlledRunner{release: make(chan struct{})}
 	defer close(r.release)
+	m := newRunnerTestModel(t, r) // built here: t.Setenv is not safe off the test goroutine
 	done := make(chan struct{})
 	go func() {
-		m := newRunnerTestModel(r)
 		_ = m.startRun("select 1")
 		close(done)
 	}()
