@@ -25,10 +25,25 @@ func Run(c session.CommonFlags, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
+	if !shouldLaunch(r) {
+		return 0
+	}
 	m := newModel(r, c, stdout)
 	if _, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run(); err != nil {
 		io.WriteString(stderr, "db-query: "+err.Error()+"\n")
 		return 1
 	}
 	return 0
+}
+
+// shouldLaunch reports whether bootstrap resolved a session worth launching
+// the interactive program against. bootstrap returns a zero-value
+// session.Resolved alongside a 0 exit code when the user quits the host
+// picker without choosing (Esc/Ctrl+C) — that is "nothing to do", not an
+// error, so it can't be distinguished by exit code alone. session.Setup's
+// only success path sets Adapter via adapter.For, which never returns a nil
+// Adapter on success, so a nil Adapter here unambiguously means bootstrap
+// had nothing to launch.
+func shouldLaunch(r session.Resolved) bool {
+	return r.Adapter != nil
 }
