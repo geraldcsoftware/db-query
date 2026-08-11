@@ -34,6 +34,9 @@ type model struct {
 	width  int
 	height int
 
+	// query is the Query pane's editable SQL buffer.
+	query queryPane
+
 	// running is false until a query starts executing; cancelRunning stops
 	// a run without exiting the program. This task's tests never trigger a
 	// run, so running stays at its zero value throughout.
@@ -51,7 +54,7 @@ func (r rect) contains(x, y int) bool {
 }
 
 func newModel(r session.Resolved, c session.CommonFlags, stdout io.Writer) model {
-	return model{session: r, flags: c, stdout: stdout, focus: paneSchema}
+	return model{session: r, flags: c, stdout: stdout, focus: paneSchema, query: newQueryPane()}
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -154,6 +157,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focusDown()
 			return m, nil
 		}
+		if m.focus == paneQuery {
+			var cmd tea.Cmd
+			m.query, cmd = m.query.update(msg)
+			return m, cmd
+		}
+		return m, nil
 	}
 	return m, nil
 }
