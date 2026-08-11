@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -278,16 +279,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// View renders the top bar (host/database/provider), the 2x2 pane grid with
+// focus markers, each pane's own content, and a bottom bar that shows either
+// the keybinding hint or a transient status message (design §5).
 func (m model) View() string {
-	label := func(p pane, title string) string {
-		mark := "  "
-		if m.focus == p {
-			mark = "> "
+	title := func(p pane, name string) string {
+		if p == m.focus {
+			return "> [" + name + "]"
 		}
-		return mark + "[" + title + "]"
+		return "  [" + name + "]"
 	}
-	return label(paneSchema, "Schema") + "  " + label(paneQuery, "Query") + "\n" +
-		label(paneSaved, "Saved") + "  " + label(paneResults, "Results") + "\n"
+	var b strings.Builder
+	b.WriteString(topBar(m) + "\n")
+	b.WriteString(title(paneSchema, "Schema") + "  " + title(paneQuery, "Query") + "\n")
+	b.WriteString(m.schema.view() + "\n")
+	b.WriteString(m.query.view() + "\n")
+	b.WriteString(title(paneSaved, "Saved") + "  " + title(paneResults, "Results") + "\n")
+	b.WriteString(m.saved.view() + "\n")
+	b.WriteString(m.results.view() + "\n")
+	if m.statusMsg != "" {
+		b.WriteString(m.statusMsg + "\n")
+	} else {
+		b.WriteString(bottomBarHint + "\n")
+	}
+	return b.String()
+}
+
+// topBar identifies the resolved connection (host, database, provider) so
+// it stays visible regardless of which pane has focus.
+func topBar(m model) string {
+	return "db-query   " + m.session.Host.Host + " · " + m.session.Host.Database + " (" + m.session.Host.Provider + ")"
 }
 
 // mouseXY extracts click coordinates from a tea.MouseMsg. tea.MouseMsg is an
