@@ -15,10 +15,10 @@ import (
 // exactly as if the matching flag had been passed; nothing is written back to
 // config or the environment (design §4). Quitting either picker returns a
 // zero-value Resolved with exit code 0 — nothing to do, not a failure.
-func bootstrap(c session.CommonFlags, stderr io.Writer) (session.Resolved, int) {
+func bootstrap(c session.CommonFlags, version string, stderr io.Writer) (session.Resolved, int) {
 	hostPicked := false
 	if c.Host == "" {
-		chosen, code := pickHost(c, stderr)
+		chosen, code := pickHost(c, version, stderr)
 		if code != 0 || chosen == "" {
 			return session.Resolved{}, code
 		}
@@ -36,7 +36,14 @@ func bootstrap(c session.CommonFlags, stderr io.Writer) (session.Resolved, int) 
 	if code != 0 {
 		return session.Resolved{}, code
 	}
-	p, err := runPicker(newDatabasePicker(names, r.Host.Database))
+	// The host picker, if it ran, has already printed the explanation and is
+	// still on screen above this one; all this picker owes the user is a record
+	// of what that choice was.
+	intro := startupIntro(version, "--database was")
+	if hostPicked {
+		intro = hostChosenIntro(r.Host.Name)
+	}
+	p, err := runPicker(newDatabasePicker(names, r.Host.Database, r.Host.Name, nil, intro))
 	if err != nil {
 		fmt.Fprintln(stderr, "db-query: "+err.Error())
 		return session.Resolved{}, 1
@@ -50,7 +57,7 @@ func bootstrap(c session.CommonFlags, stderr io.Writer) (session.Resolved, int) 
 
 // pickHost prompts for one of the configured host names. An empty name
 // alongside exit code 0 means the user quit the picker.
-func pickHost(c session.CommonFlags, stderr io.Writer) (string, int) {
+func pickHost(c session.CommonFlags, version string, stderr io.Writer) (string, int) {
 	cfg, err := session.LoadConfig(c.Config)
 	if err != nil {
 		fmt.Fprintln(stderr, "db-query: "+err.Error())
@@ -61,7 +68,14 @@ func pickHost(c session.CommonFlags, stderr io.Writer) (string, int) {
 		fmt.Fprintln(stderr, "db-query: no hosts configured; add one under [hosts.<name>] first")
 		return "", 1
 	}
-	p, err := runPicker(newHostPicker(names))
+	// A --database with no --host still has to say which flags are missing, and
+	// only one of them is: naming both would describe an invocation the user
+	// did not make.
+	missing := "--host or --database was"
+	if c.Database != "" {
+		missing = "--host was"
+	}
+	p, err := runPicker(newHostPicker(names, startupIntro(version, missing)))
 	if err != nil {
 		fmt.Fprintln(stderr, "db-query: "+err.Error())
 		return "", 1

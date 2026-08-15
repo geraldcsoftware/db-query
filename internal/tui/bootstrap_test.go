@@ -16,7 +16,7 @@ import (
 )
 
 func TestHostPickerEnterSelects(t *testing.T) {
-	p := newHostPicker([]string{"alpha", "beta", "gamma"})
+	p := newHostPicker([]string{"alpha", "beta", "gamma"}, nil)
 	// Move down once (alpha -> beta), then select.
 	var cmd tea.Cmd
 	p, cmd = p.update(tea.KeyPressMsg{Code: tea.KeyDown})
@@ -30,7 +30,7 @@ func TestHostPickerEnterSelects(t *testing.T) {
 }
 
 func TestHostPickerEscQuits(t *testing.T) {
-	p := newHostPicker([]string{"alpha"})
+	p := newHostPicker([]string{"alpha"}, nil)
 	_, cmd := p.update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if cmd == nil {
 		t.Fatal("expected a quit command")
@@ -44,7 +44,7 @@ func TestHostPickerEscQuits(t *testing.T) {
 // TestDatabasePickerStartsOnConfiguredDatabase: the host's own database is
 // the likeliest answer, so accepting it must not mean hunting for it first.
 func TestDatabasePickerStartsOnConfiguredDatabase(t *testing.T) {
-	p := newDatabasePicker([]string{"alpha", "reporting", "beta"}, "reporting")
+	p := newDatabasePicker([]string{"alpha", "reporting", "beta"}, "reporting", "testpg", nil, nil)
 	if p.cursor != 1 {
 		t.Fatalf("cursor = %d, want 1", p.cursor)
 	}
@@ -57,7 +57,7 @@ func TestDatabasePickerStartsOnConfiguredDatabase(t *testing.T) {
 // TestDatabasePickerUnknownConfiguredDatabase: a configured database the host
 // no longer has must not leave the cursor pointing at nothing.
 func TestDatabasePickerUnknownConfiguredDatabase(t *testing.T) {
-	p := newDatabasePicker([]string{"alpha", "beta"}, "gone")
+	p := newDatabasePicker([]string{"alpha", "beta"}, "gone", "testpg", nil, nil)
 	if p.cursor != 0 {
 		t.Fatalf("cursor = %d, want 0", p.cursor)
 	}
@@ -147,7 +147,7 @@ func TestBootstrapPicksDatabaseAfterHostPicker(t *testing.T) {
 	shown := stubPickers(t, map[string]string{hostPrompt: "testpg", databasePrompt: "alpha"})
 
 	var errb strings.Builder
-	r, code := bootstrap(bootstrapFlags(cfg), &errb)
+	r, code := bootstrap(bootstrapFlags(cfg), "v1.2.3", &errb)
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb.String())
 	}
@@ -172,7 +172,7 @@ func TestBootstrapKeepsExplicitDatabase(t *testing.T) {
 	c := bootstrapFlags(cfg)
 	c.Database = "explicit"
 	var errb strings.Builder
-	r, code := bootstrap(c, &errb)
+	r, code := bootstrap(c, "v1.2.3", &errb)
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb.String())
 	}
@@ -195,7 +195,7 @@ func TestBootstrapKeepsConfiguredDatabase(t *testing.T) {
 	c := bootstrapFlags(cfg)
 	c.Host = "testpg"
 	var errb strings.Builder
-	r, code := bootstrap(c, &errb)
+	r, code := bootstrap(c, "v1.2.3", &errb)
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb.String())
 	}
@@ -218,7 +218,7 @@ func TestBootstrapPicksDatabaseWhenNoneResolved(t *testing.T) {
 	c := bootstrapFlags(cfg)
 	c.Host = "nodb"
 	var errb strings.Builder
-	r, code := bootstrap(c, &errb)
+	r, code := bootstrap(c, "v1.2.3", &errb)
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb.String())
 	}
@@ -239,7 +239,7 @@ func TestBootstrapDatabasePickerQuitAborts(t *testing.T) {
 	stubPickers(t, map[string]string{hostPrompt: "testpg", databasePrompt: ""})
 
 	var errb strings.Builder
-	r, code := bootstrap(bootstrapFlags(cfg), &errb)
+	r, code := bootstrap(bootstrapFlags(cfg), "v1.2.3", &errb)
 	if code != 0 {
 		t.Fatalf("code=%d, want 0", code)
 	}

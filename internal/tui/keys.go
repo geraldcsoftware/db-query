@@ -24,6 +24,17 @@ var (
 		{"^c", "cancel"},
 		{"Esc", "quit"},
 	}
+
+	// pickerHints is the startup picker's own footer. "type to filter" is the
+	// one line that has to be there: the filter has no visible input box until
+	// something is typed into it, so without the hint it is a feature nobody
+	// finds.
+	pickerHints = []hint{
+		{"↑/↓", "move"},
+		{"type", "filter"},
+		{"Enter", "select"},
+		{"Esc", "quit"},
+	}
 )
 
 // bottomBarHint renders the keybinding reference across the bar's full width,
