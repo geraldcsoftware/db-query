@@ -43,16 +43,53 @@ func bootstrap(c session.CommonFlags, version string, stderr io.Writer) (session
 	if hostPicked {
 		intro = hostChosenIntro(r.Host.Name)
 	}
-	p, err := runPicker(newDatabasePicker(names, r.Host.Database, r.Host.Name, nil, intro))
-	if err != nil {
-		fmt.Fprintln(stderr, "db-query: "+err.Error())
-		return session.Resolved{}, 1
+	return pickDatabase(r, c, names, intro, stderr)
+}
+
+// pickDatabase runs the database picker until it yields a database the session
+// can actually open, which means one with a cached schema behind it. Choosing a
+// database with no cache offers to build one; declining that offer, or failing
+// to build it, returns to the list rather than launching a session whose Schema
+// pane is a message about a command to run somewhere else.
+//
+// The loop is what enforces that rule. Quitting the picker outright still exits
+// 0 with nothing resolved: backing out is not a failure.
+func pickDatabase(r session.Resolved, c session.CommonFlags, names []string, intro []string, stderr io.Writer) (session.Resolved, int) {
+	for {
+		marks := schemaMarks(r.Host, names)
+		p, err := runPicker(newDatabasePicker(names, r.Host.Database, r.Host.Name, marks, intro))
+		if err != nil {
+			fmt.Fprintln(stderr, "db-query: "+err.Error())
+			return session.Resolved{}, 1
+		}
+		if p.chosen == "" {
+			return session.Resolved{}, 0 // user quit the picker; not an error, just nothing to do
+		}
+		if !needsIntrospect(r.Host, p.chosen) {
+			r.Host.Database = p.chosen
+			return r, 0
+		}
+
+		answer, err := runConfirm(newIntrospectConfirm(p.chosen, "choose another"))
+		if err != nil {
+			fmt.Fprintln(stderr, "db-query: "+err.Error())
+			return session.Resolved{}, 1
+		}
+		if !answer.yes {
+			continue
+		}
+
+		// Blocking here is deliberate and safe: the picker's program has
+		// exited, so there is no event loop to freeze, and this is the same
+		// foreground wait every other command's introspect already is.
+		fmt.Fprintln(stderr, introStyle.Render("introspecting "+p.chosen+"…"))
+		if err := introspect(r, p.chosen, c); err != nil {
+			fmt.Fprintln(stderr, "db-query: "+err.Error())
+			continue
+		}
+		r.Host.Database = p.chosen
+		return r, 0
 	}
-	if p.chosen == "" {
-		return session.Resolved{}, 0 // user quit the picker; not an error, just nothing to do
-	}
-	r.Host.Database = p.chosen
-	return r, 0
 }
 
 // pickHost prompts for one of the configured host names. An empty name
