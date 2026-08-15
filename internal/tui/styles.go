@@ -62,6 +62,22 @@ var (
 	connectionStyle = lipgloss.NewStyle().Foreground(colorMuted)
 	connectionSep   = lipgloss.NewStyle().Foreground(colorRule)
 
+	// The startup picker's own scale, from quietest to loudest: introStyle
+	// carries the explanation nobody needs to read twice, introLabelStyle and
+	// introValueStyle record a choice already made, and pickerHeadingStyle
+	// names the list that wants attention now. The explanation is deliberately
+	// the dimmest thing on screen — it is context, not an instruction to
+	// follow.
+	introStyle         = lipgloss.NewStyle().Foreground(colorMuted)
+	introLabelStyle    = lipgloss.NewStyle().Foreground(colorMuted)
+	introValueStyle    = lipgloss.NewStyle().Foreground(colorText)
+	pickerHeadingStyle = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+
+	// filterPromptStyle inverts its label so the filter reads as an input the
+	// keystrokes are going into, rather than as one more line of text.
+	filterPromptStyle = lipgloss.NewStyle().Foreground(colorSelFg).Background(colorMuted)
+	filterTextStyle   = lipgloss.NewStyle().Foreground(colorText)
+
 	// hintKeyStyle and hintDescStyle give the bottom bar its two-tone reading:
 	// the keystroke stands out in the accent colour, its effect stays in body
 	// text rather than dimming — the bar is meant to be read at a glance.

@@ -23,7 +23,7 @@ import (
 // the top bar; the caller supplies it because internal/cli, which owns the
 // build info, imports this package and so cannot be imported back.
 func Run(c session.CommonFlags, version string, stdout, stderr io.Writer) int {
-	r, code := bootstrap(c, stderr)
+	r, code := bootstrap(c, version, stderr)
 	if code != 0 {
 		return code
 	}
