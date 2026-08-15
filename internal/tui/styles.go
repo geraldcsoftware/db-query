@@ -17,6 +17,11 @@ var (
 	colorSelFg  = lipgloss.Color("#0B1220")
 	colorError  = lipgloss.Color("#F87171")
 	colorBusy   = lipgloss.Color("#FBBF24")
+
+	// colorPopupBg is the only filled background in the TUI. Everything else
+	// sits on whatever background the terminal already has, but a box floating
+	// over the panes has to be opaque or the text underneath shows through it.
+	colorPopupBg = lipgloss.Color("#111827")
 )
 
 // focusMarker sits in the first cell of the focused pane's label row. Focus is
@@ -84,6 +89,15 @@ var (
 	hintKeyStyle  = lipgloss.NewStyle().Foreground(colorAccent)
 	hintDescStyle = lipgloss.NewStyle().Foreground(colorText)
 	hintSepStyle  = lipgloss.NewStyle().Foreground(colorRule)
+
+	// switcherBoxStyle frames the database-switch popup. It is the one thing
+	// that paints a filled background over the panes: a floating box has to
+	// hide what it covers, or the text behind it reads through as noise.
+	switcherBoxStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorAccent).
+				Background(colorPopupBg).
+				Padding(0, 1)
 
 	// errorStyle marks a failed run's text so it cannot be mistaken for a
 	// result; runningStyle and statusStyle carry the bottom bar's transient

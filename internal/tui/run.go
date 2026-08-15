@@ -17,6 +17,12 @@ type queryResultMsg struct {
 	rows      adapter.Rows
 	schemaErr bool
 	err       error
+
+	// gen is the session generation the run was dispatched under. A database
+	// switch bumps the model's, so a result that outlives the database it was
+	// asked of arrives stamped with a generation that no longer matches and is
+	// discarded instead of being rendered as though it came from the new one.
+	gen int
 }
 
 // startRun begins a query run if none is already in flight (single-flight).
@@ -37,9 +43,10 @@ func (m *model) startRun(sql string) tea.Cmd {
 	m.results.clear()
 	run := m.runner
 	sess := m.session
+	gen := m.runGen
 	return func() tea.Msg {
 		rows, schemaErr, err := run(ctx, sess, sql)
-		return queryResultMsg{rows: rows, schemaErr: schemaErr, err: err}
+		return queryResultMsg{rows: rows, schemaErr: schemaErr, err: err, gen: gen}
 	}
 }
 
