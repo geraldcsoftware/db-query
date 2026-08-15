@@ -14,9 +14,13 @@ type hint struct{ key, desc string }
 // ways out. No command palette and no ? help overlay — both are explicitly out
 // of scope, even though the reference mockup shows them.
 var (
+	// Ordered by how much a user would miss it, because a narrow terminal drops
+	// them from the end. Paging is last: it is the one action whose absence
+	// from the bar costs least, since PgUp/PgDn is what a user tries anyway.
 	actionHints = []hint{
 		{"^h/j/k/l", "move"},
 		{"^/⌘Enter/F5", "run"},
+		{"F2", "switch db"},
 		{"Enter", "load/expand"},
 		{"PgUp/PgDn", "page"},
 	}
@@ -39,13 +43,26 @@ var (
 
 // bottomBarHint renders the keybinding reference across the bar's full width,
 // the exits pushed to the right edge where a user looks for them.
+//
+// A terminal too narrow for every hint drops them from the right of the action
+// group, which is ordered least-essential last. The exits are never dropped:
+// the bar being clipped is survivable, a user unable to see how to get out is
+// not. Without this the whole line was simply truncated, which took the exits
+// off screen first — they sit at the far right.
 func bottomBarHint(w int) string {
-	left, right := renderHints(actionHints), renderHints(exitHints)
-	gap := w - ansi.StringWidth(left) - ansi.StringWidth(right)
-	if gap < 1 {
-		gap = 1
+	right := renderHints(exitHints)
+	shown := actionHints
+	for {
+		left := renderHints(shown)
+		gap := w - ansi.StringWidth(left) - ansi.StringWidth(right)
+		if gap >= 1 {
+			return left + strings.Repeat(" ", gap) + right
+		}
+		if len(shown) == 0 {
+			return right
+		}
+		shown = shown[:len(shown)-1]
 	}
-	return left + strings.Repeat(" ", gap) + right
 }
 
 // renderHints joins one group into a single line, each keystroke in the accent

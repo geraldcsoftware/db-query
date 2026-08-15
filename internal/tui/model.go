@@ -66,6 +66,23 @@ type model struct {
 	// startRun and invoked by cancelRunning; nil whenever running is false.
 	cancel context.CancelFunc
 
+	// runGen identifies the session generation a dispatched run belongs to. A
+	// database switch bumps it, so a query still in flight against the database
+	// just left is disowned: its result carries the old generation and is
+	// dropped rather than rendered under a top bar naming the new one.
+	runGen int
+
+	// switcher is the database-switch popup; switcherOpen is whether it is
+	// showing. Together they make the UI modal — Update routes every key to the
+	// popup while it is open, and View draws it over the panes.
+	switcher     dbSwitcher
+	switcherOpen bool
+
+	// introspectCancel stops an in-session introspection. It is separate from
+	// cancel because a query may already have been running when the popup
+	// opened, and the two are cancelled by different keys at different times.
+	introspectCancel context.CancelFunc
+
 	// statusMsg is transient text shown in the status strip (e.g. a
 	// rejected single-flight attempt or a cancellation notice). statusGen
 	// increments on every new status message so a stale clearStatusMsg
@@ -200,10 +217,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Button != tea.MouseLeft {
 			return m, nil
 		}
+		// A click lands on the panes drawn behind the popup, not on the popup
+		// itself, so honouring it would move focus somewhere the user cannot
+		// see and cannot type into.
+		if m.switcherOpen {
+			return m, nil
+		}
 		m.setFocusAt(msg.X, msg.Y)
 		return m, nil
 
 	case tea.KeyPressMsg:
+		// The popup is modal: while it is open it is the only thing keys reach.
+		if m.switcherOpen {
+			return m.updateSwitcher(msg)
+		}
 		switch msg.String() {
 		case "esc":
 			return m, m.quit()
@@ -224,6 +251,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+j":
 			m.focusDown()
 			return m, nil
+		// F2 rather than a Ctrl chord: bubbles' textarea already binds ^d, ^b,
+		// ^n, ^p and most of the rest of the alphabet in the Query pane, and a
+		// session-level action should not be the one shortcut that stops
+		// working in one of the four panes. F2 needs no keyboard protocol
+		// negotiated and behaves identically on every platform, which is the
+		// same reasoning that makes F5 the dependable way to run (spec §7).
+		case "f2":
+			return m.openSwitcher()
 		case "pgup":
 			m.results.pageUp()
 			return m, nil
@@ -276,8 +311,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Bracketed paste is on by default and arrives as its own message
 		// rather than as a key press, so it needs routing by hand. The Query
 		// pane is the only pane that takes text, so a paste anywhere else is
-		// dropped rather than silently landing in the buffer.
-		if m.focus == paneQuery {
+		// dropped rather than silently landing in the buffer — including a
+		// paste made while the popup covers it.
+		if m.focus == paneQuery && !m.switcherOpen {
 			var cmd tea.Cmd
 			m.query, cmd = m.query.update(msg)
 			return m, cmd
@@ -285,6 +321,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case queryResultMsg:
+		// A run dispatched before a database switch is no longer this
+		// session's: dropping it is the whole point of the generation stamp.
+		// The cancel it was issued under was already invoked by applyDatabase.
+		if msg.gen != m.runGen {
+			return m, nil
+		}
 		m.running = false
 		// Invoking the CancelFunc, rather than only dropping it, releases the
 		// context.WithTimeout timer startRun armed; otherwise it stays alive
@@ -318,6 +360,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case databaseListMsg:
+		// The popup may have been dismissed while the listing ran; its result
+		// then has nowhere to go and no bearing on anything still on screen.
+		if !m.switcherOpen {
+			return m, nil
+		}
+		m.switcher.loading = false
+		if msg.err != nil {
+			// A failed refresh matters only when there was nothing cached to
+			// show in its place. With names already listed, the popup is
+			// usable and the failure is noise.
+			if len(m.switcher.names) == 0 {
+				m.switcher.err = msg.err.Error()
+			}
+			return m, nil
+		}
+		m.switcher.setNames(msg.names, m.session.Host)
+		return m, nil
+
+	case introspectDoneMsg:
+		if m.introspectCancel != nil {
+			m.introspectCancel()
+			m.introspectCancel = nil
+		}
+		if !m.switcherOpen {
+			return m, nil
+		}
+		if msg.err != nil {
+			// Failing, or being cancelled, means no switch: a database the
+			// session cannot browse is not one it may land on. Back to the
+			// list with the reason showing.
+			m.switcher.state = switcherChoosing
+			m.switcher.pending = ""
+			m.switcher.err = introspectFailure(msg.err)
+			m.switcher.marks = schemaMarks(m.session.Host, m.switcher.names)
+			return m, nil
+		}
+		return m.applyDatabase(msg.database)
+
 	case clearStatusMsg:
 		if msg.gen == m.statusGen {
 			m.statusMsg = ""
@@ -325,6 +406,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// introspectFailure phrases an abandoned introspection as the user's own doing
+// rather than as a fault, the same distinction the Results pane draws between a
+// cancelled query and a failed one.
+func introspectFailure(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "introspection cancelled — database not switched"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "introspection timed out — database not switched"
+	}
+	return err.Error()
 }
 
 // quit cancels any in-flight run before asking Bubble Tea to exit. The held
@@ -335,6 +429,12 @@ func (m *model) quit() tea.Cmd {
 	if m.cancel != nil {
 		m.cancel()
 		m.cancel = nil
+	}
+	// An introspection started from the switcher holds a child process of its
+	// own, and it outlives the UI just as readily as a slow query would.
+	if m.introspectCancel != nil {
+		m.introspectCancel()
+		m.introspectCancel = nil
 	}
 	return tea.Quit
 }
@@ -363,7 +463,11 @@ func (m model) View() tea.View {
 	for i, r := range rows {
 		rows[i] = strings.TrimRight(r, " ")
 	}
-	return screen(strings.Join(rows, "\n"))
+	content := strings.Join(rows, "\n")
+	if m.switcherOpen {
+		content = overlay(content, m.switcher.view(m.session.Host.Name, w), w, h)
+	}
+	return screen(content)
 }
 
 // bodyRows renders the rows between the two full-width rules: the sidebar
