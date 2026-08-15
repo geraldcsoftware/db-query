@@ -10,8 +10,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/dblist"
+	"github.com/geraldcsoftware/db-query/internal/schema"
 	"github.com/geraldcsoftware/db-query/internal/session"
 )
 
@@ -85,6 +87,36 @@ func stubPickers(t *testing.T, answers map[string]string) *[]picker {
 	return shown
 }
 
+// stubConfirms answers every introspect confirmation for one test, recording
+// how many were asked. A test that expects none prepares no stub and fails on
+// the real one, which cannot open a TTY.
+func stubConfirms(t *testing.T, yes bool) *int {
+	t.Helper()
+	asked := new(int)
+	saved := runConfirm
+	runConfirm = func(c confirm) (confirm, error) {
+		*asked++
+		c.yes = yes
+		return c, nil
+	}
+	t.Cleanup(func() { runConfirm = saved })
+	return asked
+}
+
+// seedSchema writes a minimal valid schema cache for host+database, so a test
+// exercising the selection flow is not diverted into the introspect gate.
+func seedSchema(t *testing.T, host, database string) {
+	t.Helper()
+	s := func(v string) *string { return &v }
+	rows := adapter.Rows{
+		Columns: []string{"table_schema", "table_name", "column_name", "data_type", "is_nullable"},
+		Rows:    [][]*string{{s("public"), s("widgets"), s("id"), s("integer"), s("NO")}},
+	}
+	if err := schema.Write(schema.CachePath(host, database), rows); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func prompts(shown []picker) []string {
 	out := make([]string, 0, len(shown))
 	for _, p := range shown {
@@ -144,6 +176,7 @@ func bootstrapFlags(cfg string) session.CommonFlags {
 func TestBootstrapPicksDatabaseAfterHostPicker(t *testing.T) {
 	cfg := bootstrapConfig(t)
 	listingPsql(t)
+	seedSchema(t, "localhost", "alpha")
 	shown := stubPickers(t, map[string]string{hostPrompt: "testpg", databasePrompt: "alpha"})
 
 	var errb strings.Builder
@@ -213,6 +246,7 @@ func TestBootstrapKeepsConfiguredDatabase(t *testing.T) {
 func TestBootstrapPicksDatabaseWhenNoneResolved(t *testing.T) {
 	cfg := bootstrapConfig(t)
 	listingPsql(t)
+	seedSchema(t, "localhost", "alpha")
 	shown := stubPickers(t, map[string]string{databasePrompt: "alpha"})
 
 	c := bootstrapFlags(cfg)
