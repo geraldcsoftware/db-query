@@ -810,3 +810,90 @@ The implementation lives in `internal/tui`, over an `internal/session` package
 holding the setup/run-once logic both it and `internal/cli` need. The import
 direction is `cli → tui → session`; `tui` never imports `cli`, which is what
 keeps that shared logic in `session` rather than duplicated.
+
+### 13.11 Database selection and in-session switching (amends §13.10)
+
+§13.10 specified a **name-only picker** and a session fixed to the database it
+started on. Both are amended here. The picker becomes an explained, filterable
+selection screen; the session gains a way to move between databases on its host;
+and a rule is added that governs both: **a session only ever lands on a database
+whose schema it has cached.**
+
+**The selection screen.** The picker printed a bare list under a one-line
+prompt, which left the two questions a first-time user actually has unanswered:
+what is asking, and why now. It now prints the build, which flags the invocation
+left unresolved, and that nothing is written back — then the list under a
+heading naming what it holds. The block prints once per flow: a second picker
+carries a one-line record of the host already chosen instead, because Bubble
+Tea's inline renderer leaves each finished picker on screen and repeating the
+explanation would read as a stutter.
+
+Selection itself gains a full-width accent bar on the current row, a cursor
+that **wraps** at both ends, and a case-insensitive **substring** filter that
+any printable key starts. Substring rather than fuzzy: for lists this size an
+unambiguous rule beats a clever one. Wrapping deliberately differs from the pane
+focus grid, which clamps — running off the bottom of a list means "back to the
+top", whereas an accidental extra `^h` should stay where it is.
+
+The list logic lives in a `chooser` widget shared with the switcher below, so
+the filter and its cursor arithmetic are defined once. The cursor indexes the
+**filtered** list, never the underlying slice; that is the off-by-one the shared
+widget exists to prevent.
+
+**The introspection rule.** Choosing a database the host has never introspected
+used to open a session whose Schema pane was a message telling the user to quit
+and run `db-query introspect` from a shell — a poor answer from a flow whose
+purpose is to hand back a working session. Databases with no cached schema are
+now marked in the list, so the cost of a choice is visible before it is made,
+and choosing one offers to build the cache.
+
+The offer is deliberately two-way: introspect and proceed, or go back. "Proceed
+without one" is not offered. Two outcomes are easier to reason about than three,
+and the invariant they buy is what the Schema pane, and the switcher, rest on. A
+failed or cancelled introspection is the same answer as declining: no switch.
+
+The rule binds the interactive paths only. Passing `--host` and `--database`
+explicitly still launches straight in, so the Schema pane's "no cached schema"
+hint stays reachable and §13.2's manual-refresh model is untouched.
+
+**Where the introspection runs.** At startup it runs in the foreground, between
+Bubble Tea programs: the picker has exited, so there is no event loop to freeze,
+and the wait is the same one `db-query introspect` already is. In-session it
+cannot be: blocking inside `Update` would stop the program repainting, resizing
+or handling `^c` for the duration. It is dispatched as a `tea.Cmd` instead, with
+the popup showing the wait, swallowing keys and offering `^c`. From the user's
+side it is the blocking operation they agreed to; from the program's side
+nothing is blocked. Both paths go through the TUI's own ctx-aware `execute`
+rather than `session.RunOnce`, which owns its context and cannot be cancelled
+from outside.
+
+**The switcher.** `F2` opens a popup listing the host's databases. It opens on
+the §13.9 completion cache and refreshes from the live listing behind itself:
+the listing is a subprocess against a possibly-distant host, and waiting for it
+before drawing anything would make the key feel broken. The refresh holds the
+cursor on the name it was on, and a listing failure is reported only when no
+cached names were there to stand in for it.
+
+`F2` rather than a `Ctrl` chord: bubbles' textarea binds `^d`, `^b`, `^n`, `^p`
+and most of the alphabet in the Query pane, and a session-level action should
+not be the one shortcut that stops working in one of the four panes. `⌘D` was
+considered and rejected — macOS terminals claim it by default (Terminal.app and
+iTerm2 both split the window), it does not exist off macOS, and it needs the
+Kitty protocol negotiated to arrive as a distinct key at all. That is the same
+reasoning §7 already applies to `F5`.
+
+**What a switch rebuilds.** The Schema pane, because its cache is keyed on
+host+database. The Results pane is cleared, because rows fetched from one
+database must never sit under a top bar naming another. The Query buffer
+survives: re-running the same statement elsewhere is the commonest reason to
+switch at all. Saved queries are not database-scoped and are left alone. The
+credential is **not** re-resolved — the host has not changed, so §13.10's
+resolve-once amendment continues to hold; switching *host* mid-session would
+break it and is out of scope.
+
+**Generation-stamped results.** A switch cancels any run in flight, but a cancel
+is a request, not an event: the result may already be in the channel. Query
+results therefore carry the session generation they were dispatched under, and a
+result whose generation no longer matches is discarded. Without it, rows fetched
+from the database just left would render into the pane of the one just arrived
+at — the failure mode that makes a switcher worse than no switcher.

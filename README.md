@@ -224,10 +224,36 @@ db-query --host prod-core     # skip the picker
 ```
 
 The host is resolved the usual way — `--host`, then `DB_QUERY_HOST`, then the
-config file. When that resolves nothing, a picker lists the configured hosts
-first. The credential is then resolved **once**, at startup, and reused for
-every query in the session, so a `bw:`/`bws:` vault unlock happens at most once
-per session rather than on every run.
+config file. When that resolves nothing, a selection screen lists the configured
+hosts first, then the chosen host's databases:
+
+```
+db-query 1.4.0
+No --host or --database was given, so there is no session to open yet.
+Choose below to start one. Nothing is written back to your config.
+
+Configured hosts                                                    5
+❯ prod-core
+  prod-eu
+  staging
+  analytics
+  localdev
+
+↑/↓ move · type filter · Enter select · Esc quit
+```
+
+Type to filter the list, arrows (or `Ctrl+p`/`Ctrl+n`) to move — the cursor
+wraps at both ends — and `Enter` to take the highlighted name. Choosing a name
+behaves exactly as if the matching flag had been passed; nothing is written back
+to your config or environment, and `Esc` exits 0 without opening anything.
+
+A database with no cached schema is marked `no schema` in the list, and choosing
+one offers to introspect it there and then. Declining returns you to the list:
+whatever the session opens on has a catalogue to browse.
+
+The credential is resolved **once**, at startup, and reused for every query in
+the session, so a `bw:`/`bws:` vault unlock happens at most once per session
+rather than on every run.
 
 Piped or redirected output is unaffected: the UI only opens when stdout is a
 terminal, so `db-query | cat` still prints usage and exits 1 exactly as before.
@@ -248,8 +274,11 @@ db-query 1.4.0                                                 orders ● postgr
  reports/people-by-name│
                        │
 ───────────────────────┴────────────────────────────────────────────────────────────────────
-^h/j/k/l move · ^Enter/F5 run · Enter load/expand · PgUp/PgDn page      ^c cancel · Esc quit
+^h/j/k/l move · ^/⌘Enter/F5 run · F2 switch db · Enter load/expand      ^c cancel · Esc quit
 ```
+
+The bottom bar drops hints from the right when the terminal is too narrow for
+all of them; the exits are never dropped.
 
 The pane the next keystroke reaches is marked `▌` beside its label and drawn in
 the accent colour. The number beside a table is how many columns it has; the row
@@ -258,7 +287,7 @@ a number are right-aligned and coloured.
 
 | Pane | What it holds |
 |------|---------------|
-| Schema | the host's **cached** catalogue (`db-query introspect` builds it; the UI never introspects on its own) |
+| Schema | the current database's **cached** catalogue (`db-query introspect` builds it; the UI introspects only when you ask it to, switching database) |
 | Query | an editable SQL buffer |
 | Saved | the saved-query store, `category/name` |
 | Results | the last run's rows as a table, or its error text |
@@ -267,10 +296,45 @@ a number are right-aligned and coloured.
 |-----|--------|
 | `Ctrl+h/j/k/l` | move focus between panes (also: click a pane) |
 | `Ctrl+Enter` or `F5` | run — the Query pane's SQL, or a `SELECT` preview of the Schema pane's selected table |
+| `F2` | switch the session to another database on this host |
 | `Enter` | Schema: expand/collapse a table · Saved: load the query into the Query pane |
 | `PgUp` / `PgDn` | page through the results |
 | `Ctrl+C` | cancel the running query, or quit when idle |
 | `Esc` | quit |
+
+### Switching database
+
+`F2` opens a picker over the panes, listing the databases on the current host:
+
+```
+              ╭──────────────────────────────────────────────╮
+              │ Switch database                              │
+              │ Host  prod-core                              │
+              │                                              │
+              │    orders                                    │
+              │  ❯ reporting                                 │
+              │    analytics_prod                  no schema │
+              │                                              │
+              │ ↑/↓ move · type filter · Enter switch · Esc … │
+              ╰──────────────────────────────────────────────╯
+```
+
+It opens immediately on the names cached by the last listing and refreshes from
+the live catalogue behind itself, so `F2` never waits on the network. It works
+from any pane, and while it is open it is the only thing keystrokes reach.
+
+Choosing a database marked `no schema` asks before introspecting it. That wait
+is cancellable with `Ctrl+C`, and cancelling or failing leaves the session where
+it was — as at startup, the session only lands on a database it can browse.
+
+A switch rebuilds the Schema pane for the new database and clears the Results
+pane, since those rows came from the old one. **Your SQL is kept**, so re-running
+the same statement against another database is `F2`, a name, `Enter`, `F5`. A
+query still running against the previous database is cancelled and its result
+discarded. Saved queries are not database-scoped and are unaffected.
+
+`F2` rather than a `Ctrl` chord because the Query pane's editor already binds
+most of them, and this is a session-level action that should work in every pane.
 
 Results are paged client-side over rows already fetched — your SQL is never
 rewritten with `LIMIT`/`OFFSET`. `DB_QUERY_TUI_PAGE_SIZE` sets the rows per page
