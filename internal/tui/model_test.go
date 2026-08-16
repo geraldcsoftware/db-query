@@ -18,7 +18,7 @@ func newTestModel(t *testing.T) model {
 	t.Helper()
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("DB_QUERY_QUERIES_DIR", t.TempDir())
-	m := newModel(session.Resolved{}, session.CommonFlags{}, "1.2.3", nil)
+	m := newModel(session.Resolved{}, session.CommonFlags{}, "1.2.3", nil, newTextareaEditor())
 	m.width, m.height = 100, 40 // a WindowSizeMsg would normally set these
 	m.recomputeLayout()
 	return m

@@ -6,16 +6,18 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// queryPane wraps bubbles/textarea: the editable SQL buffer. Plain Enter
-// inserts a newline (textarea's default); this pane does not intercept
-// Enter combinations — running the query belongs one level up in
-// model.Update, since it dispatches a tea.Cmd this pane has no business
-// owning.
-type queryPane struct {
+// textareaEditor is the fallback Query editor: a bubbles textarea, with no vim
+// mode, no highlighting and no completion. It is what db-query used before the
+// embedded editor existed and what it still uses wherever Neovim cannot run.
+//
+// Plain Enter inserts a newline, the textarea's own default; running the query
+// belongs one level up in model.Update, which dispatches a tea.Cmd this editor
+// has no business owning.
+type textareaEditor struct {
 	area textarea.Model
 }
 
-func newQueryPane() queryPane {
+func newTextareaEditor() *textareaEditor {
 	ta := textarea.New()
 	ta.Placeholder = "select ..."
 	ta.ShowLineNumbers = true
@@ -25,7 +27,7 @@ func newQueryPane() queryPane {
 	ta.Prompt = ""
 	ta.SetStyles(queryStyles())
 	ta.Focus()
-	return queryPane{area: ta}
+	return &textareaEditor{area: ta}
 }
 
 // queryStyles recolours the textarea into the pane palette: line numbers as
@@ -48,36 +50,47 @@ func queryStyles() textarea.Styles {
 	return s
 }
 
-func (q queryPane) update(msg tea.Msg) (queryPane, tea.Cmd) {
+// start takes no callback: everything the textarea does happens on the event
+// loop's own goroutine.
+func (q *textareaEditor) start(func(tea.Msg)) {}
+
+func (q *textareaEditor) update(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	q.area, cmd = q.area.Update(msg)
-	return q, cmd
+	return cmd
 }
 
-func (q queryPane) value() string { return q.area.Value() }
-
-// blurred returns a copy of the pane whose textarea shows no cursor, for
-// rendering while another pane holds focus. It is a display concern only:
-// which pane receives key messages is decided in model.Update.
-func (q queryPane) blurred() queryPane {
-	q.area.Blur()
-	return q
-}
+func (q *textareaEditor) value() string     { return q.area.Value() }
+func (q *textareaEditor) setValue(v string) { q.area.SetValue(v) }
 
 // setSize fits the textarea to the space the layout gives the Query pane.
 // Both dimensions are floored at 1 because a zero-sized textarea has no row
 // to draw its cursor on.
-func (q *queryPane) setSize(w, h int) {
-	if w < 1 {
-		w = 1
-	}
-	if h < 1 {
-		h = 1
-	}
-	q.area.SetWidth(w)
-	q.area.SetHeight(h)
+func (q *textareaEditor) setSize(w, h int) {
+	q.area.SetWidth(max(1, w))
+	q.area.SetHeight(max(1, h))
 }
 
-func (q *queryPane) setValue(v string) { q.area.SetValue(v) }
+// view draws the buffer. Blurring hides the cursor while another pane holds
+// focus, which is the only thing focus changes here.
+func (q *textareaEditor) view(focused bool) string {
+	if focused {
+		q.area.Focus()
+	} else {
+		q.area.Blur()
+	}
+	return q.area.View()
+}
 
-func (q queryPane) view() string { return q.area.View() }
+// meta is empty: a plain textarea has no mode and nothing else worth a summary.
+func (q *textareaEditor) meta() string { return "" }
+
+// cursor is nil because the textarea draws its own cursor into the content it
+// renders rather than asking the host to place the terminal's.
+func (q *textareaEditor) cursor(int, int) *tea.Cursor { return nil }
+
+// keepsTrailingCells is false: the textarea paints foregrounds only, so a
+// trailing run of spaces carries nothing and trimming it costs nothing.
+func (q *textareaEditor) keepsTrailingCells() bool { return false }
+
+func (q *textareaEditor) close() {}

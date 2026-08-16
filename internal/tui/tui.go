@@ -30,11 +30,32 @@ func Run(c session.CommonFlags, version string, stdout, stderr io.Writer) int {
 	if !shouldLaunch(r) {
 		return 0
 	}
-	m := newModel(r, c, version, stdout)
+	editor, notice := newQueryEditor()
+	defer editor.close()
+
+	m := newModel(r, c, version, stdout, editor)
+	if notice != "" {
+		m.statusMsg, m.statusGen = notice, m.statusGen+1
+	}
+
 	// The alternate screen and mouse reporting are declared by the model's
 	// View, not by program options, so the program itself takes none.
-	if _, err := tea.NewProgram(m).Run(); err != nil {
+	//
+	// The editor is given its way into the event loop between the program
+	// existing and it running: nothing can be sent into a program that has not
+	// been constructed, and the editor's own goroutines start on this call.
+	p := tea.NewProgram(m)
+	editor.start(p.Send)
+
+	final, err := p.Run()
+	if err != nil {
 		io.WriteString(stderr, "db-query: "+err.Error()+"\n")
+		return 1
+	}
+	// A pane whose editor died under it ends the program without the user
+	// asking, and the reason is only worth anything once the screen is back.
+	if fm, ok := final.(model); ok && fm.fatal != nil {
+		io.WriteString(stderr, "db-query: the embedded editor stopped: "+fm.fatal.Error()+"\n")
 		return 1
 	}
 	return 0
