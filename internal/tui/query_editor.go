@@ -40,6 +40,14 @@ type queryEditor interface {
 	// when it has nothing to say.
 	meta() string
 
+	// modal reports whether the editor has modes of its own, and so needs the
+	// keys the host would otherwise reserve for itself: Esc above all, which
+	// leaves a mode rather than the program, and PgUp and PgDown, which scroll
+	// the buffer. A plain editor has no use for any of them, and keeping them
+	// with the host is what makes the fallback exactly the pane db-query
+	// shipped before.
+	modal() bool
+
 	// cursor places the terminal's real cursor, given the screen coordinates of
 	// the editor's top-left cell. A nil return leaves the cursor alone, which is
 	// what an editor drawing its own cursor into its content wants.

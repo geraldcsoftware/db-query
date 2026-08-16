@@ -125,6 +125,11 @@ func (e *nvimEditor) meta() string {
 	return strings.ToUpper(mode)
 }
 
+// modal is true: Esc leaves a mode, Ctrl+C is normal mode's own interrupt, and
+// PgUp and PgDown scroll the buffer, so all four belong to Neovim rather than
+// to the host while this pane holds focus.
+func (e *nvimEditor) modal() bool { return true }
+
 func (e *nvimEditor) cursor(x0, y0 int) *tea.Cursor {
 	if e.grid.CursorHidden() {
 		return nil

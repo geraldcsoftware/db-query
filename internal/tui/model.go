@@ -200,6 +200,11 @@ func (m *model) focusDown() {
 	}
 }
 
+// modalQuery reports whether focus is on a Query pane whose editor has modes of
+// its own. It decides both which keys the host keeps and which hints the bottom
+// bar advertises, so the two can never disagree about what a key does.
+func (m model) modalQuery() bool { return m.focus == paneQuery && m.query.modal() }
+
 // schemaRunSQL returns the provider-native preview query for the Schema
 // pane's currently selected table, and whether one is selected.
 func (m model) schemaRunSQL() (string, bool) {
@@ -243,14 +248,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.switcherOpen {
 			return m.updateSwitcher(msg)
 		}
+		// The host takes the keys it reserves and forwards everything else to
+		// the focused pane; there is no route back, since an embedded editor
+		// reports no such thing as an unhandled key.
+		//
+		// Four of them are reserved only while the Query pane is not a modal
+		// editor. Esc leaves a mode there rather than the program, Ctrl+C is
+		// normal mode's own interrupt, and PgUp and PgDown scroll the buffer.
+		// F10 is the way out that works from every pane, that one included.
+		editing := m.modalQuery()
 		switch msg.String() {
-		case "esc":
+		case "f10":
 			return m, m.quit()
+		case "esc":
+			if !editing {
+				return m, m.quit()
+			}
 		case "ctrl+c":
+			// Cancelling a run outranks the editor: a query still in flight is
+			// the more urgent thing to stop, and Ctrl+C is where every terminal
+			// user reaches for it.
 			if m.running {
 				return m.cancelRunning()
 			}
-			return m, m.quit()
+			if !editing {
+				return m, m.quit()
+			}
 		case "ctrl+h":
 			m.focusLeft()
 			return m, nil
@@ -263,20 +286,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+j":
 			m.focusDown()
 			return m, nil
-		// F2 rather than a Ctrl chord: bubbles' textarea already binds ^d, ^b,
-		// ^n, ^p and most of the rest of the alphabet in the Query pane, and a
-		// session-level action should not be the one shortcut that stops
+		// F2 rather than a Ctrl chord: whichever editor holds the Query pane
+		// already binds ^d, ^b, ^n, ^p and most of the rest of the alphabet,
+		// and a session-level action should not be the one shortcut that stops
 		// working in one of the four panes. F2 needs no keyboard protocol
 		// negotiated and behaves identically on every platform, which is the
 		// same reasoning that makes F5 the dependable way to run (spec §7).
 		case "f2":
 			return m.openSwitcher()
 		case "pgup":
-			m.results.pageUp()
-			return m, nil
+			if !editing {
+				m.results.pageUp()
+				return m, nil
+			}
 		case "pgdown":
-			m.results.pageDown()
-			return m, nil
+			if !editing {
+				m.results.pageDown()
+				return m, nil
+			}
 		// One action, deliberately reachable several ways, because which of them
 		// a terminal can actually deliver varies. A terminal's legacy key
 		// encoding sends CR for plain Enter and for Ctrl+Enter alike, so the
@@ -677,6 +704,6 @@ func (m model) bottomBar(w int) string {
 		return runningStyle.Render("running…") + hintSepStyle.Render(" · ") +
 			hintKeyStyle.Render("^c") + " " + hintDescStyle.Render("cancel")
 	default:
-		return bottomBarHint(w)
+		return bottomBarHint(w, m.modalQuery())
 	}
 }

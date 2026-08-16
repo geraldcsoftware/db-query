@@ -177,6 +177,40 @@ func TestLivePanePaintsTheBufferItIsTyped(t *testing.T) {
 	}
 }
 
+// TestLivePaneTakesEscRatherThanQuitting is decision 8 against the real editor,
+// which is the only thing that can show Esc doing its actual job. The stubbed
+// routing tests prove the host lets it through; this proves what it does when
+// it lands.
+func TestLivePaneTakesEscRatherThanQuitting(t *testing.T) {
+	p := newLivePane(t)
+
+	p.send(tea.KeyPressMsg{Code: 'i', Text: "i"})
+	p.settle()
+	p.mu.Lock()
+	inInsert := p.m.query.meta()
+	p.mu.Unlock()
+	if inInsert != "INSERT" {
+		t.Fatalf("mode = %q after i, want INSERT", inInsert)
+	}
+
+	p.mu.Lock()
+	next, cmd := p.m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	p.m = next.(model)
+	p.mu.Unlock()
+	if cmd != nil {
+		if _, quit := cmd().(tea.QuitMsg); quit {
+			t.Fatal("Esc quit the program instead of reaching the editor")
+		}
+	}
+	p.settle()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if got := p.m.query.meta(); got != "NORMAL" {
+		t.Fatalf("mode = %q after Esc, want NORMAL", got)
+	}
+}
+
 // TestLivePanePaintsTheCompletionPopup is the renderer's hardest case, and the
 // reason nothing is externalised beyond ext_linegrid: Neovim composites the
 // popup into the same grid as the text, so it reaches the host as ordinary

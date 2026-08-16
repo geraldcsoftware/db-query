@@ -85,6 +85,10 @@ func (q *textareaEditor) view(focused bool) string {
 // meta is empty: a plain textarea has no mode and nothing else worth a summary.
 func (q *textareaEditor) meta() string { return "" }
 
+// modal is false: the textarea has no modes, so Esc, Ctrl+C, PgUp and PgDown
+// all keep the meanings the rest of the TUI gives them.
+func (q *textareaEditor) modal() bool { return false }
+
 // cursor is nil because the textarea draws its own cursor into the content it
 // renders rather than asking the host to place the terminal's.
 func (q *textareaEditor) cursor(int, int) *tea.Cursor { return nil }
