@@ -216,11 +216,9 @@ func TestLivePaneTakesEscRatherThanQuitting(t *testing.T) {
 // popup into the same grid as the text, so it reaches the host as ordinary
 // cells it already knows how to paint.
 //
-// It pins the rule that decides whether a candidate is ever seen at all.
-// Neovim filters what a source returns against the text already typed, and does
-// so case sensitively — 'ignorecase' does not relax it — so a candidate that
-// does not literally begin with the typed characters is dropped before the
-// popup is drawn.
+// It also pins the case a keyword is offered in: the characters already typed
+// stand as typed, and the rest follows them, so a lower-case prefix completes
+// to a lower-case keyword and an upper-case one to upper case.
 func TestLivePanePaintsTheCompletionPopup(t *testing.T) {
 	p := newLivePane(t)
 
@@ -235,6 +233,32 @@ func TestLivePanePaintsTheCompletionPopup(t *testing.T) {
 		if !strings.Contains(frame, c.typed) {
 			t.Errorf("the buffer lost the typed text %q:\n%s", c.typed, frame)
 		}
+	}
+}
+
+// TestLivePaneCompletesFromTheCatalogue drives the whole completion path with a
+// real catalogue behind it: keys reach Neovim, Neovim asks the Go handler what
+// to offer, the handler resolves the alias against the buffer, and the answer
+// comes back as popup cells the host paints.
+//
+// The prefix is deliberately lower case against a PascalCase column, which is
+// the case 'completeopt' fuzzy exists here to serve: without it Neovim would
+// drop the candidate before drawing anything, and the column would have to be
+// offered under a name the database does not have.
+func TestLivePaneCompletesFromTheCatalogue(t *testing.T) {
+	p := newLivePane(t)
+	p.mu.Lock()
+	p.m.query.setSchema(testCatalogue())
+	p.mu.Unlock()
+
+	p.input("ifrom dbo.Cardholder ch<CR>select ch.card")
+	frame := p.waitForFrame("CardholderId m int")
+	t.Logf("popup offered the column with its type:\n%s",
+		strings.Join(strings.Split(frame, "\n")[:4], "\n"))
+
+	// The alias resolves to one table, so nothing else may be on offer.
+	if strings.Contains(frame, "customer_id") {
+		t.Errorf("a column of another table came back behind the alias:\n%s", frame)
 	}
 }
 

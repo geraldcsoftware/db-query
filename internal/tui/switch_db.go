@@ -241,6 +241,11 @@ func (m model) applyDatabase(database string) (tea.Model, tea.Cmd) {
 	m.session.Host.Database = database
 	m.schema = newSchemaPane(m.session.Host)
 	m.schema.setSize(contentRows(m.rects[paneSchema]))
+	// Completion follows the Schema pane, or it would go on offering the
+	// columns of a database this session has left. The editor's handler reads
+	// the catalogue on a goroutine of its own, which is why handing it over is
+	// a call rather than an assignment.
+	m.query.setSchema(m.schema.tables)
 	m.results.clear()
 
 	m = m.closeSwitcher()

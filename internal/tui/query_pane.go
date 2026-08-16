@@ -4,6 +4,8 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/geraldcsoftware/db-query/internal/schema"
 )
 
 // textareaEditor is the fallback Query editor: a bubbles textarea, with no vim
@@ -98,3 +100,6 @@ func (q *textareaEditor) cursor(int, int) *tea.Cursor { return nil }
 func (q *textareaEditor) keepsTrailingCells() bool { return false }
 
 func (q *textareaEditor) close() {}
+
+// setSchema is ignored: the textarea has no completion for a catalogue to feed.
+func (q *textareaEditor) setSchema([]schema.Table) {}
