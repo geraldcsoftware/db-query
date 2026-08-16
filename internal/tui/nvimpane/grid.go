@@ -3,6 +3,8 @@ package nvimpane
 import (
 	"image/color"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 )
@@ -201,12 +203,12 @@ func (g *Grid) gridLine(a []any) {
 			repeat = intOf(c[2])
 		}
 		for i := 0; i < repeat && col < g.w; i++ {
-			// Neovim sends "" for the right half of a double-width grapheme. The
-			// left half already claims both columns, so the continuation is
-			// skipped rather than painted as a blank over it.
-			if text != "" {
-				g.cells[row*g.w+col] = cell{text: text, hl: hl}
-			}
+			// An empty text is the right half of a double-width grapheme, whose
+			// left half already claims both columns. It is stored as it arrives:
+			// the renderer needs to know the column is a continuation, and
+			// leaving whatever was there before would let a character from the
+			// last frame surface out from under a wide one.
+			g.cells[row*g.w+col] = cell{text: text, hl: hl}
 			col++
 		}
 	}
@@ -290,7 +292,11 @@ func (g *Grid) modeInfoSet(a []any) {
 		if s, ok := m["cursor_shape"].(string); ok {
 			mi.shape = s
 		}
-		mi.blinkWait, mi.blinkOn, mi.blinkOff = intOf(m["blinkwait"]), intOf(m["blinkon"]), intOf(m["blinkoff"])
+		// A mode that names no blink timings does not blink, so an absent field
+		// is zero rather than intOf's "not an integer".
+		mi.blinkWait, _ = toInt(m["blinkwait"])
+		mi.blinkOn, _ = toInt(m["blinkon"])
+		mi.blinkOff, _ = toInt(m["blinkoff"])
 		g.modes = append(g.modes, mi)
 	}
 }
@@ -364,9 +370,15 @@ func (g *Grid) Render() string {
 			scratch.Style = g.styles[0]
 			if y < g.h && x < g.w {
 				c := g.cells[y*g.w+x]
-				if c.text != "" {
-					scratch.Content = c.text
+				// The right half of a double-width grapheme is left alone. Its
+				// left half was painted with a width of two, which already
+				// claimed this column and marked it; painting over it would
+				// split the character across two cells.
+				if c.text == "" {
+					continue
 				}
+				scratch.Content = c.text
+				scratch.Width = max(1, ansi.StringWidth(c.text))
 				scratch.Style = g.styles[c.hl]
 			}
 			g.canvas.SetCell(x, y, &scratch)

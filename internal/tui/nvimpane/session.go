@@ -260,14 +260,22 @@ func (s *Session) stop() error {
 	return s.nv.Close()
 }
 
-// apiVersion reads the version out of nvim_get_api_info's metadata. The plain
-// major/minor/patch integers are what the gate compares; the prerelease and
-// build fields alongside them describe a build, not an API level.
+// apiVersion asks Neovim for its API metadata and reads the version out of it.
 func apiVersion(nv *nvim.Nvim) ([3]int, error) {
 	info, err := nv.APIInfo()
 	if err != nil {
 		return [3]int{}, err
 	}
+	return versionOf(info)
+}
+
+// versionOf digs the version out of nvim_get_api_info's reply. The plain
+// major/minor/patch integers are what the gate compares; the prerelease and
+// build fields alongside them describe a build, not an API level. Every shape
+// that is not those three integers is an error rather than a zero version, so a
+// reply this does not understand falls back to the textarea instead of being
+// read as an ancient Neovim.
+func versionOf(info []any) ([3]int, error) {
 	if len(info) < 2 {
 		return [3]int{}, errors.New("api info too short")
 	}
