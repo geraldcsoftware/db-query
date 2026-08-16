@@ -34,7 +34,7 @@ func TestModelRoutesInputOnlyToFocusedQueryPane(t *testing.T) {
 	m := newTestModel(t)
 	m.focus = paneSchema // not the query pane
 	updated, _ := m.Update(runeKey('x'))
-	if updated.(model).query.value() != "" {
+	if queryText(updated.(model)) != "" {
 		t.Fatal("query pane must not receive input while unfocused")
 	}
 
@@ -43,8 +43,8 @@ func TestModelRoutesInputOnlyToFocusedQueryPane(t *testing.T) {
 	for _, r := range "select 1" {
 		updated, _ = updated.Update(runeKey(r))
 	}
-	if updated.(model).query.value() != "select 1" {
-		t.Fatalf("value = %q, want select 1", updated.(model).query.value())
+	if queryText(updated.(model)) != "select 1" {
+		t.Fatalf("value = %q, want select 1", queryText(updated.(model)))
 	}
 }
 
@@ -55,13 +55,13 @@ func TestPasteReachesTheFocusedQueryPane(t *testing.T) {
 	m := newTestModel(t)
 	m.focus = paneSchema
 	updated, _ := m.Update(tea.PasteMsg{Content: "select * from orders"})
-	if got := updated.(model).query.value(); got != "" {
+	if got := queryText(updated.(model)); got != "" {
 		t.Fatalf("query pane = %q, want nothing pasted while unfocused", got)
 	}
 
 	m.focus = paneQuery
 	updated, _ = m.Update(tea.PasteMsg{Content: "select * from orders"})
-	if got := updated.(model).query.value(); got != "select * from orders" {
+	if got := queryText(updated.(model)); got != "select * from orders" {
 		t.Fatalf("query pane = %q, want the pasted text", got)
 	}
 }

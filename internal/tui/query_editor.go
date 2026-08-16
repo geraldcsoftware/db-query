@@ -30,7 +30,12 @@ type queryEditor interface {
 	setSize(w, h int)
 
 	setValue(v string)
-	value() string
+
+	// runText asks the editor for the SQL a run should execute: the visual
+	// selection where one is live, otherwise the whole buffer. The answer
+	// arrives as a queryTextMsg, because an editor that has to ask another
+	// process cannot answer on the event loop's own goroutine.
+	runText() tea.Cmd
 
 	// setSchema hands the editor the catalogue completion should offer. It is
 	// called at startup and again whenever a database switch rebuilds it; an

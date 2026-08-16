@@ -48,25 +48,41 @@ func TestRunQueryFromSchemaBuildsPreviewSQL(t *testing.T) {
 	}
 }
 
+// TestEveryRunKeyTriggersQueryPaneRun: a run key asks the editor what to run
+// and the run begins when the answer arrives, since an editor that has to ask
+// another process cannot answer on the event loop's own goroutine.
 func TestEveryRunKeyTriggersQueryPaneRun(t *testing.T) {
-	m := newTestModel(t)
-	m.focus = paneQuery
-	m.query.setValue("select 1")
 	r := &controlledRunner{release: make(chan struct{})}
 	defer close(r.release)
-	m.runner = r.run
 
 	for _, msg := range []tea.KeyPressMsg{f5Msg(), ctrlEnterMsg(), cmdEnterMsg()} {
-		mm := newTestModel(t)
-		mm.focus = paneQuery
-		mm.query.setValue("select 1")
-		mm.runner = r.run
-		updated, cmd := mm.Update(msg)
-		if !updated.(model).running {
-			t.Fatalf("%v did not start a run", msg)
+		m := newTestModel(t)
+		m.focus = paneQuery
+		m.query.setValue("select 1")
+		m.runner = r.run
+
+		asked, cmd := m.Update(msg)
+		if cmd == nil {
+			t.Fatalf("%v did not ask the editor what to run", msg)
+		}
+		if asked.(model).running {
+			t.Fatalf("%v started a run before the editor had answered", msg)
+		}
+
+		answer, ok := cmd().(queryTextMsg)
+		if !ok {
+			t.Fatalf("%v answered with something other than the query text", msg)
+		}
+		if answer.sql != "select 1" {
+			t.Fatalf("%v read %q from the buffer", msg, answer.sql)
+		}
+
+		running, cmd := asked.Update(answer)
+		if !running.(model).running {
+			t.Fatalf("%v did not start a run once the text arrived", msg)
 		}
 		if cmd == nil {
-			t.Fatalf("%v produced no command", msg)
+			t.Fatalf("%v produced no run command", msg)
 		}
 	}
 }

@@ -65,6 +65,13 @@ func (q *textareaEditor) update(msg tea.Msg) tea.Cmd {
 func (q *textareaEditor) value() string     { return q.area.Value() }
 func (q *textareaEditor) setValue(v string) { q.area.SetValue(v) }
 
+// runText answers with the whole buffer, immediately. The textarea has no
+// visual mode to select part of it with, and no other process to ask.
+func (q *textareaEditor) runText() tea.Cmd {
+	sql := q.area.Value()
+	return func() tea.Msg { return queryTextMsg{sql: sql} }
+}
+
 // setSize fits the textarea to the space the layout gives the Query pane.
 // Both dimensions are floored at 1 because a zero-sized textarea has no row
 // to draw its cursor on.
