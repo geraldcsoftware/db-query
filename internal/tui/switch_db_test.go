@@ -294,18 +294,28 @@ func TestSwitcherViewShowsItsStates(t *testing.T) {
 }
 
 // TestBottomBarKeepsTheExitsWhenItCannotFitEverything: the bar is clipped from
-// the right, which is exactly where the exits sit.
+// the right, which is exactly where the exits sit. Both hint sets are clipped
+// the same way, and each has to keep its own way out.
 func TestBottomBarKeepsTheExitsWhenItCannotFitEverything(t *testing.T) {
-	for _, w := range []int{120, 90, 60, 40} {
-		out := ansi.Strip(bottomBarHint(w))
-		if !strings.Contains(out, "Esc") || !strings.Contains(out, "quit") {
-			t.Fatalf("width %d dropped the way out: %q", w, out)
+	for _, tc := range []struct {
+		modal bool
+		exit  string
+	}{
+		{false, "Esc"},
+		{true, "F10"},
+	} {
+		for _, w := range []int{120, 90, 60, 40} {
+			bar := bottomBarHint(w, tc.modal)
+			out := ansi.Strip(bar)
+			if !strings.Contains(out, tc.exit) || !strings.Contains(out, "quit") {
+				t.Fatalf("modal=%v width %d dropped the way out: %q", tc.modal, w, out)
+			}
+			if ansi.StringWidth(bar) > w {
+				t.Fatalf("modal=%v width %d: bar is %d cells wide", tc.modal, w, ansi.StringWidth(bar))
+			}
 		}
-		if ansi.StringWidth(bottomBarHint(w)) > w {
-			t.Fatalf("width %d: bar is %d cells wide", w, ansi.StringWidth(bottomBarHint(w)))
+		if !strings.Contains(ansi.Strip(bottomBarHint(120, tc.modal)), "F2") {
+			t.Fatalf("modal=%v: a wide bar should still advertise the switch key", tc.modal)
 		}
-	}
-	if !strings.Contains(ansi.Strip(bottomBarHint(120)), "F2") {
-		t.Fatal("a wide bar should still advertise the switch key")
 	}
 }
