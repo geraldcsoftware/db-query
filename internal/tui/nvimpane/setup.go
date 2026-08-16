@@ -48,9 +48,16 @@ vim.opt.shortmess:append('I')
 
 -- Completion triggers as the user types, from a function source, which is
 -- Neovim's own mechanism rather than a plugin or a hand-rolled autocommand
--- pair. noselect leaves the first candidate uninserted, so typing on past the
--- popup writes what was typed.
-vim.o.completeopt  = 'menu,popup,noselect'
+-- pair.
+--
+-- Only fuzzy, longest, popup, preinsert and preview do anything while
+-- 'autocomplete' is on; menu, menuone and noselect are ignored there, noselect
+-- being applied automatically. So the list is exactly two flags. popup shows a
+-- candidate's detail beside the menu, and fuzzy is what lets a lower-case
+-- prefix reach a PascalCase column: without it Neovim drops every candidate
+-- that does not literally begin with the characters typed, and 'ignorecase'
+-- does not relax that.
+vim.o.completeopt  = 'popup,fuzzy'
 vim.bo.complete    = 'F'
 vim.o.autocomplete = true
 

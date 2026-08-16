@@ -3,6 +3,7 @@ package tui
 import (
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/geraldcsoftware/db-query/internal/schema"
 	"github.com/geraldcsoftware/db-query/internal/tui/nvimpane"
 )
 
@@ -30,6 +31,11 @@ type queryEditor interface {
 
 	setValue(v string)
 	value() string
+
+	// setSchema hands the editor the catalogue completion should offer. It is
+	// called at startup and again whenever a database switch rebuilds it; an
+	// editor without completion ignores it.
+	setSchema(tables []schema.Table)
 
 	// view renders the editor's content, one line per row of the size it was
 	// last given. focused is a display concern only: which pane receives key

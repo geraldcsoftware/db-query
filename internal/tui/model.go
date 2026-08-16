@@ -110,6 +110,9 @@ func newModel(r session.Resolved, c session.CommonFlags, version string, stdout 
 	// textarea are already consistent with the first frame, which may render
 	// before the initial tea.WindowSizeMsg arrives.
 	m.recomputeLayout()
+	// The Schema pane has already read the cache, so completion is served from
+	// the catalogue it holds rather than reading the same file a second time.
+	m.query.setSchema(m.schema.tables)
 	return m
 }
 

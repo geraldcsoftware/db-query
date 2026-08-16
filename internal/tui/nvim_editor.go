@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/neovim/go-client/nvim"
 
+	"github.com/geraldcsoftware/db-query/internal/schema"
 	"github.com/geraldcsoftware/db-query/internal/tui/nvimpane"
 )
 
@@ -25,6 +26,11 @@ type nvimEditor struct {
 	sess *nvimpane.Session
 	grid *nvimpane.Grid
 
+	// completions is what completion offers. The editor holds it so the model
+	// can hand over a new catalogue on a database switch without the seam
+	// carrying anything about schemas.
+	completions *schemaSource
+
 	// frame is the last painted grid, rebuilt only when a batch ends in a flush
 	// or the pane is resized. Neovim sends a batch in pieces, so painting before
 	// the flush that closes it would show a half-drawn screen.
@@ -37,14 +43,15 @@ type nvimEditor struct {
 func newNvimEditor() (*nvimEditor, error) {
 	const cols, rows = 80, 24 // corrected by the first setSize, which follows at once
 
+	completions := newSchemaSource()
 	sess, err := nvimpane.Start(nvimpane.Options{
 		Cols: cols, Rows: rows,
-		Candidates: sqlKeywords{},
+		Candidates: completions,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &nvimEditor{sess: sess, grid: nvimpane.NewGrid(cols, rows)}, nil
+	return &nvimEditor{sess: sess, grid: nvimpane.NewGrid(cols, rows), completions: completions}, nil
 }
 
 // start hands the redraw stream and the end-of-session signal to goroutines of
@@ -125,6 +132,8 @@ func (e *nvimEditor) meta() string {
 	return strings.ToUpper(mode)
 }
 
+func (e *nvimEditor) setSchema(tables []schema.Table) { e.completions.setTables(tables) }
+
 // modal is true: Esc leaves a mode, Ctrl+C is normal mode's own interrupt, and
 // PgUp and PgDown scroll the buffer, so all four belong to Neovim rather than
 // to the host while this pane holds focus.
@@ -156,50 +165,4 @@ func cursorShape(name string) tea.CursorShape {
 		return tea.CursorBar
 	}
 	return tea.CursorBlock
-}
-
-// sqlKeywords completes SQL's own vocabulary. It is the candidate source that
-// needs nothing from the connection, so it is what the pane offers while no
-// schema-aware source is wired in.
-type sqlKeywords struct{}
-
-var sqlKeywordList = []string{
-	"AND", "AS", "ASC", "BETWEEN", "BY", "CASE", "COUNT", "CREATE", "DELETE",
-	"DESC", "DISTINCT", "ELSE", "END", "EXISTS", "FROM", "FULL", "GROUP",
-	"HAVING", "ILIKE", "IN", "INNER", "INSERT", "INTO", "IS", "JOIN", "LEFT",
-	"LIKE", "LIMIT", "NOT", "NULL", "OFFSET", "ON", "OR", "ORDER", "OUTER",
-	"RETURNING", "RIGHT", "SELECT", "SET", "SUM", "THEN", "UNION", "UPDATE",
-	"VALUES", "WHEN", "WHERE", "WITH",
-}
-
-// Candidates offers nothing behind a qualifier: a keyword never follows a dot,
-// and what does — a table's columns — needs a schema this source does not have.
-func (sqlKeywords) Candidates(qualifier, prefix string, _ []string) []map[string]any {
-	out := []map[string]any{}
-	if qualifier != "" {
-		return out
-	}
-	for _, k := range sqlKeywordList {
-		if len(prefix) > len(k) || !strings.EqualFold(k[:len(prefix)], prefix) {
-			continue
-		}
-		out = append(out, map[string]any{"word": keywordInTypedCase(prefix, k), "kind": "v", "menu": "keyword"})
-	}
-	return out
-}
-
-// keywordInTypedCase builds the word a keyword is offered as.
-//
-// Neovim filters what a completion source returns against the text already
-// typed, and does so case sensitively: a candidate that does not literally
-// begin with the typed characters is dropped before the popup is drawn, and
-// 'ignorecase' does not relax it. So the typed characters are kept exactly as
-// typed and only the rest is supplied — in upper case, which is the case
-// db-query writes its own generated SQL in, unless the prefix says otherwise.
-func keywordInTypedCase(prefix, keyword string) string {
-	rest := keyword[len(prefix):]
-	if prefix != strings.ToUpper(prefix) {
-		rest = strings.ToLower(rest)
-	}
-	return prefix + rest
 }
