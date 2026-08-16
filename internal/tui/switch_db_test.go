@@ -20,7 +20,7 @@ func switcherModel(t *testing.T, names ...string) model {
 	// so a seed from another test — or the developer's own cache — must not be
 	// visible here.
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	m := newModel(testResolved(t), bootstrapFlags(""), "v1", nil)
+	m := newModel(testResolved(t), bootstrapFlags(""), "v1", nil, newTextareaEditor())
 	m.width, m.height = 100, 30
 	m.recomputeLayout()
 	m.switcherOpen = true
@@ -45,7 +45,7 @@ func pressCode(m model, code rune) (model, tea.Cmd) {
 func TestF2OpensTheSwitcher(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	for _, focus := range []pane{paneSchema, paneSaved, paneQuery, paneResults} {
-		m := newModel(testResolved(t), bootstrapFlags(""), "v1", nil)
+		m := newModel(testResolved(t), bootstrapFlags(""), "v1", nil, newTextareaEditor())
 		m.focus = focus
 		next, cmd := pressCode(m, tea.KeyF2)
 		if !next.switcherOpen {

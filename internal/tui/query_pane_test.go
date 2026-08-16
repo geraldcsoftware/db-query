@@ -6,24 +6,24 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// typeInto feeds s to the pane the way a terminal reports typing it: one key
+// typeInto feeds s to the editor the way a terminal reports typing it: one key
 // press per character.
-func typeInto(q queryPane, s string) queryPane {
+func typeInto(q *textareaEditor, s string) *textareaEditor {
 	for _, r := range s {
-		q, _ = q.update(runeKey(r))
+		q.update(runeKey(r))
 	}
 	return q
 }
 
 func TestQueryPaneAcceptsInputWhenFocused(t *testing.T) {
-	q := typeInto(newQueryPane(), "select 1")
+	q := typeInto(newTextareaEditor(), "select 1")
 	if q.value() != "select 1" {
 		t.Fatalf("value = %q, want %q", q.value(), "select 1")
 	}
 }
 
 func TestQueryPaneSetValueReplacesContent(t *testing.T) {
-	q := typeInto(newQueryPane(), "old")
+	q := typeInto(newTextareaEditor(), "old")
 	q.setValue("select * from orders")
 	if q.value() != "select * from orders" {
 		t.Fatalf("value = %q, want the replaced text", q.value())

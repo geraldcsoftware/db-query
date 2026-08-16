@@ -44,8 +44,9 @@ type model struct {
 	width  int
 	height int
 
-	// query is the Query pane's editable SQL buffer.
-	query queryPane
+	// query is the Query pane's editable SQL buffer: an embedded Neovim, or the
+	// textarea it falls back to.
+	query queryEditor
 
 	// schema is the Schema pane's cached table/column browser.
 	schema schemaPane
@@ -97,10 +98,14 @@ type model struct {
 	// rects holds each pane's on-screen bounding box, set by
 	// recomputeLayout. Used only by setFocusAt's hit-testing.
 	rects map[pane]rect
+
+	// fatal is the failure that ended the program rather than the user asking
+	// it to. Run reports it on stderr after the screen is given back.
+	fatal error
 }
 
-func newModel(r session.Resolved, c session.CommonFlags, version string, stdout io.Writer) model {
-	m := model{session: r, flags: c, version: version, stdout: stdout, focus: paneSchema, query: newQueryPane(), schema: newSchemaPane(r.Host), saved: newSavedPane(), runner: execute, results: resultsPane{}}
+func newModel(r session.Resolved, c session.CommonFlags, version string, stdout io.Writer, editor queryEditor) model {
+	m := model{session: r, flags: c, version: version, stdout: stdout, focus: paneSchema, query: editor, schema: newSchemaPane(r.Host), saved: newSavedPane(), runner: execute, results: resultsPane{}}
 	// Lay out against viewSize's fallback dimensions so rects and the
 	// textarea are already consistent with the first frame, which may render
 	// before the initial tea.WindowSizeMsg arrives.
@@ -108,7 +113,14 @@ func newModel(r session.Resolved, c session.CommonFlags, version string, stdout 
 	return m
 }
 
-func (m model) Init() tea.Cmd { return nil }
+// Init arms the timer that clears a startup notice, if bootstrap left one in
+// the status strip. Nothing else needs doing before the first frame.
+func (m model) Init() tea.Cmd {
+	if m.statusMsg == "" {
+		return nil
+	}
+	return clearStatusAfter(m.statusGen)
+}
 
 // viewSize is the terminal size to lay out against: the dimensions from the
 // last tea.WindowSizeMsg, falling back to a conservative 80x24 before the
@@ -285,9 +297,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.focus == paneQuery {
-			var cmd tea.Cmd
-			m.query, cmd = m.query.update(msg)
-			return m, cmd
+			return m, m.query.update(msg)
 		}
 		if m.focus == paneSchema {
 			var cmd tea.Cmd
@@ -314,11 +324,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// dropped rather than silently landing in the buffer — including a
 		// paste made while the popup covers it.
 		if m.focus == paneQuery && !m.switcherOpen {
-			var cmd tea.Cmd
-			m.query, cmd = m.query.update(msg)
-			return m, cmd
+			return m, m.query.update(msg)
 		}
 		return m, nil
+
+	case nvimRedrawMsg:
+		// The pane's own screen, folded in on the event loop's goroutine so it
+		// cannot race a key press or a resize already in flight.
+		return m, m.query.update(msg)
+
+	case nvimEndedMsg:
+		// Neovim going while the pane is live takes the TUI with it: there is
+		// nothing left to type into, and the unsaved buffer went with it. A nil
+		// error is the ordinary shutdown, which needs no report.
+		m.fatal = msg.err
+		return m, m.quit()
 
 	case queryResultMsg:
 		// A run dispatched before a database switch is no longer this
@@ -460,14 +480,37 @@ func (m model) View() tea.View {
 		rows[h-2] = fullRule(w, lay.ruleX, ruleTeeUp)
 		copy(rows[lay.bodyTop:], m.bodyRows(lay))
 	}
+	// Trailing spaces are trimmed so a frame carries no runs of blank cells it
+	// does not need — except across the Query pane's own rows when its editor
+	// paints there. A run of spaces at the end of one of those rows is a
+	// selection or a completion popup reaching the pane's edge, and trimming it
+	// would strip the colour off it.
+	q := m.editorRows(lay)
 	for i, r := range rows {
+		if m.query.keepsTrailingCells() && i >= q.y0 && i < q.y1 {
+			continue
+		}
 		rows[i] = strings.TrimRight(r, " ")
 	}
+
 	content := strings.Join(rows, "\n")
 	if m.switcherOpen {
 		content = overlay(content, m.switcher.view(m.session.Host.Name, w), w, h)
 	}
-	return screen(content)
+	v := screen(content)
+	// The popup is modal and opaque, so a cursor placed under it would show
+	// through as the one lit cell of a pane the user cannot reach.
+	if m.focus == paneQuery && !m.switcherOpen {
+		v.Cursor = m.query.cursor(q.x0, q.y0)
+	}
+	return v
+}
+
+// editorRows is the rectangle the Query pane's editor draws into: its pane's
+// rectangle less the label row the host keeps for itself.
+func (m model) editorRows(lay layout) rect {
+	r := lay.rects[paneQuery]
+	return rect{x0: r.x0, y0: min(r.y0+1, r.y1), x1: r.x1, y1: r.y1}
 }
 
 // bodyRows renders the rows between the two full-width rules: the sidebar
@@ -502,14 +545,10 @@ func (m model) sidebarColumn(lay layout) []string {
 
 // mainColumn stacks Query over Results, divided by the main column's rule.
 func (m model) mainColumn(lay layout) []string {
-	// The Query pane's textarea keeps a visible cursor only while it is the
-	// focused pane; key routing is gated separately in Update.
-	q := m.query
-	if m.focus != paneQuery {
-		q = q.blurred()
-	}
+	// The editor is told whether it is the focused pane so it can show or hide
+	// its own cursor; key routing is gated separately in Update.
 	r := lay.rects[paneQuery]
-	out := m.paneBlock(paneQuery, "QUERY", "", q.view(), r)
+	out := m.paneBlock(paneQuery, "QUERY", m.query.meta(), m.query.view(m.focus == paneQuery), r)
 	if lay.mainRuleY >= 0 {
 		out = append(out, hRule(r.x1-r.x0))
 	}
