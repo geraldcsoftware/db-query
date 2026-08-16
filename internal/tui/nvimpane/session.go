@@ -86,12 +86,6 @@ type Session struct {
 	// goroutine watching the connection can tell an ordinary detach from a crash.
 	mu       sync.Mutex
 	quitting bool
-
-	// bufMu guards lines, the mirror of the Neovim buffer. It is written by the
-	// RPC notification goroutine and read by the UI's, so every access is
-	// through the mutex.
-	bufMu sync.Mutex
-	lines []string
 }
 
 // Start spawns Neovim, gates it on version, registers its handlers, attaches
@@ -138,7 +132,6 @@ func Start(opts Options) (*Session, error) {
 		Ended:  make(chan error, 1),
 		done:   make(chan struct{}),
 		ops:    make(chan func(*nvim.Nvim), 256),
-		lines:  []string{""},
 	}
 
 	go func() {
@@ -206,15 +199,6 @@ func (s *Session) registerHandlers(src CandidateSource) error {
 			case <-s.done:
 			}
 		}},
-		// The buffer mirror. A notification rather than a request, so Neovim
-		// never waits on the host, and the whole buffer rather than a delta,
-		// because a query pane holds tens of lines and the simpler payload is
-		// the one that cannot drift out of step with the real buffer.
-		{"dbq_buffer", func(lines []string) {
-			s.bufMu.Lock()
-			s.lines = lines
-			s.bufMu.Unlock()
-		}},
 		{"dbq_complete", func(findstart int, line string, col int, buflines []string) (any, error) {
 			return complete(src, findstart, line, col, buflines), nil
 		}},
@@ -244,25 +228,10 @@ func (s *Session) Do(op func(*nvim.Nvim)) {
 	}
 }
 
-// Text is the buffer's current contents. It is served from the mirror the
-// dbq_buffer notification keeps up to date, so it costs no round trip and can
-// be read from the UI's own goroutine.
-func (s *Session) Text() string {
-	s.bufMu.Lock()
-	defer s.bufMu.Unlock()
-	return strings.Join(s.lines, "\n")
-}
-
-// SetText replaces the buffer. The mirror is updated here rather than waiting
-// for the notification the write provokes, so a Text call in the same frame
-// reads what was just set.
+// SetText replaces the buffer. It is queued like every other call, so a read
+// enqueued after it is guaranteed to see what was written.
 func (s *Session) SetText(text string) {
 	lines := strings.Split(text, "\n")
-
-	s.bufMu.Lock()
-	s.lines = lines
-	s.bufMu.Unlock()
-
 	repl := make([][]byte, len(lines))
 	for i, l := range lines {
 		repl[i] = []byte(l)

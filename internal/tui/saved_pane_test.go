@@ -63,7 +63,7 @@ func TestSavedPaneEnterLoadsIntoQueryPane(t *testing.T) {
 	m.focus = paneSaved
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if got := updated.(model).query.value(); got != "select * from orders" {
+	if got := queryText(updated.(model)); got != "select * from orders" {
 		t.Fatalf("query pane = %q, want the saved query's SQL", got)
 	}
 }

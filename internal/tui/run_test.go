@@ -57,7 +57,7 @@ func TestStartRunSetsRunningAndClearsResults(t *testing.T) {
 	// startRun, which is what this test is about. Ctrl+Enter's own routing
 	// through Update is covered by triggers_test.go.
 	mm := updated.(model)
-	cmd = mm.startRun(mm.query.value())
+	cmd = mm.startRun(queryText(mm), "")
 	if !mm.running {
 		t.Fatal("running must be true immediately")
 	}
@@ -73,10 +73,10 @@ func TestSingleFlightRejectsSecondRun(t *testing.T) {
 	r := &controlledRunner{release: make(chan struct{})}
 	defer close(r.release)
 	m := newRunnerTestModel(t, r)
-	m.startRun("select 1")
+	m.startRun("select 1", "")
 	m.running = true // startRun's own effect, set explicitly since startRun returns a new value
 
-	_ = m.startRun("select 2")
+	_ = m.startRun("select 2", "")
 	r.mu.Lock()
 	calls := r.calls
 	r.mu.Unlock()
@@ -194,7 +194,7 @@ func TestQueryResultTimingOut(t *testing.T) {
 	m := newRunnerTestModel(t, r) // built here: t.Setenv is not safe off the test goroutine
 	done := make(chan struct{})
 	go func() {
-		_ = m.startRun("select 1")
+		_ = m.startRun("select 1", "")
 		close(done)
 	}()
 	select {

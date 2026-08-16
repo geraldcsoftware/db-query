@@ -124,11 +124,27 @@ func (p *livePane) settle() {
 	}
 }
 
-// value is the buffer as the host sees it, through the mirror.
+// value is Neovim's buffer, read back through the same channel everything else
+// goes through.
 func (p *livePane) value() string {
+	p.t.Helper()
+	var lines []string
+	p.lua(`return vim.api.nvim_buf_get_lines(0, 0, -1, false)`, &lines)
+	return strings.Join(lines, "\n")
+}
+
+// runText asks the pane what a run would execute, exactly as F5 does, and waits
+// for the answer.
+func (p *livePane) runText() queryTextMsg {
+	p.t.Helper()
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.m.query.value()
+	cmd := p.m.query.runText()
+	p.mu.Unlock()
+	msg, ok := cmd().(queryTextMsg)
+	if !ok {
+		p.t.Fatalf("runText answered with %T, want a queryTextMsg", msg)
+	}
+	return msg
 }
 
 // waitForFrame polls until the painted frame carries want. Completion in
@@ -233,6 +249,56 @@ func TestLivePanePaintsTheCompletionPopup(t *testing.T) {
 		if !strings.Contains(frame, c.typed) {
 			t.Errorf("the buffer lost the typed text %q:\n%s", c.typed, frame)
 		}
+	}
+}
+
+// TestLivePaneRunsTheSelectionOtherwiseTheBuffer is the run path against the
+// real editor, and the reason it can be written at all: the host consumes F5
+// before Neovim sees it, so Neovim never leaves visual mode and the selection
+// is still live when the fetch runs.
+func TestLivePaneRunsTheSelectionOtherwiseTheBuffer(t *testing.T) {
+	p := newLivePane(t)
+	const buffer = "select one;\nselect two;\nselect three;"
+
+	p.input("i" + strings.ReplaceAll(buffer, "\n", "<CR>") + "<Esc>")
+	p.settle()
+
+	if got := p.runText(); got.selection || got.sql != buffer {
+		t.Fatalf("in normal mode runText gave %+v, want the whole buffer", got)
+	}
+
+	// Linewise over the first two lines. '< and '> are unset here, which is
+	// exactly why the live getpos('v') and getpos('.') pair is what is read.
+	p.input("ggVj")
+	p.settle()
+	got := p.runText()
+	if !got.selection {
+		t.Errorf("a live linewise selection was not reported as one")
+	}
+	if want := "select one;\nselect two;"; got.sql != want {
+		t.Errorf("linewise selection = %q, want %q", got.sql, want)
+	}
+
+	// Charwise, part of one line. The 0 is load-bearing: Neovim ships
+	// 'nostartofline', so gg keeps whatever column the cursor was already in.
+	p.input("<Esc>gg0wvE")
+	p.settle()
+	if got := p.runText(); !got.selection || got.sql != "one;" {
+		t.Errorf("charwise selection = %+v, want just the word under it", got)
+	}
+
+	// Blockwise, which is the case a hand-rolled slice would get wrong.
+	p.input("<Esc>gg0<C-v>jl")
+	p.settle()
+	if got := p.runText(); !got.selection || got.sql != "se\nse" {
+		t.Errorf("blockwise selection = %+v, want the two-column block", got)
+	}
+
+	// Leaving visual mode goes back to the whole buffer.
+	p.input("<Esc>")
+	p.settle()
+	if got := p.runText(); got.selection || got.sql != buffer {
+		t.Errorf("after leaving visual mode runText gave %+v, want the whole buffer", got)
 	}
 }
 

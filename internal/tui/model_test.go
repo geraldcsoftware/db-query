@@ -24,6 +24,14 @@ func newTestModel(t *testing.T) model {
 	return m
 }
 
+// queryText is the Query pane's buffer, for tests that assert what is in it.
+// Nothing in the program reads the buffer synchronously any more — a run asks
+// the editor through runText, which may have to ask another process — so the
+// accessor lives here rather than on the seam.
+func queryText(m model) string {
+	return m.query.(interface{ value() string }).value()
+}
+
 // key builds the key press a terminal reports for the named keystroke, in the
 // same shape Update matches on: a key code plus its modifiers, whose String()
 // is the name given here.

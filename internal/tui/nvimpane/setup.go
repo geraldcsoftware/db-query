@@ -76,16 +76,6 @@ function _G.__dbq_complete(findstart, base)
   )
 end
 vim.bo.completefunc = 'v:lua.__dbq_complete'
-
--- The host's mirror of the buffer, so reading the query back costs no round
--- trip. rpcnotify rather than rpcrequest: Neovim never waits on the host for
--- this, and a dropped notification cannot stall the editor.
-vim.api.nvim_create_autocmd({ 'TextChanged', 'TextChangedI', 'TextChangedP' }, {
-  buffer = 0,
-  callback = function()
-    vim.rpcnotify(chan, 'dbq_buffer', vim.api.nvim_buf_get_lines(0, 0, -1, false))
-  end,
-})
 `
 
 // ConfigPath is the init.lua db-query reads, if the user has written one. It

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -114,8 +115,59 @@ func (e *nvimEditor) setSize(w, h int) {
 	e.sess.Do(func(nv *nvim.Nvim) { _ = nv.TryResizeUI(w, h) })
 }
 
-func (e *nvimEditor) value() string     { return e.sess.Text() }
 func (e *nvimEditor) setValue(v string) { e.sess.SetText(v) }
+
+// runTextLua answers what a run should execute.
+//
+// The host consumes F5 before Neovim sees it, so Neovim never leaves visual
+// mode and the selection is still live when this runs. That is why '< and '>
+// are no use here — they are only set when visual mode ends — and why the live
+// pair getpos('v') and getpos('.') is what describes it. getregion takes that
+// pair and returns the text, handling the blockwise and multibyte boundaries a
+// hand-rolled slice would get wrong. '\22' is Ctrl-V, which is how blockwise
+// visual mode names itself.
+const runTextLua = `
+local mode = vim.fn.mode()
+if mode == 'v' or mode == 'V' or mode == '\22' then
+  return {
+    text = table.concat(vim.fn.getregion(vim.fn.getpos('v'), vim.fn.getpos('.'), {type = mode}), '\n'),
+    selection = true,
+  }
+end
+return {
+  text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), '\n'),
+  selection = false,
+}
+`
+
+// runText fetches through the same serialised queue as every other call into
+// Neovim, so the read cannot overtake keystrokes still queued ahead of it, and
+// waits for the answer on the command's own goroutine rather than the event
+// loop's.
+func (e *nvimEditor) runText() tea.Cmd {
+	return func() tea.Msg {
+		out := make(chan queryTextMsg, 1)
+		e.sess.Do(func(nv *nvim.Nvim) {
+			var got struct {
+				Text      string `msgpack:"text"`
+				Selection bool   `msgpack:"selection"`
+			}
+			if err := nv.ExecLua(runTextLua, &got); err != nil {
+				out <- queryTextMsg{err: err}
+				return
+			}
+			out <- queryTextMsg{sql: got.Text, selection: got.Selection}
+		})
+		select {
+		case msg := <-out:
+			return msg
+		case <-e.sess.Done():
+			// The session is shutting down, so the queued read will never run
+			// and nothing is waiting for its answer either.
+			return queryTextMsg{err: errors.New("the embedded editor is shutting down")}
+		}
+	}
+}
 
 // view returns the last painted frame. focus changes nothing about it: Neovim
 // draws no focus indication of its own, and the pane's label row and the

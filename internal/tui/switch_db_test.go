@@ -63,11 +63,11 @@ func TestF2OpensTheSwitcher(t *testing.T) {
 func TestSwitcherSwallowsKeysMeantForThePanes(t *testing.T) {
 	m := switcherModel(t, "alpha", "beta")
 	m.focus = paneQuery
-	before := m.query.value()
+	before := queryText(m)
 
 	m = press(m, "b")
-	if m.query.value() != before {
-		t.Fatalf("a keystroke reached the Query pane through the popup: %q", m.query.value())
+	if queryText(m) != before {
+		t.Fatalf("a keystroke reached the Query pane through the popup: %q", queryText(m))
 	}
 	if m.switcher.filter != "b" {
 		t.Fatalf("filter = %q, want the keystroke to have gone to the popup", m.switcher.filter)
@@ -115,8 +115,8 @@ func TestSwitchingRebuildsWhatWasScopedToTheOldDatabase(t *testing.T) {
 	if got.switcherOpen {
 		t.Fatal("the popup stayed open after switching")
 	}
-	if got.query.value() != "select 1" {
-		t.Fatalf("query buffer = %q, want it kept across the switch", got.query.value())
+	if queryText(got) != "select 1" {
+		t.Fatalf("query buffer = %q, want it kept across the switch", queryText(got))
 	}
 	if strings.Contains(ansi.Strip(got.results.view()), "a") {
 		t.Fatalf("the old database's rows survived the switch:\n%s", got.results.view())
@@ -138,7 +138,7 @@ func TestSwitchingDiscardsAnInFlightRunsResult(t *testing.T) {
 	m.runner = func(context.Context, session.Resolved, string) (adapter.Rows, bool, error) {
 		return adapter.Rows{}, false, nil
 	}
-	cmd := m.startRun("select 1")
+	cmd := m.startRun("select 1", "")
 	if !m.running {
 		t.Fatal("the run did not start")
 	}

@@ -91,6 +91,13 @@ type model struct {
 	statusMsg string
 	statusGen int
 
+	// runSource says where the last dispatched run's SQL came from, shown on
+	// the Results pane's label row. It is empty for the whole buffer, which is
+	// the ordinary case and needs no explaining; a run of part of the buffer
+	// does, since nothing else on screen still says which part once the
+	// selection is gone.
+	runSource string
+
 	// results holds the last completed run's outcome for display in the
 	// Results pane.
 	results resultsPane
@@ -200,6 +207,29 @@ func (m *model) focusDown() {
 		m.focus = paneSaved
 	} else if m.focus == paneQuery {
 		m.focus = paneResults
+	}
+}
+
+// setStatus puts transient text in the status strip and arms the timer that
+// clears it, stamping both with a fresh generation so a timer from an older
+// message cannot erase this one.
+func (m *model) setStatus(text string) tea.Cmd {
+	m.statusMsg = text
+	m.statusGen++
+	return clearStatusAfter(m.statusGen)
+}
+
+// resultsMeta is the Results pane's summary, led by where the SQL that produced
+// it came from when that was not simply the whole buffer.
+func (m model) resultsMeta() string {
+	meta := m.results.meta()
+	switch {
+	case m.runSource == "":
+		return meta
+	case meta == "":
+		return m.runSource
+	default:
+		return m.runSource + " · " + meta
 	}
 }
 
@@ -319,10 +349,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.focus {
 			case paneSchema:
 				if sql, ok := m.schemaRunSQL(); ok {
-					return m, m.startRun(sql)
+					return m, m.startRun(sql, "table preview")
 				}
 			case paneQuery:
-				return m, m.startRun(m.query.value())
+				// The editor may have to ask another process what is selected,
+				// so the run begins when the answer arrives rather than here.
+				return m, m.query.runText()
 			}
 			return m, nil
 		}
@@ -357,6 +389,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.query.update(msg)
 		}
 		return m, nil
+
+	case queryTextMsg:
+		// What the Query pane answered when asked what to run. Neither failure
+		// here is a failed query — nothing has run — so both go to the status
+		// strip rather than to the Results pane, which would read as a database
+		// error and leave the last result looking replaced.
+		switch {
+		case msg.err != nil:
+			return m, m.setStatus("could not read the query: " + msg.err.Error())
+		case strings.TrimSpace(msg.sql) == "":
+			return m, m.setStatus("nothing to run")
+		}
+		source := ""
+		if msg.selection {
+			source = "selection"
+		}
+		return m, m.startRun(msg.sql, source)
 
 	case nvimRedrawMsg:
 		// The pane's own screen, folded in on the event loop's goroutine so it
@@ -583,7 +632,7 @@ func (m model) mainColumn(lay layout) []string {
 		out = append(out, hRule(r.x1-r.x0))
 	}
 	results := lay.rects[paneResults]
-	return append(out, m.paneBlock(paneResults, "RESULTS", m.results.meta(), m.results.view(), results)...)
+	return append(out, m.paneBlock(paneResults, "RESULTS", m.resultsMeta(), m.results.view(), results)...)
 }
 
 // screen pairs rendered content with the terminal features the TUI runs on:

@@ -25,18 +25,28 @@ type queryResultMsg struct {
 	gen int
 }
 
+// queryTextMsg is the Query pane's answer to being asked what to run: the SQL,
+// whether it came from a visual selection rather than the whole buffer, and the
+// failure if the editor could not be asked at all.
+type queryTextMsg struct {
+	sql       string
+	selection bool
+	err       error
+}
+
 // startRun begins a query run if none is already in flight (single-flight).
 // It clears the Results pane and marks the model running immediately — before
 // the tea.Cmd it returns has even been scheduled, so the next frame already
 // shows the running indicator in the bottom bar — and stores a CancelFunc so
 // Ctrl+C can cancel it. A second call while one is already running does not
 // start anything; it sets a transient status message instead.
-func (m *model) startRun(sql string) tea.Cmd {
+// source names where the SQL came from, for the Results pane's label row; the
+// empty string is the whole buffer, which needs no explaining.
+func (m *model) startRun(sql, source string) tea.Cmd {
 	if m.running {
-		m.statusMsg = "query already running — Ctrl+C to cancel"
-		m.statusGen++
-		return clearStatusAfter(m.statusGen)
+		return m.setStatus("query already running — Ctrl+C to cancel")
 	}
+	m.runSource = source
 	ctx, cancel := context.WithTimeout(context.Background(), m.flags.Timeout)
 	m.cancel = cancel
 	m.running = true
