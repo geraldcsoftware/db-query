@@ -37,7 +37,26 @@ func (s *listScroll) follow(line, total int) {
 	}
 	// Collapsing a table shortens the list, which can strand the offset past
 	// the end of it.
-	if maxOffset := total - s.height; s.offset > maxOffset {
+	s.clamp(total)
+}
+
+// by moves the offset delta lines within a list of total lines. It is how a
+// pane without a cursor scrolls: the Results pane has no selected row for
+// follow to chase, only a viewport the user drives directly.
+func (s *listScroll) by(delta, total int) {
+	s.offset += delta
+	s.clamp(total)
+}
+
+// clamp brings the offset back inside a list of total lines, so that the last
+// line sits against the pane's bottom edge rather than the view running off
+// into blank rows. A list that fits is always drawn from its first line.
+func (s *listScroll) clamp(total int) {
+	maxOffset := total - s.height
+	if s.height <= 0 || maxOffset < 0 {
+		maxOffset = 0
+	}
+	if s.offset > maxOffset {
 		s.offset = maxOffset
 	}
 	if s.offset < 0 {

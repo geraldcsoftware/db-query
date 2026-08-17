@@ -4,6 +4,8 @@ import (
 	"os"
 	"strconv"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 )
 
@@ -40,15 +42,106 @@ type resultsPane struct {
 	errText string
 	rows    adapter.Rows
 	page    int
+
+	// top is the first row of the current page on screen and left the first
+	// column, the two halves of the pane's scroll position. They index into the
+	// page, not into the whole result: paging moves between blocks of rows,
+	// scrolling moves within the block on screen.
+	top, left int
+
+	// w and h are the cells the layout gives the pane's content. Both are zero
+	// until the first layout, which the rendering reads as unbounded so an early
+	// frame draws the whole page rather than nothing.
+	w, h int
 }
 
-func (r *resultsPane) clear() { *r = resultsPane{} }
+// A new result, an error, or an empty pane all start the view over, since none
+// of them share the rows or the columns the offsets were measured against. The
+// pane's size survives, being a property of the layout rather than of the run.
+func (r *resultsPane) clear() { *r = resultsPane{w: r.w, h: r.h} }
 
 func (r resultsPane) hasContent() bool { return r.errText != "" || len(r.rows.Columns) > 0 }
 
-func (r *resultsPane) showError(msg string) { *r = resultsPane{errText: msg} }
+func (r *resultsPane) showError(msg string) { *r = resultsPane{errText: msg, w: r.w, h: r.h} }
 
-func (r *resultsPane) showRows(rows adapter.Rows) { *r = resultsPane{rows: rows} }
+func (r *resultsPane) showRows(rows adapter.Rows) { *r = resultsPane{rows: rows, w: r.w, h: r.h} }
+
+// setSize records the room the layout gives the pane and brings both offsets
+// back inside it. A terminal that grows can otherwise leave the view scrolled
+// past rows that have just become visible.
+func (r *resultsPane) setSize(w, h int) {
+	r.w, r.h = max(0, w), max(0, h)
+	r.scrollRows(0)
+	r.scrollColumns(0)
+}
+
+// visibleRows is how many data rows the pane draws: its content rows less the
+// header pinned above them. An unsized pane reports 0, which the windowing
+// reads as no limit.
+func (r resultsPane) visibleRows() int {
+	if r.h <= 0 {
+		return 0
+	}
+	return max(0, r.h-1)
+}
+
+// table measures the current page for display. Widths are a property of the
+// page rather than of the whole result — measuring every row of a large result
+// to size a column nobody is looking at would cost more than it is worth — so
+// they can change when the page does.
+func (r resultsPane) table() resultTable {
+	return measureTable(r.currentSlice(), r.page*pageSize()+1)
+}
+
+// scrollRows moves the view delta rows down the page, clamped to its ends.
+func (r *resultsPane) scrollRows(delta int) {
+	s := listScroll{offset: r.top, height: r.visibleRows()}
+	s.by(delta, len(r.currentSlice().Rows))
+	r.top = s.offset
+}
+
+// scrollColumns moves the view delta columns right, clamped so the last column
+// lands against the pane's edge rather than scrolling past it.
+func (r *resultsPane) scrollColumns(delta int) {
+	r.left = clamp(r.left+delta, 0, r.table().maxLeft(r.w))
+}
+
+func (r *resultsPane) scrollDown() { r.scrollRows(1) }
+func (r *resultsPane) scrollUp()   { r.scrollRows(-1) }
+func (r *resultsPane) scrollTop()  { r.top = 0 }
+
+func (r *resultsPane) scrollBottom() { r.scrollRows(len(r.currentSlice().Rows)) }
+
+func (r *resultsPane) scrollLeft()  { r.scrollColumns(-1) }
+func (r *resultsPane) scrollRight() { r.scrollColumns(1) }
+
+func (r *resultsPane) scrollFirstColumn() { r.left = 0 }
+func (r *resultsPane) scrollLastColumn()  { r.left = r.table().maxLeft(r.w) }
+
+// update handles the Results pane's own keys. The pane has no cursor to move,
+// so every one of them moves the viewport instead.
+func (r *resultsPane) update(msg tea.KeyPressMsg) {
+	switch msg.String() {
+	case "up", "k":
+		r.scrollUp()
+	case "down", "j":
+		r.scrollDown()
+	case "left", "h":
+		r.scrollLeft()
+	case "right", "l":
+		r.scrollRight()
+	case "g":
+		r.scrollTop()
+	// Which of the two a terminal reports for Shift+G depends on the keyboard
+	// protocol it negotiated, so both are bound to the same action.
+	case "G", "shift+g":
+		r.scrollBottom()
+	case "home":
+		r.scrollFirstColumn()
+	case "end":
+		r.scrollLastColumn()
+	}
+}
 
 // pageCount is the number of pages needed to show every row, at least 1 so
 // an empty (but non-error) result still has a page to render.
@@ -62,15 +155,25 @@ func (r resultsPane) pageCount() int {
 	return pages
 }
 
+// pageDown and pageUp step between blocks of rows. Each shows its new page from
+// the first row, since none of the rows on screen carry over, but keeps the
+// horizontal position: the columns are the same ones, and throwing the user
+// back to the left edge on every page would undo the scrolling they just did.
+// The column offset is still re-clamped, because a page whose values are
+// narrower measures narrower columns and so may have fewer of them hidden.
 func (r *resultsPane) pageDown() {
 	if r.page < r.pageCount()-1 {
 		r.page++
+		r.top = 0
+		r.scrollColumns(0)
 	}
 }
 
 func (r *resultsPane) pageUp() {
 	if r.page > 0 {
 		r.page--
+		r.top = 0
+		r.scrollColumns(0)
 	}
 }
 
@@ -100,7 +203,7 @@ func (r resultsPane) view() string {
 		// multi-line message (an error plus its hint) is marked throughout.
 		return indentLines(errorStyle.Render("error: " + r.errText))
 	}
-	return renderResultTable(r.currentSlice(), r.page*pageSize()+1)
+	return r.table().render(r.left, r.w, r.top, r.visibleRows())
 }
 
 // meta is the summary right-aligned on the pane's label row: how many rows the
@@ -118,7 +221,40 @@ func (r resultsPane) meta() string {
 	if r.pageCount() > 1 {
 		out += " · " + pageIndicator(r)
 	}
+	if s := r.rowSpan(); s != "" {
+		out += " · " + s
+	}
+	if s := r.columnSpan(); s != "" {
+		out += " · " + s
+	}
 	return out
+}
+
+// rowSpan names the slice of the page actually on screen, in the same absolute
+// numbering the gutter uses. It earns its place only when the page is taller
+// than the pane: otherwise the page indicator already says which rows are
+// showing, and repeating it would read as a contradiction of itself.
+func (r resultsPane) rowSpan() string {
+	h, total := r.visibleRows(), len(r.currentSlice().Rows)
+	if h <= 0 || total <= h {
+		return ""
+	}
+	first := r.page*pageSize() + r.top + 1
+	last := first + min(h, total-r.top) - 1
+	return "showing " + strconv.Itoa(first) + "-" + strconv.Itoa(last)
+}
+
+// columnSpan says which columns are on screen, and appears only while some are
+// not. A span that always reads "cols 1-2/2" would be noise on the one row the
+// pane can least afford to spend.
+func (r resultsPane) columnSpan() string {
+	t := r.table()
+	count, clipped := t.fits(r.left, r.w)
+	if !clipped {
+		return ""
+	}
+	return "cols " + strconv.Itoa(r.left+1) + "-" + strconv.Itoa(r.left+count) +
+		"/" + strconv.Itoa(len(t.columns))
 }
 
 // pageIndicator summarizes the current page position, e.g.
