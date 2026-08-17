@@ -218,7 +218,10 @@ func TestTheHintBarMatchesTheKeysThePaneActuallyHas(t *testing.T) {
 		}
 	}
 
-	m.focus = paneResults
+	// The Schema pane, not the Results pane: Enter expands a table there, which
+	// is the binding "load/expand" names. The Results pane has a set of its own,
+	// covered by TestTheHintBarAdvertisesScrollingOnTheResultsPane.
+	m.focus = paneSchema
 	bar = ansi.Strip(m.bottomBar(w))
 	for _, want := range []string{"Esc quit", "PgUp", "load/expand"} {
 		if !strings.Contains(bar, want) {

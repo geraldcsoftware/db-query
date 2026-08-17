@@ -773,6 +773,14 @@ place SQL is edited between runs. The Schema pane reads the §13.2 cache and
 never introspects on its own, so browsing costs no round trip. Results are paged
 client-side over rows already fetched — the user's SQL is never rewritten with
 `LIMIT`/`OFFSET` — with `DB_QUERY_TUI_PAGE_SIZE` (default 100) setting the page.
+A page is normally taller and wider than the pane drawn for it, so the pane
+scrolls within the page it is showing: the arrows and their vim doubles move a
+row or a column, `g` and `G` reach the page's ends, `Home` and `End` the first
+and last column. Both offsets are positions in the current page rather than in
+the whole result, so a page change starts at the new page's first row while
+keeping the column position, the columns being the same ones either way. The
+header row and the row-number gutter sit outside the two windows and so stay
+put, and an edge marker names whichever side still has columns behind it.
 
 Startup fills in what the invocation left open, with a name-only picker: no
 host resolved from flag, environment or config prompts for one of the

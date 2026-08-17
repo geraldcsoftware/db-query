@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
@@ -402,5 +403,130 @@ func TestResultsUnsizedPaneRendersEverything(t *testing.T) {
 	p.showRows(rowsOf(25))
 	if got := visibleGutter(t, p); len(got) != 10 {
 		t.Fatalf("an unsized pane drew %d rows, want the whole page of 10", len(got))
+	}
+}
+
+// TestScrollKeysReachTheResultsPaneOnlyWhenFocused is the routing half of the
+// change. The arrows mean something different in every pane, so they can only
+// belong to the one the next keystroke is aimed at.
+func TestScrollKeysReachTheResultsPaneOnlyWhenFocused(t *testing.T) {
+	t.Setenv("DB_QUERY_TUI_PAGE_SIZE", "100")
+	m, ed := modalModel(t)
+	m.results.showRows(rowsOf(432))
+
+	m.focus = paneResults
+	next, _ := pressKey(m, "down")
+	if next.results.top != 1 {
+		t.Errorf("top = %d after Down on the focused Results pane, want 1", next.results.top)
+	}
+
+	next.focus = paneQuery
+	after, _ := pressKey(next, "down")
+	if after.results.top != 1 {
+		t.Errorf("top = %d after Down in the editor, want the Results pane left alone", after.results.top)
+	}
+	if !ed.forwarded("down") {
+		t.Error("Down did not reach the editor")
+	}
+}
+
+// TestVimScrollKeysMoveTheResultsViewport covers the second binding on each
+// direction, which is what a user with vim reflexes reaches for first.
+func TestVimScrollKeysMoveTheResultsViewport(t *testing.T) {
+	t.Setenv("DB_QUERY_TUI_PAGE_SIZE", "100")
+	m, _ := modalModel(t)
+	// Wide enough to overflow the pane the layout gives it, or there would be
+	// nowhere for the horizontal keys to scroll to and they would pass for
+	// working while doing nothing.
+	m.results.showRows(wideRows(40, 432))
+	m.focus = paneResults
+	if m.results.table().maxLeft(m.results.w) == 0 {
+		t.Fatalf("a %d-cell pane already fits every column, so this proves nothing", m.results.w)
+	}
+
+	next, _ := pressKey(m, "j")
+	if next.results.top != 1 {
+		t.Errorf("top = %d after j, want 1", next.results.top)
+	}
+	next, _ = pressKey(next, "l")
+	if next.results.left != 1 {
+		t.Errorf("left = %d after l, want 1", next.results.left)
+	}
+	next, _ = pressKey(next, "k")
+	if next.results.top != 0 {
+		t.Errorf("top = %d after k, want it back to 0", next.results.top)
+	}
+	next, _ = pressKey(next, "h")
+	if next.results.left != 0 {
+		t.Errorf("left = %d after h, want it back to 0", next.results.left)
+	}
+}
+
+// TestFocusKeysStillMoveFocusFromTheResultsPane guards the chords against the
+// bare keys that now sit beside them: Ctrl+K must leave the pane rather than
+// scroll it.
+func TestFocusKeysStillMoveFocusFromTheResultsPane(t *testing.T) {
+	t.Setenv("DB_QUERY_TUI_PAGE_SIZE", "100")
+	m, _ := modalModel(t)
+	m.results.showRows(rowsOf(432))
+	m.focus = paneResults
+	m.results.scrollDown()
+
+	next, _ := pressKey(m, "ctrl+k")
+	if next.focus != paneQuery {
+		t.Errorf("focus = %v after Ctrl+K, want the Query pane", next.focus)
+	}
+	if next.results.top != 1 {
+		t.Errorf("top = %d after Ctrl+K, want the scroll position untouched", next.results.top)
+	}
+}
+
+// TestTheLayoutSizesTheResultsPane is what connects the pane's windowing to the
+// screen. Without it the pane never learns how tall it is, keeps drawing its
+// whole page, and paneBlock goes on cutting off whatever does not fit.
+func TestTheLayoutSizesTheResultsPane(t *testing.T) {
+	m := newTestModel(t)
+	r := m.rects[paneResults]
+	if got, want := m.results.h, contentRows(r); got != want {
+		t.Errorf("results pane height = %d, want the layout's %d content rows", got, want)
+	}
+	if got, want := m.results.w, r.x1-r.x0; got != want {
+		t.Errorf("results pane width = %d, want the layout's %d cells", got, want)
+	}
+	if m.results.h <= 0 || m.results.w <= 0 {
+		t.Fatalf("the layout gave the pane %dx%d, which windows nothing", m.results.w, m.results.h)
+	}
+}
+
+// TestResizeReachesTheResultsPane keeps the pane's own geometry in step with
+// the terminal's, so a window that shrinks re-windows rather than overflowing.
+func TestResizeReachesTheResultsPane(t *testing.T) {
+	m := newTestModel(t)
+	before := m.results.h
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 60})
+	if got := next.(model).results.h; got == before || got <= 0 {
+		t.Errorf("results pane height = %d after a resize, want it re-derived from the new layout (was %d)", got, before)
+	}
+}
+
+// TestTheHintBarAdvertisesScrollingOnTheResultsPane: the bar is the only place
+// a user is told the keys exist, and scrolling nobody can discover is scrolling
+// nobody uses.
+func TestTheHintBarAdvertisesScrollingOnTheResultsPane(t *testing.T) {
+	m := newTestModel(t)
+	const w = 140
+
+	m.focus = paneResults
+	bar := ansi.Strip(m.bottomBar(w))
+	if !strings.Contains(bar, "scroll") {
+		t.Errorf("the Results pane's bar does not advertise scrolling:\n%s", bar)
+	}
+	if !strings.Contains(bar, "Esc") {
+		t.Errorf("the Results pane's bar dropped the way out:\n%s", bar)
+	}
+
+	m.focus = paneSchema
+	if bar := ansi.Strip(m.bottomBar(w)); strings.Contains(bar, "scroll") {
+		t.Errorf("the Schema pane's bar advertises a key it does not have:\n%s", bar)
 	}
 }
