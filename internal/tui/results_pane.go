@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"strconv"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -206,26 +207,33 @@ func (r resultsPane) view() string {
 	return r.table().render(r.left, r.w, r.top, r.visibleRows())
 }
 
-// meta is the summary right-aligned on the pane's label row: how many rows the
-// run returned, and where in them the current page sits once there is more
-// than one.
-func (r resultsPane) meta() string {
+// meta is the pane's summary as one string, for callers that want it whole.
+func (r resultsPane) meta() string { return strings.Join(r.metaParts(), metaSep) }
+
+// metaParts is the summary right-aligned on the pane's label row, in clauses so
+// that a pane too narrow for all of them keeps the ones that matter most: how
+// many rows the run returned, where in them the current page sits, and then the
+// two positions within that page. The order is the order they are dropped in,
+// from the end, and it puts the whole result ahead of any position inside it.
+func (r resultsPane) metaParts() []string {
 	if r.errText != "" || len(r.rows.Columns) == 0 {
-		return ""
+		return nil
 	}
 	n := len(r.rows.Rows)
-	out := strconv.Itoa(n) + " rows"
+	count := strconv.Itoa(n) + " rows"
 	if n == 1 {
-		out = "1 row"
+		count = "1 row"
 	}
+	out := []string{count}
+	rows := r.rowSpan()
 	if r.pageCount() > 1 {
-		out += " · " + pageIndicator(r)
+		out = append(out, pageIndicator(r, rows == ""))
 	}
-	if s := r.rowSpan(); s != "" {
-		out += " · " + s
+	if rows != "" {
+		out = append(out, rows)
 	}
-	if s := r.columnSpan(); s != "" {
-		out += " · " + s
+	if cols := r.columnSpan(); cols != "" {
+		out = append(out, cols)
 	}
 	return out
 }
@@ -258,11 +266,17 @@ func (r resultsPane) columnSpan() string {
 }
 
 // pageIndicator summarizes the current page position, e.g.
-// "page 2/5 (rows 101-200)".
-func pageIndicator(r resultsPane) string {
+// "page 2/5 (rows 101-200)". The row range is dropped when the pane is showing
+// only part of the page: the visible slice is reported separately, and two
+// ranges disagreeing about which rows are on screen would leave a user
+// believing the wrong one.
+func pageIndicator(r resultsPane, withRows bool) string {
+	out := "page " + strconv.Itoa(r.page+1) + "/" + strconv.Itoa(r.pageCount())
+	if !withRows {
+		return out
+	}
 	size := pageSize()
 	start := r.page*size + 1
 	end := start + len(r.currentSlice().Rows) - 1
-	return "page " + strconv.Itoa(r.page+1) + "/" + strconv.Itoa(r.pageCount()) +
-		" (rows " + strconv.Itoa(start) + "-" + strconv.Itoa(end) + ")"
+	return out + " (rows " + strconv.Itoa(start) + "-" + strconv.Itoa(end) + ")"
 }

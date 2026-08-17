@@ -90,7 +90,7 @@ func TestTheResultsPaneSaysWhenOnlyPartOfTheBufferRan(t *testing.T) {
 	whole.runner = neverFinishingRunner()
 	whole = answerRunText(t, whole, queryTextMsg{sql: "select 1"})
 	whole.results.showRows(rowsOf(3))
-	if got := whole.resultsMeta(); got != "3 rows" {
+	if got := strings.Join(whole.resultsMeta(), metaSep); got != "3 rows" {
 		t.Errorf("a whole-buffer run summarised as %q, want the outcome alone", got)
 	}
 
@@ -98,14 +98,14 @@ func TestTheResultsPaneSaysWhenOnlyPartOfTheBufferRan(t *testing.T) {
 	part.runner = neverFinishingRunner()
 	part = answerRunText(t, part, queryTextMsg{sql: "select 1", selection: true})
 	part.results.showRows(rowsOf(3))
-	if got := part.resultsMeta(); got != "selection · 3 rows" {
+	if got := strings.Join(part.resultsMeta(), metaSep); got != "selection · 3 rows" {
 		t.Errorf("a selection run summarised as %q", got)
 	}
 
 	// The marker outlives an empty result and an error, which are exactly the
 	// outcomes where knowing what ran matters most.
 	part.results.showError("syntax error at or near \"slect\"")
-	if got := part.resultsMeta(); got != "selection" {
+	if got := strings.Join(part.resultsMeta(), metaSep); got != "selection" {
 		t.Errorf("a failed selection run summarised as %q", got)
 	}
 
@@ -114,7 +114,7 @@ func TestTheResultsPaneSaysWhenOnlyPartOfTheBufferRan(t *testing.T) {
 	preview.runner = neverFinishingRunner()
 	preview.startRun("SELECT * FROM orders LIMIT 100;", "table preview")
 	preview.results.showRows(rowsOf(1))
-	if got := preview.resultsMeta(); got != "table preview · 1 row" {
+	if got := strings.Join(preview.resultsMeta(), metaSep); got != "table preview · 1 row" {
 		t.Errorf("a preview run summarised as %q", got)
 	}
 }
@@ -146,7 +146,7 @@ func TestANewRunReplacesTheMarker(t *testing.T) {
 	m = answerRunText(t, m, queryTextMsg{sql: "select 2"})
 	m.results.showRows(rowsOf(1))
 
-	if got := m.resultsMeta(); got != "1 row" {
+	if got := strings.Join(m.resultsMeta(), metaSep); got != "1 row" {
 		t.Errorf("summary = %q, want no claim about a selection", got)
 	}
 }

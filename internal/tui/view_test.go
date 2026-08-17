@@ -128,9 +128,9 @@ func TestFocusedPaneIsVisuallyDistinct(t *testing.T) {
 	r := m.rects[paneSaved]
 	w := r.x1 - r.x0
 	m.focus = paneSaved
-	focused := m.paneBlock(paneSaved, "SAVED", "", m.saved.view(w), r)
+	focused := m.paneBlock(paneSaved, "SAVED", nil, m.saved.view(w), r)
 	m.focus = paneSchema
-	unfocused := m.paneBlock(paneSaved, "SAVED", "", m.saved.view(w), r)
+	unfocused := m.paneBlock(paneSaved, "SAVED", nil, m.saved.view(w), r)
 
 	if strings.Join(focused, "\n") == strings.Join(unfocused, "\n") {
 		t.Fatal("a focused pane must render differently from the same pane unfocused")
@@ -157,11 +157,11 @@ func TestFocusedPaneLabelIsAccented(t *testing.T) {
 	m := newTestModel(t)
 	r := m.rects[paneSaved]
 	m.focus = paneSaved
-	if got := m.paneBlock(paneSaved, "SAVED", "", "", r)[0]; !strings.Contains(got, accentSGR) {
+	if got := m.paneBlock(paneSaved, "SAVED", nil, "", r)[0]; !strings.Contains(got, accentSGR) {
 		t.Errorf("the focused label must carry the accent colour, got %q", got)
 	}
 	m.focus = paneSchema
-	if got := m.paneBlock(paneSaved, "SAVED", "", "", r)[0]; strings.Contains(got, accentSGR) {
+	if got := m.paneBlock(paneSaved, "SAVED", nil, "", r)[0]; strings.Contains(got, accentSGR) {
 		t.Errorf("an unfocused label must not, got %q", got)
 	}
 }
@@ -181,7 +181,7 @@ func TestPaneBlockExactlyFillsItsRect(t *testing.T) {
 			if focused {
 				m.focus = paneResults
 			}
-			got := m.paneBlock(paneResults, "RESULTS", m.results.meta(), m.results.view(), r)
+			got := m.paneBlock(paneResults, "RESULTS", m.results.metaParts(), m.results.view(), r)
 			if len(got) != size.h {
 				t.Errorf("%dx%d focused=%v: %d lines, want %d", size.w, size.h, focused, len(got), size.h)
 				continue
