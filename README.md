@@ -261,7 +261,7 @@ terminal, so `db-query | cat` still prints usage and exits 1 exactly as before.
 ```
 db-query 1.4.0                                                 orders ● postgres · prod-core
 ───────────────────────┬────────────────────────────────────────────────────────────────────
-▌SCHEMA                │ QUERY
+▌SCHEMA                │ QUERY                                                       NORMAL
  ▶ orders            5 │  1 select * from orders limit 20;
  ▼ people            2 │
    id          integer ├────────────────────────────────────────────────────────────────────
@@ -297,10 +297,15 @@ a number are right-aligned and coloured.
 | `Ctrl+h/j/k/l` | move focus between panes (also: click a pane) |
 | `Ctrl+Enter` or `F5` | run — the Query pane's SQL, or a `SELECT` preview of the Schema pane's selected table |
 | `F2` | switch the session to another database on this host |
+| `F10` | quit, from every pane |
 | `Enter` | Schema: expand/collapse a table · Saved: load the query into the Query pane |
 | `PgUp` / `PgDn` | page through the results |
 | `Ctrl+C` | cancel the running query, or quit when idle |
 | `Esc` | quit |
+
+The last three belong to the editor while the Query pane holds an embedded
+Neovim, which is what it holds wherever one can run. `F10` is the way out that
+works everywhere either way. See [The Query editor](#the-query-editor).
 
 ### Switching database
 
@@ -340,6 +345,171 @@ Results are paged client-side over rows already fetched — your SQL is never
 rewritten with `LIMIT`/`OFFSET`. `DB_QUERY_TUI_PAGE_SIZE` sets the rows per page
 (default 100); there is no scrolling *within* a page, so on a short terminal set
 it to roughly what the Results pane can show.
+
+### The Query editor
+
+The Query pane is a real Neovim, embedded. db-query starts one as a child
+process, draws its screen inside the pane, and forwards every keystroke it does
+not reserve for itself. You get modes, motions, registers, macros, undo, and
+whatever else your fingers already know.
+
+It turns itself on wherever it can run. There is nothing to enable, no
+configuration key, and no flag.
+
+**A machine without a usable Neovim keeps exactly the pane db-query shipped
+before**: a plain text area, with the keys it has always had. That fallback is
+silent. Nothing is printed, nothing is logged, and nothing needs configuring.
+
+```
+db-query 1.4.0                                                 orders ● postgres · prod-core
+───────────────────────┬────────────────────────────────────────────────────────────────────
+ SCHEMA                │▌QUERY                                                       INSERT
+ ▶ orders            5 │  1 select o.id, o.amount, c.name
+ ▶ customers         3 │  2 from orders o
+                       │  3 join customers c on c.id = o.cus
+                       │               customer_id m bigint
+                       │               customers   t 3 columns
+                       ├────────────────────────────────────────────────────────────────────
+                       │ RESULTS
+───────────────────────┤
+ SAVED                 │
+───────────────────────┴────────────────────────────────────────────────────────────────────
+^h/j/k/l move · ^/⌘Enter/F5 run · F2 switch db                                      F10 quit
+```
+
+The vim mode is shown at the right of the pane's label row, and the bottom bar
+changes with the pane, so it always names the keys that are actually live.
+
+#### Neovim 0.12.0 or newer
+
+Older builds get the text area instead. The floor is 0.12 rather than 0.11
+because completion as you type, without a plugin, needs Neovim's own
+`'autocomplete'` option and the function-source flags of `'complete'`, and
+neither exists before 0.12. Carrying a second, version-gated code path for the
+sake of one minor release was not worth it, and a 0.11 user loses nothing they
+had.
+
+#### Keys in the Query pane
+
+| Key | What it does there |
+|-----|--------------------|
+| `Esc` | **Neovim's.** It leaves a mode. It no longer quits db-query |
+| `F10` | quit |
+| `PgUp` / `PgDn` | **Neovim's.** They scroll the buffer rather than paging results |
+| `Ctrl+C` | cancels a query that is running; otherwise Neovim's |
+| `F5`, `Ctrl+Enter`, `⌘Enter` | run |
+| `F2`, `Ctrl+h/j/k/l` | the host's, in this pane as in every other |
+| everything else | Neovim's |
+
+The other three panes are unchanged: `Esc` and `Ctrl+C` still quit there, and
+`PgUp`/`PgDn` still page the results. So does the text area, when that is what
+the Query pane is holding.
+
+Two things are given up for this, both in insert mode:
+
+- `Ctrl+H` is no longer an alias for backspace, since it moves focus left. The
+  Backspace key itself is unaffected, sending `DEL` rather than `0x08`.
+- `Ctrl+K` no longer starts a digraph, since it moves focus up.
+
+#### Running part of the buffer
+
+`F5` runs the visual selection when there is one, and the whole buffer when
+there is not. Select with `v`, `V` or `Ctrl+V` and press `F5`; the selection
+survives the run, because db-query takes `F5` before Neovim sees it and Neovim
+therefore never leaves visual mode.
+
+The Results pane says `selection` on its label row when only part of the buffer
+was run, since nothing else on screen still says which part once the selection
+is gone. An empty buffer runs nothing and says so in the status strip.
+
+#### Completion
+
+Completion is automatic, as you type, with no plugin installed. It is served
+from the schema cache db-query already has in memory, so it costs no second
+database connection and writes no credentials anywhere.
+
+- **After a dot**, the columns of whatever the qualifier names: a table, or an
+  alias declared by any `FROM` or `JOIN` in the buffer, wherever that clause
+  happens to sit. Typing `c.` on line 1 finds the `c` introduced on line 12.
+- **Otherwise**, the tables, the columns of the tables this query names, and SQL
+  keywords. Columns of tables the statement never mentions are deliberately left
+  out: the statement could not select them.
+
+Matching is fuzzy and ignores case, so `card` finds `CardholderId`, and so does
+`chid`. A table or column is offered exactly as the database spells it, since a
+re-cased name is a name that does not exist; a keyword follows the case you are
+typing in, so `sel` completes to `select` and `SEL` to `SELECT`. A column's type
+is shown beside it.
+
+With no cached schema, completion offers keywords alone. Run `db-query
+introspect` to give it more.
+
+#### Syntax highlighting
+
+Stated plainly, because the gaps are real:
+
+- **SQL keywords render bold rather than coloured.** db-query sets no colours of
+  its own and ships Neovim's defaults, whose colourscheme maps `Statement`,
+  `Keyword`, `Type` and the rest onto the normal foreground. This is a decision
+  for this release, not an oversight. Set a colourscheme in your own `init.lua`
+  (below) to change it.
+- Neovim bundles no PostgreSQL and no Transact-SQL syntax file, and no
+  tree-sitter SQL parser. db-query selects `sqlanywhere`, the closest of the
+  dialects that are bundled, which leaves `jsonb` operators, `::` casts, `$$`
+  bodies, `ILIKE` and `RETURNING` as plain text.
+
+Nothing is mis-highlighted. There are only gaps.
+
+#### Your own `~/.config/dbquery/init.lua`
+
+The embedded editor runs under `NVIM_APPNAME=dbquery`, so **your real Neovim
+configuration is never read**. Its configuration directory is
+`$XDG_CONFIG_HOME/dbquery/`, usually `~/.config/dbquery/`, and it reads an
+`init.lua` there if you have written one.
+
+db-query never writes that file. It is yours, it is optional, and it carries
+preference only. When it is absent the status strip says so once at startup and
+nothing else changes.
+
+```lua
+-- ~/.config/dbquery/init.lua
+
+-- Colour the SQL. This is the supported way to stop keywords rendering bold.
+vim.cmd.colorscheme('habamax')
+
+-- Ordinary editing preferences.
+vim.o.tabstop, vim.o.shiftwidth, vim.o.expandtab = 2, 2, true
+vim.o.ignorecase, vim.o.smartcase = true, true
+vim.o.wrap = false
+
+-- Mappings: anything you would put in a vimrc.
+vim.keymap.set('n', '<leader>u', 'viwU', { desc = 'upper-case the word' })
+vim.keymap.set('i', 'jk', '<Esc>', { desc = 'leave insert mode' })
+```
+
+db-query's own required wiring is pushed **after** your `init.lua` runs, so a
+setting there cannot leave the pane unusable. Two honest limits on that:
+
+- It beats what your configuration sets while it loads. It does not beat what
+  your configuration schedules for later: an autocommand that sets
+  `cmdheight = 1` on `InsertEnter` will take effect, and will cost you a row of
+  the pane.
+- Plugin managers, language servers and anything else that reaches the network
+  or spawns processes are not what this file is for. Keep it to preference.
+
+#### No language server
+
+There are no diagnostics and no hover, and that is a deliberate boundary rather
+than a gap waiting to be filled. Every SQL language server surveyed learns the
+schema from its own live database connection, configured with credentials
+written to its own file on disk. db-query resolves credentials through the
+system keychain, Bitwarden or an exec helper and never writes them to disk, so
+wiring one in would mean giving that up.
+
+#### If Neovim stops
+
+The pane cannot carry on without it, so db-query exits and prints the reason on
+stderr once the screen is back. The unsaved buffer is lost: it was never a file.
 
 ## Configuration
 
@@ -491,6 +661,9 @@ zsh's completion cache picks up the new function.
 
 - `psql` on PATH for postgres hosts
 - `sqlcmd` on PATH for sqlserver hosts ([go-sqlcmd](https://github.com/microsoft/go-sqlcmd) or legacy mssql-tools)
+- `nvim` 0.12.0 or newer on PATH, optional: interactive mode uses it as the
+  Query pane's editor when it is there, and falls back to a plain text area when
+  it is not. See [The Query editor](#the-query-editor)
 
 ## Development
 
