@@ -57,16 +57,20 @@ var (
 	// resultsActionHints is the bar while the Results pane has focus, where the
 	// arrows and their vim doubles scroll the page rather than doing nothing.
 	// "run" is dropped because there is nothing in this pane to run, which
-	// leaves room for the keys that are the pane's own. The two that move
-	// within the page trail the two that move between pages, being the ones a
-	// user can most easily do without.
+	// leaves room for the keys that are the pane's own.
+	//
+	// Ordered, like the others, so a narrow terminal drops the least missed
+	// first — which here means the most guessable, not the least useful. Paging
+	// stays last for the reason it is last in the default set, and g/G and
+	// Home/End come before it: they are the two keys nobody tries unprompted, so
+	// the bar is the only place they exist at all.
 	resultsActionHints = []hint{
 		{"^h/j/k/l", "move"},
 		{"↑↓←→/hjkl", "scroll"},
 		{"F2", "switch db"},
+		{"g/G", "page ends"},
+		{"Home/End", "col ends"},
 		{"PgUp/PgDn", "page"},
-		{"g/G", "top/bottom"},
-		{"Home/End", "first/last col"},
 	}
 
 	// pickerHints is the startup picker's own footer. "type to filter" is the

@@ -530,3 +530,73 @@ func TestTheHintBarAdvertisesScrollingOnTheResultsPane(t *testing.T) {
 		t.Errorf("the Schema pane's bar advertises a key it does not have:\n%s", bar)
 	}
 }
+
+// TestPaneLabelRowDropsMetaClausesRatherThanAllOfThem: the label row drops its
+// summary whole when it will not fit, which on a scrolled Results pane means
+// losing the row count and the page along with the scroll position that made it
+// too long. Clauses come off the end, least important first, so what remains is
+// what a user most needs.
+func TestPaneLabelRowDropsMetaClausesRatherThanAllOfThem(t *testing.T) {
+	meta := []string{"250 rows", "page 1/3", "showing 2-10", "cols 6-10/10"}
+	const w = 40
+
+	row := ansi.Strip(paneLabelRow("RESULTS", meta, w, true))
+	if !strings.Contains(row, "250 rows") {
+		t.Errorf("the label row dropped the row count to fit:\n%q", row)
+	}
+	if strings.Contains(row, "cols 6-10/10") {
+		t.Errorf("the label row kept a clause it has no room for:\n%q", row)
+	}
+	if got := ansi.StringWidth(row); got != w {
+		t.Errorf("label row is %d cells wide, want exactly %d", got, w)
+	}
+}
+
+// TestPaneLabelRowKeepsEveryClauseThatFits is the other half: nothing is
+// dropped from a pane with room for all of it.
+func TestPaneLabelRowKeepsEveryClauseThatFits(t *testing.T) {
+	meta := []string{"250 rows", "page 1/3", "showing 2-10"}
+	row := ansi.Strip(paneLabelRow("RESULTS", meta, 80, true))
+	for _, want := range meta {
+		if !strings.Contains(row, want) {
+			t.Errorf("the label row dropped %q despite having room:\n%q", want, row)
+		}
+	}
+}
+
+// TestResultsMetaDropsThePageRowRangeWhileScrolling removes the redundancy
+// between the two positions. "page 1/3 (rows 1-100)" and "showing 2-10"
+// disagree about which rows are on screen, and the second is the true one, so
+// the parenthetical goes rather than being explained away.
+func TestResultsMetaDropsThePageRowRangeWhileScrolling(t *testing.T) {
+	t.Setenv("DB_QUERY_TUI_PAGE_SIZE", "100")
+	var p resultsPane
+	p.showRows(rowsOf(250))
+
+	p.setSize(40, 200) // the whole page fits, so nothing scrolls
+	if got := p.meta(); !strings.Contains(got, "(rows 1-100)") {
+		t.Errorf("meta = %q, want the page's row range while the page fits", got)
+	}
+
+	p.setSize(40, 10) // now it does not
+	got := p.meta()
+	if strings.Contains(got, "(rows 1-100)") {
+		t.Errorf("meta = %q, want the page's row range gone once 'showing' contradicts it", got)
+	}
+	if !strings.Contains(got, "page 1/3") || !strings.Contains(got, "showing 1-9") {
+		t.Errorf("meta = %q, want the page still named and the visible rows given", got)
+	}
+}
+
+// TestTheResultsHintBarLeadsWithTheKeysNobodyGuesses orders the bar by what a
+// user would not find on their own. A narrow terminal drops hints from the
+// right, and g/G and Home/End are the two nobody tries unprompted, so they must
+// not be the first to go.
+func TestTheResultsHintBarLeadsWithTheKeysNobodyGuesses(t *testing.T) {
+	bar := ansi.Strip(bottomBarHint(110, hintResults))
+	for _, want := range []string{"scroll", "g/G", "Home/End"} {
+		if !strings.Contains(bar, want) {
+			t.Errorf("a 110-cell bar dropped %q, which a user cannot guess:\n%s", want, bar)
+		}
+	}
+}

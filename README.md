@@ -300,12 +300,24 @@ a number are right-aligned and coloured.
 | `F10` | quit, from every pane |
 | `Enter` | Schema: expand/collapse a table · Saved: load the query into the Query pane |
 | `PgUp` / `PgDn` | page through the results |
+| `↑` `↓` `←` `→` or `k` `j` `h` `l` | Results: scroll a row or a column |
+| `g` / `G` | Results: first / last row of the page |
+| `Home` / `End` | Results: first / last column |
 | `Ctrl+C` | cancel the running query, or quit when idle |
 | `Esc` | quit |
 
-The last three belong to the editor while the Query pane holds an embedded
-Neovim, which is what it holds wherever one can run. `F10` is the way out that
-works everywhere either way. See [The Query editor](#the-query-editor).
+A result is usually taller and wider than the pane drawn for it, so the Results
+pane scrolls within the page it is showing while `PgUp`/`PgDn` move between
+pages. The scroll keys belong to the Results pane and work when it has focus;
+paging works from anywhere. The header row and the row-number gutter stay put as
+you scroll, and a `‹` or `›` against the edge marks columns still hidden that
+way. The label row carries both positions, e.g.
+`4312 rows · page 2/44 · showing 118-130 · cols 3-7/12`.
+
+`PgUp`/`PgDn`, `Ctrl+C` and `Esc` belong to the editor while the Query pane
+holds an embedded Neovim, which is what it holds wherever one can run. `F10` is
+the way out that works everywhere either way. See
+[The Query editor](#the-query-editor).
 
 ### Switching database
 

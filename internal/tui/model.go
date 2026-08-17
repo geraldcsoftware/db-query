@@ -225,17 +225,15 @@ func (m *model) setStatus(text string) tea.Cmd {
 }
 
 // resultsMeta is the Results pane's summary, led by where the SQL that produced
-// it came from when that was not simply the whole buffer.
-func (m model) resultsMeta() string {
-	meta := m.results.meta()
-	switch {
-	case m.runSource == "":
+// it came from when that was not simply the whole buffer. It leads because it
+// describes the whole result: everything after it locates a position inside
+// one, and a narrow pane drops those first.
+func (m model) resultsMeta() []string {
+	meta := m.results.metaParts()
+	if m.runSource == "" {
 		return meta
-	case meta == "":
-		return m.runSource
-	default:
-		return m.runSource + " · " + meta
 	}
+	return append([]string{m.runSource}, meta...)
 }
 
 // modalQuery reports whether focus is on a Query pane whose editor has modes of
@@ -637,12 +635,12 @@ func (m model) bodyRows(lay layout) []string {
 // sidebarColumn stacks Schema over Saved, divided by the sidebar's own rule.
 func (m model) sidebarColumn(lay layout) []string {
 	r := lay.rects[paneSchema]
-	out := m.paneBlock(paneSchema, "SCHEMA", "", m.schema.view(r.x1-r.x0), r)
+	out := m.paneBlock(paneSchema, "SCHEMA", nil, m.schema.view(r.x1-r.x0), r)
 	if lay.sidebarRuleY >= 0 {
 		out = append(out, hRule(r.x1-r.x0))
 	}
 	saved := lay.rects[paneSaved]
-	return append(out, m.paneBlock(paneSaved, "SAVED", "", m.saved.view(saved.x1-saved.x0), saved)...)
+	return append(out, m.paneBlock(paneSaved, "SAVED", nil, m.saved.view(saved.x1-saved.x0), saved)...)
 }
 
 // mainColumn stacks Query over Results, divided by the main column's rule.
@@ -650,7 +648,7 @@ func (m model) mainColumn(lay layout) []string {
 	// The editor is told whether it is the focused pane so it can show or hide
 	// its own cursor; key routing is gated separately in Update.
 	r := lay.rects[paneQuery]
-	out := m.paneBlock(paneQuery, "QUERY", m.query.meta(), m.query.view(m.focus == paneQuery), r)
+	out := m.paneBlock(paneQuery, "QUERY", metaOf(m.query.meta()), m.query.view(m.focus == paneQuery), r)
 	if lay.mainRuleY >= 0 {
 		out = append(out, hRule(r.x1-r.x0))
 	}
@@ -681,9 +679,10 @@ func screen(content string) tea.View {
 // the size the layout gave it, so the clipping here is a backstop against a
 // pane that miscounts rather than the mechanism any pane relies on.
 //
-// meta is the pane's own summary, right-aligned on the label row; panes with
-// nothing to summarise pass an empty string.
-func (m model) paneBlock(p pane, label, meta, content string, r rect) []string {
+// meta is the pane's own summary, right-aligned on the label row, given as the
+// clauses it is built from so a pane too narrow for all of them can be handed
+// as many as fit. Panes with nothing to summarise pass nothing.
+func (m model) paneBlock(p pane, label string, meta []string, content string, r rect) []string {
 	w, h := r.x1-r.x0, r.y1-r.y0
 	if w <= 0 || h <= 0 {
 		return nil
@@ -693,22 +692,43 @@ func (m model) paneBlock(p pane, label, meta, content string, r rect) []string {
 	return fitBlock(lines, w, h)
 }
 
+// metaSep joins a pane's summary clauses on its label row.
+const metaSep = " · "
+
+// metaOf wraps a pane whose summary is a single string, so that a pane with
+// nothing to say passes no clause rather than an empty one.
+func metaOf(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return []string{s}
+}
+
 // paneLabelRow draws a pane's heading: the focus marker and the uppercase
 // section label, with the pane's summary right-aligned against its far edge.
 // The marker is what carries focus through ansi.Strip, so a terminal that
 // cannot show colour still says which pane the next keystroke reaches; the
 // accent colour is the second, redundant cue.
-func paneLabelRow(label, meta string, w int, focused bool) string {
+//
+// A summary too long for the row loses clauses from its end rather than being
+// dropped whole. The clauses are ordered most useful first, so a scrolled
+// Results pane keeps its row count and page even when there is no room left for
+// its scroll position; dropping all of them together would take the summary
+// away exactly when it has the most to say.
+func paneLabelRow(label string, meta []string, w int, focused bool) string {
 	marker, style := " ", paneLabelStyle
 	if focused {
 		marker, style = focusMarker, paneLabelFocusedStyle
 	}
 	head := style.Render(marker + label)
-	gap := w - ansi.StringWidth(marker+label) - ansi.StringWidth(meta) - 1
-	if meta == "" || gap < 1 {
-		return fitLine(head, w)
+	room := w - ansi.StringWidth(marker+label) - 1
+	for n := len(meta); n > 0; n-- {
+		text := strings.Join(meta[:n], metaSep)
+		if gap := room - ansi.StringWidth(text); gap >= 1 {
+			return head + strings.Repeat(" ", gap) + paneMetaStyle.Render(text) + " "
+		}
 	}
-	return head + strings.Repeat(" ", gap) + paneMetaStyle.Render(meta) + " "
+	return fitLine(head, w)
 }
 
 // fitLine forces one line to exactly w cells. Truncation is ANSI-aware so
