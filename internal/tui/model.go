@@ -477,6 +477,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		default:
 			m.results.showRows(msg.rows)
+			// Rows are what was asked for, so the pane holding them takes focus
+			// and its scroll keys work without a Ctrl+J first. Only this branch
+			// does it: the three above leave the user beside the SQL they are
+			// about to fix, cancel or wait longer for.
+			m.focus = paneResults
 			return m, nil
 		}
 
