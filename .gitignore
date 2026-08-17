@@ -2,3 +2,6 @@
 /dist/
 coverage.out
 *.test
+
+/docs/*.md
+/docs/**/*.md
