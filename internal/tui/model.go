@@ -156,6 +156,11 @@ func (m *model) recomputeLayout() {
 	m.query.setSize(max(0, r.x1-r.x0), contentRows(r))
 	m.schema.setSize(contentRows(m.rects[paneSchema]))
 	m.saved.setSize(contentRows(m.rects[paneSaved]))
+	// The Results pane needs its width as well as its height: it scrolls in
+	// both axes, and how far right it may scroll depends on how many of the
+	// page's columns fit across the pane.
+	res := m.rects[paneResults]
+	m.results.setSize(max(0, res.x1-res.x0), contentRows(res))
 }
 
 // contentRows is how many rows of a pane's rectangle are left for its content
@@ -237,6 +242,20 @@ func (m model) resultsMeta() string {
 // its own. It decides both which keys the host keeps and which hints the bottom
 // bar advertises, so the two can never disagree about what a key does.
 func (m model) modalQuery() bool { return m.focus == paneQuery && m.query.modal() }
+
+// hintMode is which set of keys the focused pane actually has, which the bottom
+// bar advertises. It is derived from focus in one place so the bar cannot claim
+// a key the routing does not honour.
+func (m model) hintMode() hintMode {
+	switch {
+	case m.modalQuery():
+		return hintModalEditor
+	case m.focus == paneResults:
+		return hintResults
+	default:
+		return hintDefault
+	}
+}
 
 // schemaRunSQL returns the provider-native preview query for the Schema
 // pane's currently selected table, and whether one is selected.
@@ -365,6 +384,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.schema, cmd = m.schema.update(msg)
 			return m, cmd
+		}
+		if m.focus == paneResults {
+			m.results.update(msg)
+			return m, nil
 		}
 		if m.focus == paneSaved {
 			if msg.String() == "enter" {
@@ -654,10 +677,9 @@ func screen(content string) tea.View {
 
 // paneBlock renders one pane as exactly as many lines as its rectangle is
 // tall, each exactly its rectangle's width: a label row, then the pane's own
-// content clipped to the rows below it. Content longer than the rectangle is
-// cut off at the bottom — there is no per-pane scrolling, so a result page
-// taller than the Results pane is paged through with PgUp/PgDn or shrunk with
-// DB_QUERY_TUI_PAGE_SIZE.
+// content clipped to the rows below it. Every pane windows its own content to
+// the size the layout gave it, so the clipping here is a backstop against a
+// pane that miscounts rather than the mechanism any pane relies on.
 //
 // meta is the pane's own summary, right-aligned on the label row; panes with
 // nothing to summarise pass an empty string.
@@ -756,6 +778,6 @@ func (m model) bottomBar(w int) string {
 		return runningStyle.Render("running…") + hintSepStyle.Render(" · ") +
 			hintKeyStyle.Render("^c") + " " + hintDescStyle.Render("cancel")
 	default:
-		return bottomBarHint(w, m.modalQuery())
+		return bottomBarHint(w, m.hintMode())
 	}
 }
