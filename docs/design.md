@@ -780,7 +780,11 @@ and last column. Both offsets are positions in the current page rather than in
 the whole result, so a page change starts at the new page's first row while
 keeping the column position, the columns being the same ones either way. The
 header row and the row-number gutter sit outside the two windows and so stay
-put, and an edge marker names whichever side still has columns behind it.
+put, and an edge marker names whichever side still has columns behind it. A run
+that returns rows moves focus to the pane as the rows land, so the scroll keys
+are live without a further keystroke; a run that fails, times out or is
+cancelled does not, leaving the user beside the SQL rather than beside an error
+they have already read on the label row.
 
 Startup fills in what the invocation left open, with a name-only picker: no
 host resolved from flag, environment or config prompts for one of the

@@ -309,7 +309,10 @@ a number are right-aligned and coloured.
 A result is usually taller and wider than the pane drawn for it, so the Results
 pane scrolls within the page it is showing while `PgUp`/`PgDn` move between
 pages. The scroll keys belong to the Results pane and work when it has focus;
-paging works from anywhere. The header row and the row-number gutter stay put as
+paging works from anywhere. A run that returns rows moves focus there for you,
+so the scroll keys are live the moment the rows land. A run that fails, times
+out or is cancelled leaves focus where it was, beside the SQL. The header row
+and the row-number gutter stay put as
 you scroll, and a `‹` or `›` against the edge marks columns still hidden that
 way. The label row carries both positions, e.g.
 `4312 rows · page 2/44 · showing 118-130 · cols 3-7/12`.

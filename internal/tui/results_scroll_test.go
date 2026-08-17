@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -598,5 +601,53 @@ func TestTheResultsHintBarLeadsWithTheKeysNobodyGuesses(t *testing.T) {
 		if !strings.Contains(bar, want) {
 			t.Errorf("a 110-cell bar dropped %q, which a user cannot guess:\n%s", want, bar)
 		}
+	}
+}
+
+// TestASuccessfulRunFocusesTheResultsPane: rows are what the user asked for, so
+// the pane holding them takes focus and the scroll keys work without a Ctrl+J
+// first.
+func TestASuccessfulRunFocusesTheResultsPane(t *testing.T) {
+	m := newTestModel(t)
+	m.focus = paneQuery
+
+	next, _ := m.Update(queryResultMsg{rows: rowsOf(50)})
+	if got := next.(model).focus; got != paneResults {
+		t.Errorf("focus = %v after a run returned rows, want the Results pane", got)
+	}
+}
+
+// TestAFailedRunLeavesFocusWhereItWas keeps a user beside the SQL they are
+// about to fix. A syntax error is read on the label row and in the pane either
+// way, and the next thing to do about it is in the Query pane.
+func TestAFailedRunLeavesFocusWhereItWas(t *testing.T) {
+	for name, msg := range map[string]queryResultMsg{
+		"query error": {err: errors.New("syntax error at or near \"slect\"")},
+		"timeout":     {err: fmt.Errorf("psql: %w", context.DeadlineExceeded)},
+		"cancelled":   {err: context.Canceled},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := newTestModel(t)
+			m.focus = paneQuery
+
+			next, _ := m.Update(msg)
+			if got := next.(model).focus; got != paneQuery {
+				t.Errorf("focus = %v after a %s, want it left on the Query pane", got, name)
+			}
+		})
+	}
+}
+
+// TestAStaleResultDoesNotMoveFocus: a run that outlived the database it was
+// asked of is discarded rather than rendered, so it must not drag focus to a
+// pane it did not fill either.
+func TestAStaleResultDoesNotMoveFocus(t *testing.T) {
+	m := newTestModel(t)
+	m.focus = paneQuery
+	m.runGen = 2
+
+	next, _ := m.Update(queryResultMsg{rows: rowsOf(50), gen: 1})
+	if got := next.(model).focus; got != paneQuery {
+		t.Errorf("focus = %v after a disowned result, want it left on the Query pane", got)
 	}
 }
