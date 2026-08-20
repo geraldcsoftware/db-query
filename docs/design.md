@@ -1458,3 +1458,61 @@ values are covered by the digest and reach nothing else.
 - **The SQL text and parameter values never appear by default**, and never in
   the audit record, which stores the digest alone.
 - **The document is byte-reproducible**: no timestamps, no ordering instability.
+
+### 13.15 What the build changed (amends §13.12, §13.13)
+
+Three things the specification got wrong or left open, corrected here against
+what was built rather than left to diverge quietly.
+
+**The gate does not live in `Adapter.Build`.** §13.13 put it there on the
+grounds that `Build` is the choke point both execution paths share. It is, but
+it cannot see what the decision depends on: the presented token, the operator's
+answer, and the source the SQL arrived through. Threading those through
+`adapter.Query` would put command-line concerns into the adapter contract, which
+is the thing that contract exists to keep out.
+
+What `Build` does keep is the parameter check, which is genuinely provider
+knowledge. Everything else is a gate in `internal/precheck` that the query path
+calls once, after every source of SQL has resolved to one final string.
+
+**`readonly` is the gate's threshold, not just an engine setting.** §13.12
+described the decision table as though every host were read-only. Applied
+literally, a host explicitly configured `readonly = false` would still send
+every `INSERT` to the operator challenge, which makes the gate intolerable on a
+development host, and a gate people switch off protects nothing.
+
+The threshold now follows the posture. A read-only host permits reads. A
+writable host permits writes as well, because that configuration is the
+operator having already said so. Destructive and administrative statements meet
+a human on either kind of host, and so does anything the mechanism could not
+classify. Client directives are refused outright on both.
+
+**Placeholders had to be normalised before classification.** `:'name'` and
+`$(name)` are expanded by psql and sqlcmd, so neither PostgreSQL's grammar nor
+SQL Server's planner can parse one. Classified as written, every parameterised
+query fell to `opaque` and was refused, which would have made `--param`
+unusable. Classification therefore sees placeholders replaced by inert
+literals. The digest still binds the original text, and the values are still
+validated in the adapter: only the text handed to the mechanism changes.
+
+This was caught by the existing test suite rather than by the corpus, which is
+worth recording. The corpus tested SQL a database would receive; it did not
+test what this tool actually sends, and the gap between those two is exactly
+where a classifier goes wrong.
+
+#### Not yet built
+
+- **The connect-time privilege probe** (§13.12) is unimplemented. The dry-run
+  document reports `readonly.probe` as `skipped` rather than claiming a check
+  that did not happen. Until it exists, a host configured `readonly = true`
+  whose credential can in fact write is not detected, and the guarantee rests
+  on the engine setting and the classifier alone.
+- **The interactive mode is ungated.** `tui.execute` gets the read-only
+  environment and the parameter check, because both live in the adapter, but
+  not the classifier. The exposure is narrower than it reads, since an operator
+  is at the keyboard by definition, but a destructive statement against a
+  writable host is not challenged there.
+- **The SQL Server planner path is untested against a real instance**, as
+  §13.13 already records. The parsing is written to deny whatever it does not
+  recognise, so being wrong about the plan format costs availability rather
+  than safety.
