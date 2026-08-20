@@ -350,6 +350,7 @@ Genuinely unresolved — not yet locked:
 - NULL fidelity via `[][]*string`. **v1 accepts sqlcmd Path A rendering NULL as literal `NULL`; faithful SQL Server NULL is a v2 patch.**
 - **`--raw` passthrough is out of v1** (deferred to v2). Every query in v1 goes through the normal build → run → parse → render path.
 - **Destructive-statement safety (§13.12):** `readonly = true` by default, grants as the control, `opaque` classified as `destructive`, precheck tokens minted only for clean SQL, no automation exemption.
+- **Classifier mechanism (§13.13):** postgres classifies offline with PostgreSQL's own grammar, SQL Server through the engine planner; callers switch on a capability error, not a provider name.
 
 ## 12. Build order
 
@@ -1182,3 +1183,140 @@ requirement 10.2 (clause verification required against current scoping).
   is refused when a parameter is bound.
 - **The gate lives in `Adapter.Build`**, the choke point shared by the CLI and
   the TUI.
+
+### 13.13 The classifier interface: one verdict, two mechanisms (extends §13.12)
+
+§13.12 specified *what* the classifier must decide and left *how* open. The two
+providers resolve it differently, because what is available to each differs.
+
+**Postgres classifies offline**, using `pganalyze/pg_query_go`, which vendors
+PostgreSQL's own grammar. Measured on the classification corpus it is correct on
+all thirty cases including the three that defeat text matching, and it falsely
+rejects none of twenty legitimate read queries. A verdict costs 0.11 ms for a
+short statement and 0.25 ms for a complex one, and needs no database.
+
+**SQL Server classifies through the engine's planner**, because no importable
+T-SQL parser exists as a Go module. `SET SHOWPLAN_XML ON` compiles a batch
+without executing it, which is the same shape as the `EXPLAIN (FORMAT JSON)`
+mechanism measured for postgres, where every write funnels through a single
+`ModifyTable` node carrying `Insert`, `Update`, `Delete` or `Merge`, and
+everything to be denied outright fails to plan at all. The SQL Server half rests
+on documentation rather than measurement and requires verification against a
+real instance.
+
+The pure-Go alternative for postgres was rejected on evidence: it pulls 181
+transitive modules against the project's fifteen and falsely rejects six of
+twenty ordinary read queries, including full-text search, `GROUPING SETS` and
+ordered-set aggregates. Under §13.12's fail-closed rule that is not a usable
+error rate.
+
+#### The interface
+
+Classification joins the adapter for the same reason everything else
+provider-specific does, and it keeps §11's separation intact: **adapters build
+and parse, the executor runs.** No adapter is handed a way to execute anything.
+
+```go
+// Classify reports what a submission would do. An adapter that can decide from
+// the text alone returns a verdict. One that needs the engine returns
+// ErrNeedsPlan, and the caller then drives PlanInvocation and ParsePlan for
+// each statement. Callers switch on that error, never on the provider name, so
+// a third provider chooses its own mechanism without touching the call site.
+Classify(sql string) (Verdict, error)
+
+// PlanInvocation builds a plan-only probe for one statement. ParsePlan turns
+// the raw result into that statement's verdict. Both are unused by an adapter
+// whose Classify succeeds.
+PlanInvocation(host config.HostConfig, stmt string) (executor.Invocation, error)
+ParsePlan(r executor.RawResult) (Verdict, error)
+```
+
+A `Verdict` records the mechanism that produced it:
+
+```go
+type Verdict struct {
+    Class      Class       // the highest class across every statement
+    Mechanism  string      // "parser" or "planner"
+    Statements []Statement
+}
+```
+
+`Mechanism` is not decoration. It reaches the dry-run JSON and the audit record
+because the two carry different guarantees: a parser verdict is a statement
+about the text, a planner verdict is a statement about what one server, at one
+version, would do with it. An auditor reading a record needs to know which.
+
+#### Order of operations
+
+1. **The lexical pre-pass**, shared by both providers and running first. It
+   rejects client directives per §13.12 and splits the submission into
+   statements. It needs neither a parser nor a connection, which is what lets it
+   reject `\!` and `:!!` on a host whose database is unreachable.
+2. **The provider mechanism**, selected by the `ErrNeedsPlan` contract above.
+3. **The verdict**, reduced to the highest class found.
+
+#### Two rules that make each mechanism fail closed
+
+**Postgres allowlists node types.** The set enumerates what is read-safe, and
+anything absent classifies `opaque`, which §13.12 already treats as
+`destructive`. A denylist would invert the failure: a statement type added by a
+future PostgreSQL release, and therefore absent from the list, would be
+permitted. The list must be an allowlist for the same reason the whole design is
+fail-closed, and its maintenance is a release-tracking task, not an optional
+tidy-up.
+
+**SQL Server treats an unplannable statement as opaque.** A batch that does not
+compile is not thereby safe, and the plan must contain no write operation at
+all. A failure to plan for a reason that is not policy, a missing table, say,
+stays distinguishable through the existing `IsSchemaError` path rather than
+being reported as a refusal.
+
+#### Build consequences
+
+`pg_query_go` requires cgo, which the current release configuration forbids.
+Measured: `CGO_ENABLED=0` yields `undefined: pg.Parse`, and the release binary
+grows from 5.7 MB to 12.3 MB and stops being statically linked.
+
+The release job runs on `ubuntu-latest` and cross-compiles, which cannot work
+with cgo. The remedy is narrower than it first appears, because the only targets
+are `darwin/amd64` and `darwin/arm64`: a single Apple Silicon runner can produce
+both, since the Xcode SDK carries both slices. That needs proving in CI before
+it is relied on.
+
+The parser sits behind a build tag so a cgo-less build still compiles. Its
+stand-in returns `opaque` with a reason naming the missing parser, so such a
+build refuses postgres work loudly rather than passing it through. A safety
+component must never be the thing that silently disappears from a build.
+
+#### The asymmetry this creates, stated plainly
+
+A postgres pre-check costs 0.11 ms and works with the database down. A SQL
+Server pre-check costs a connection, a credential resolution and a round trip,
+and fails when the database is unreachable. Under §13.12's rule that a missing
+token plus a non-clean verdict escalates, **an unreachable SQL Server host sends
+every destructive-looking query to the operator challenge**, which during an
+outage is an approval storm rather than a safety net. The dry-run JSON therefore
+reports the mechanism and whether the pre-check completed, so a hook can tell
+"classified clean" from "could not classify".
+
+Credential resolution is uncached and shells out (`internal/credential/bws.go`
+runs `bws secret get`), so on a SQL Server host the pre-check pays that cost a
+second time. Caching a resolved credential for the seconds between pre-check and
+execution is the only part of that latency that can be reclaimed, and it is
+deferred rather than specified here.
+
+#### Locked decisions
+
+- **Postgres classifies offline via `pg_query_go`; SQL Server classifies via the
+  engine planner.** The mechanism is the adapter's business.
+- **Callers switch on `ErrNeedsPlan`, never on the provider name.**
+- **Adapters still never execute.** Planner probes are built and parsed by the
+  adapter and run by the executor, as everything else is.
+- **The postgres node set is an allowlist**, so an unrecognised statement type
+  denies.
+- **The verdict records its mechanism**, and that reaches the dry-run JSON and
+  the audit record.
+- **The lexical pre-pass runs first for both providers**, so client directives
+  are rejected without a parser or a connection.
+- **The parser is build-tagged with a fail-closed stand-in**, never silently
+  absent.
