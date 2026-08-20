@@ -10,6 +10,7 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
 	"github.com/geraldcsoftware/db-query/internal/executor"
+	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
 // Query is provider-native SQL plus its parameter values. Params are
@@ -39,6 +40,26 @@ type Adapter interface {
 	IntrospectSQL() string                   // lists user tables + columns
 	ListDatabasesSQL() string                // lists connectable database names
 	PreviewSQL(table string) string          // "first 100 rows" of one table, provider-native
+
+	// Classify reports what a submission would do (docs/design.md §13.13).
+	// An adapter that can decide from the text alone returns a verdict. One
+	// that needs the engine returns sqlscan.ErrNeedsPlan, and the caller then
+	// drives PlanInvocation and ParsePlan for each statement.
+	//
+	// Callers switch on that error, never on a provider name, so a third
+	// provider chooses its own mechanism without touching any call site.
+	Classify(sql string) (sqlscan.Verdict, error)
+
+	// PlanInvocation builds a plan-only probe for one statement, and ParsePlan
+	// turns its raw result into that statement's class. Both are unused by an
+	// adapter whose Classify succeeds. They are a build/parse pair like every
+	// other adapter method: the executor runs the probe, never the adapter.
+	PlanInvocation(host config.HostConfig, stmt string) (executor.Invocation, error)
+	ParsePlan(r executor.RawResult) (sqlscan.Class, string, error)
+
+	// Dialect selects the quoting and batching rules the lexical pre-pass
+	// applies before either mechanism runs.
+	Dialect() sqlscan.Dialect
 }
 
 var adapters = map[string]Adapter{

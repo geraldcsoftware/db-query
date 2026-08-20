@@ -13,6 +13,7 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/dblist"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 	"github.com/geraldcsoftware/db-query/internal/schema"
+	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
 func writeFile(t *testing.T, dir, name, body string, mode os.FileMode) string {
@@ -61,6 +62,7 @@ func seedSchemaCache(t *testing.T) {
 // marker line to $DBQ_CALLS so a test can assert which invocations ran.
 func splitPsql(t *testing.T, userScript string) {
 	t.Helper()
+	needsClassifier(t)
 	fakePsql(t, `
 sql=$(cat)
 case "$sql" in
@@ -97,6 +99,34 @@ database   = "testdb"
 username   = "app"
 credential = "env:DBQ_TEST_PW"
 `, 0o600)
+}
+
+// writableConfig is testConfig with the safety gate's readonly default turned
+// off, for the tests whose subject is a write reaching the client rather than
+// the gate that would otherwise stop it.
+func writableConfig(t *testing.T) string {
+	t.Helper()
+	return writeFile(t, t.TempDir(), "config.toml", `
+[hosts.testpg]
+provider   = "postgres"
+host       = "localhost"
+port       = 5432
+database   = "testdb"
+username   = "app"
+credential = "env:DBQ_TEST_PW"
+readonly   = false
+`, 0o600)
+}
+
+// needsClassifier skips a test that expects a postgres query to reach the
+// client. A build without cgo has no grammar to classify against, so the
+// safety gate refuses every postgres submission by design (§13.13); those
+// tests are asserting the query path, not the gate.
+func needsClassifier(t *testing.T) {
+	t.Helper()
+	if !sqlscan.ParserAvailable() {
+		t.Skip("built without cgo: the postgres classifier refuses every submission by design")
+	}
 }
 
 func run(t *testing.T, args ...string) (int, string, string) {
@@ -233,6 +263,7 @@ func TestSharedFlagsBeforeCommand(t *testing.T) {
 	}
 	capture := t.TempDir()
 	t.Setenv("TMPDIR_CAPTURE", capture)
+	needsClassifier(t)
 	fakePsql(t, `env > "$TMPDIR_CAPTURE/env"; printf 'ok\n1\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -269,6 +300,7 @@ func TestSharedFlagsBeforeCommand(t *testing.T) {
 // the same flag after the command wins, in both directions.
 func TestCommandFlagBeatsGlobal(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'ok\n1\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -292,6 +324,7 @@ func TestEnvironmentDefaults(t *testing.T) {
 	}
 	capture := t.TempDir()
 	t.Setenv("TMPDIR_CAPTURE", capture)
+	needsClassifier(t)
 	fakePsql(t, `env > "$TMPDIR_CAPTURE/env"; printf 'ok\n1\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -338,6 +371,7 @@ func TestShorthandFlags(t *testing.T) {
 	seedSchemaCache(t)
 	capture := t.TempDir()
 	t.Setenv("TMPDIR_CAPTURE", capture)
+	needsClassifier(t)
 	fakePsql(t, `
 cat > "$TMPDIR_CAPTURE/stdin"
 printf '%s\n' "$@" > "$TMPDIR_CAPTURE/argv"
@@ -378,6 +412,7 @@ func TestShorthandSourceAndCategory(t *testing.T) {
 	}
 	t.Setenv("DB_QUERY_QUERIES_DIR", t.TempDir())
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'x\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -527,6 +562,7 @@ func TestHostsListingExcludesProfiles(t *testing.T) {
 }
 
 func TestQueryHappyPath(t *testing.T) {
+	needsClassifier(t)
 	seedSchemaCache(t) // cache present → single invocation, the user query
 	dir := fakePsql(t, `
 cat > "$TMPDIR_CAPTURE/stdin"
@@ -561,6 +597,7 @@ printf 'id,name\n1,Ada\n'
 
 func TestQueryJSONOutput(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'id,nick\n1,\001\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -579,6 +616,7 @@ func TestQueryJSONOutput(t *testing.T) {
 
 func TestQueryMissingCredential(t *testing.T) {
 	isolateCache(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'x\n'`)
 	t.Setenv("DBQ_TEST_PW", "x") // register restore, then unset for real
 	os.Unsetenv("DBQ_TEST_PW")
@@ -591,6 +629,7 @@ func TestQueryMissingCredential(t *testing.T) {
 
 func TestQuerySchemaErrorHint(t *testing.T) {
 	seedSchemaCache(t) // cache present → the failing stub is the user query
+	needsClassifier(t)
 	fakePsql(t, `echo 'ERROR:  42703: column "nope" does not exist' >&2; exit 1`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -607,9 +646,12 @@ func TestQuerySchemaErrorHint(t *testing.T) {
 // exit code 4 and carries no --refresh-schema hint.
 func TestQueryOtherSQLError(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `echo 'ERROR:  23505: duplicate key value violates unique constraint' >&2; exit 1`)
 	t.Setenv("DBQ_TEST_PW", "pw")
-	cfg := testConfig(t)
+	// A writable host: the subject here is the exit code a failing client
+	// produces, which a query stopped by the safety gate would never reach.
+	cfg := writableConfig(t)
 	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "INSERT INTO people VALUES (1)")
 	if code != 4 {
 		t.Fatalf("code = %d, want 4 (other SQL error)", code)
@@ -621,6 +663,7 @@ func TestQueryOtherSQLError(t *testing.T) {
 
 func TestQueryJSONErrorIsStructured(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `echo 'ERROR: boom' >&2; exit 1`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -638,6 +681,7 @@ func TestQueryJSONErrorIsStructured(t *testing.T) {
 }
 
 func TestQueryClientNotFound(t *testing.T) {
+	needsClassifier(t)
 	// Empty PATH: psql cannot start → distinct exit code 2. The schema
 	// build is the first invocation and fails to start, which is enough.
 	isolateCache(t)
@@ -654,6 +698,7 @@ func TestIntrospectUsesAdapterSQL(t *testing.T) {
 	isolateCache(t)
 	// Appends rather than truncates: introspect makes two invocations, the
 	// catalog query and the database-list refresh that rides along with it.
+	needsClassifier(t)
 	fakePsql(t, `
 cat >> "$TMPDIR_CAPTURE/stdin"
 printf 'table_name,column_name\npeople,id\n'
@@ -684,6 +729,7 @@ printf 'table_name,column_name\npeople,id\n'
 
 func TestQueryParamPassing(t *testing.T) {
 	seedSchemaCache(t) // skip the build so the captured argv is the user query
+	needsClassifier(t)
 	fakePsql(t, `
 printf '%s ' "$@" > "$TMPDIR_CAPTURE/argv"
 printf 'ok\n1\n'
@@ -708,6 +754,7 @@ printf 'ok\n1\n'
 // must still bind. The SQL and a trailing --param both have to reach psql.
 func TestQueryFlagsAfterSQL(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `
 printf '%s ' "$@" > "$TMPDIR_CAPTURE/argv"
 cat > "$TMPDIR_CAPTURE/stdin"
@@ -855,6 +902,7 @@ func TestQuerySchemaBuildFailureStops(t *testing.T) {
 	isolateCache(t)
 	calls := callsFile(t)
 	// The introspection query fails; the user branch would otherwise run.
+	needsClassifier(t)
 	fakePsql(t, `
 sql=$(cat)
 case "$sql" in
@@ -914,6 +962,7 @@ func TestIntrospectAlwaysRebuilds(t *testing.T) {
 
 func TestQueryNoHeaders(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'count\n42\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -929,6 +978,7 @@ func TestQueryNoHeaders(t *testing.T) {
 
 func TestQueryNoHeadersJSONNoOp(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'id,name\n1,Ada\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -950,6 +1000,7 @@ func TestQueryNoHeadersJSONNoOp(t *testing.T) {
 // configured database for the run: the client sees the overridden name, and
 // the configured one does not leak.
 func TestQueryDatabaseOverride(t *testing.T) {
+	needsClassifier(t)
 	for _, flag := range []string{"-d", "--database"} {
 		t.Run(flag, func(t *testing.T) {
 			isolateCache(t)
@@ -1006,6 +1057,7 @@ func isolateStore(t *testing.T) string {
 func TestQuerySaveOnSuccess(t *testing.T) {
 	seedSchemaCache(t)
 	isolateStore(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'id,name\n1,Ada\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -1038,6 +1090,7 @@ func TestQuerySaveOnSuccess(t *testing.T) {
 func TestQuerySaveNotOnFailure(t *testing.T) {
 	seedSchemaCache(t)
 	isolateStore(t)
+	needsClassifier(t)
 	fakePsql(t, `echo 'ERROR: boom' >&2; exit 1`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -1057,6 +1110,7 @@ func TestQuerySaveNotOnFailure(t *testing.T) {
 func TestQuerySaveDuplicateRefusal(t *testing.T) {
 	seedSchemaCache(t)
 	isolateStore(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'id\n1\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -1099,6 +1153,7 @@ func TestQuerySource(t *testing.T) {
 		"SELECT id, name FROM people WHERE name = :'who'", false); err != nil {
 		t.Fatal(err)
 	}
+	needsClassifier(t)
 	fakePsql(t, `cat > "$TMPDIR_CAPTURE/stdin"; printf 'id,name\n1,Ada\n'`)
 	capture := t.TempDir()
 	t.Setenv("TMPDIR_CAPTURE", capture)
@@ -1127,6 +1182,7 @@ func TestQuerySourceProviderGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := callsFile(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'ran\n' >> "$DBQ_CALLS"; printf 'x\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -1150,6 +1206,7 @@ func TestQuerySourceMissing(t *testing.T) {
 	if _, err := savedquery.Save("present", "default", "postgres", "SELECT 1", false); err != nil {
 		t.Fatal(err)
 	}
+	needsClassifier(t)
 	fakePsql(t, `printf 'x\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -1270,6 +1327,7 @@ func seedCatalogueCache(t *testing.T) {
 func TestSchemaReadsCacheWithoutClient(t *testing.T) {
 	seedCatalogueCache(t)
 	calls := callsFile(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'called\n' >> "$DBQ_CALLS"; exit 1`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -1471,6 +1529,7 @@ func fakePsqlDatabases(t *testing.T) string {
 	t.Helper()
 	capture := t.TempDir()
 	t.Setenv("TMPDIR_CAPTURE", capture)
+	needsClassifier(t)
 	fakePsql(t, `
 cat >> "$TMPDIR_CAPTURE/stdin"
 printf 'datname\npostgres\ntestdb\n'
@@ -1594,6 +1653,7 @@ func TestDatabasesCommandJSONOutput(t *testing.T) {
 // to the command the user ran on purpose.
 func TestDatabasesCommandClientFailure(t *testing.T) {
 	isolateCache(t)
+	needsClassifier(t)
 	fakePsql(t, `
 cat > /dev/null
 echo 'FATAL: permission denied' >&2
@@ -1616,6 +1676,7 @@ exit 1
 // too. query deliberately does not — see TestQueryDoesNotRefreshDatabaseList.
 func TestIntrospectAlsoRefreshesDatabaseList(t *testing.T) {
 	isolateCache(t)
+	needsClassifier(t)
 	fakePsql(t, `
 sql=$(cat)
 case "$sql" in
@@ -1649,6 +1710,7 @@ exit 1
 // schema; a failed extra is a warning, not a failure.
 func TestIntrospectDatabaseListFailureIsNonFatal(t *testing.T) {
 	isolateCache(t)
+	needsClassifier(t)
 	fakePsql(t, `
 sql=$(cat)
 case "$sql" in
@@ -1682,6 +1744,7 @@ exit 1
 // second round-trip for a completion convenience.
 func TestQueryDoesNotRefreshDatabaseList(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `
 sql=$(cat)
 case "$sql" in

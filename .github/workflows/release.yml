@@ -11,7 +11,11 @@ permissions:
 
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
+    # macOS, not ubuntu: the SQL classifier links PostgreSQL's own grammar,
+    # which is cgo, and cgo cannot be cross-compiled to darwin from Linux. The
+    # runner is Apple Silicon and builds the amd64 slice through
+    # `clang -arch x86_64`, which the Xcode SDK supports natively.
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,6 +29,20 @@ jobs:
         with:
           go-version: "1.25"
           cache: true
+
+      # Fail here rather than part-way through a release if the cgo toolchain
+      # is not what this workflow assumes. Both slices are built for real, so a
+      # missing x86_64 SDK slice surfaces before any tag is published.
+      - name: Verify the cgo toolchain builds both slices
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=1 CC=clang \
+            go build -o /dev/null ./cmd/db-query
+          CGO_ENABLED=1 GOARCH=amd64 CC="clang -arch x86_64" \
+            go build -o /dev/null ./cmd/db-query
+
+      - name: Test
+        run: CGO_ENABLED=1 go test ./...
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
