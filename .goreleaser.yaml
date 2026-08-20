@@ -8,17 +8,45 @@ before:
   hooks:
     - go mod tidy
 
+# The SQL classifier links PostgreSQL's own grammar (pg_query_go), which is
+# cgo. That rules out the previous CGO_ENABLED=0 cross-compile from Linux, so
+# these builds run on macOS and are split per architecture: cgo needs the
+# target architecture passed to the C compiler as well as to Go.
+#
+# One Apple Silicon runner covers both, because the Xcode SDK carries an
+# x86_64 slice, so `clang -arch x86_64` cross-compiles the C half natively.
+#
+# A binary built this way is dynamically linked against the system libSystem,
+# which is present on every supported macOS, so the Homebrew formula is
+# unaffected. What is lost is the fully static binary the CGO_ENABLED=0 build
+# produced.
 builds:
-  - id: db-query
+  - id: db-query-arm64
     main: ./cmd/db-query
     binary: db-query
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=clang
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+  - id: db-query-amd64
+    main: ./cmd/db-query
+    binary: db-query
+    env:
+      - CGO_ENABLED=1
+      - CC=clang -arch x86_64
     goos:
       - darwin
     goarch:
       - amd64
-      - arm64
     ldflags:
       - -s -w
       - -X main.version={{ .Version }}
@@ -27,6 +55,9 @@ builds:
 
 archives:
   - id: db-query
+    ids:
+      - db-query-arm64
+      - db-query-amd64
     formats:
       - tar.gz
     name_template: >-
