@@ -142,3 +142,13 @@ func normalise(s string) string {
 	}
 	return string(out)
 }
+
+func TestScanRefusesLegacySqlcmdShellOut(t *testing.T) {
+	// sqlcmd spells shell-out `:!!` now and `!!` in older versions. Catching
+	// only the colon form would leave the older spelling live.
+	for _, sql := range []string{":!! whoami", "!! whoami", "SELECT 1\nGO\n!!dir"} {
+		if _, got := Scan(sql, DialectTSQL); len(got) == 0 {
+			t.Errorf("%q: no directive reported", sql)
+		}
+	}
+}

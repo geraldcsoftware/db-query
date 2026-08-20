@@ -170,7 +170,9 @@ func isDirectiveMarker(c rune, d Dialect) bool {
 	case DialectPostgres:
 		return c == '\\'
 	case DialectTSQL:
-		return c == ':'
+		// sqlcmd spells its shell-out `:!!` in current versions and `!!`
+		// in older ones, so both markers are refused.
+		return c == ':' || c == '!'
 	}
 	return false
 }

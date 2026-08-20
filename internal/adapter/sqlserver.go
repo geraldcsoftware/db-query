@@ -186,8 +186,13 @@ func (sqlserverAdapter) Classify(string) (sqlscan.Verdict, error) {
 // and returns its plan without running it. The SET must stand alone in its own
 // batch, hence the GO separators.
 //
-// -X is passed here as it is for a real run: it is sqlcmd's own switch for
-// disabling the commands that would otherwise let a probe do more than probe.
+// sqlcmd's own -X, which disables the commands that could compromise security,
+// is deliberately not passed. It is documented as also disabling environment
+// variables, which is precisely how Env delivers the credential, and that
+// interaction is unverified here. The lexical pre-pass already refuses every
+// directive -X would have blocked, under test, so the flag would add risk
+// without adding a control. Revisit once -X is confirmed against a real
+// instance.
 func (sqlserverAdapter) PlanInvocation(host config.HostConfig, stmt string) (executor.Invocation, error) {
 	if strings.TrimSpace(stmt) == "" {
 		return executor.Invocation{}, fmt.Errorf("empty statement")
@@ -196,7 +201,6 @@ func (sqlserverAdapter) PlanInvocation(host config.HostConfig, stmt string) (exe
 		"sqlcmd",
 		"-b",
 		"-r", "1",
-		"-X", // disable commands that could compromise security
 		"-s", mssqlSep,
 		"-W",
 		"-w", "65535",

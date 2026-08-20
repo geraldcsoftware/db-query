@@ -51,10 +51,10 @@ func TestSQLServerPlanInvocationCompilesWithoutExecuting(t *testing.T) {
 	if !strings.Contains(string(body), "SET SHOWPLAN_XML ON") {
 		t.Errorf("probe does not request a plan: %q", body)
 	}
-	// -X is sqlcmd's own switch for disabling the commands that would let a
-	// probe do more than probe, so it belongs on the probe as much as on a run.
-	if !contains(inv.Argv, "-X") {
-		t.Errorf("probe argv lacks -X: %v", inv.Argv)
+	// The probe must not turn execution back on inside the batch it is
+	// planning.
+	if strings.Contains(strings.ToUpper(string(body)), "SHOWPLAN_XML OFF") {
+		t.Errorf("probe re-enables execution within the same batch: %q", body)
 	}
 }
 
@@ -112,13 +112,4 @@ func TestSQLServerParsePlan(t *testing.T) {
 			}
 		})
 	}
-}
-
-func contains(hay []string, needle string) bool {
-	for _, s := range hay {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }
