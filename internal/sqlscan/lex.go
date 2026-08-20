@@ -215,3 +215,12 @@ func isGoLine(src []rune, i int) bool {
 	}
 	return true
 }
+
+// String names a dialect, for the mechanism field of a verdict reached by the
+// pre-pass rather than by a parser or a planner.
+func (d Dialect) String() string {
+	if d == DialectTSQL {
+		return "tsql-prepass"
+	}
+	return "postgres-prepass"
+}
