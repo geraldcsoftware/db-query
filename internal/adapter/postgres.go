@@ -11,6 +11,7 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
 	"github.com/geraldcsoftware/db-query/internal/executor"
+	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
 // pgNullSentinel is what psql prints for NULL (-P null=...). CSV quoting
@@ -188,3 +189,23 @@ func quotePostgresIdent(name string) string {
 	}
 	return strings.Join(parts, ".")
 }
+
+// Classify decides offline, against PostgreSQL's own grammar. It never
+// connects, so a postgres pre-check holds when the database is unreachable and
+// costs no round trip.
+func (postgresAdapter) Classify(sql string) (sqlscan.Verdict, error) {
+	return sqlscan.ClassifyPostgres(sql), nil
+}
+
+// PlanInvocation and ParsePlan are unreachable for postgres, whose Classify
+// always succeeds. They return errors rather than panicking so that a future
+// caller wiring them by mistake fails closed and visibly.
+func (postgresAdapter) PlanInvocation(config.HostConfig, string) (executor.Invocation, error) {
+	return executor.Invocation{}, fmt.Errorf("postgres classifies offline; no planner probe exists")
+}
+
+func (postgresAdapter) ParsePlan(executor.RawResult) (sqlscan.Class, string, error) {
+	return sqlscan.ClassOpaque, "", fmt.Errorf("postgres classifies offline; no planner probe exists")
+}
+
+func (postgresAdapter) Dialect() sqlscan.Dialect { return sqlscan.DialectPostgres }
