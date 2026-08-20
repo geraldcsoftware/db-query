@@ -36,14 +36,27 @@ func TestReduceTakesTheLeastSafeStatement(t *testing.T) {
 	}
 }
 
-func TestOnlyReadsAreClean(t *testing.T) {
+func TestPermittedFollowsTheHostPosture(t *testing.T) {
+	// A read-only host permits reads and nothing else.
 	for _, c := range []Class{ClassWrite, ClassDestructive, ClassAdmin, ClassOpaque} {
-		if c.Clean() {
-			t.Errorf("%s must not be clean: §13.12 mints a token for reads only", c)
+		if c.Permitted(true) {
+			t.Errorf("%s must not be permitted on a read-only host", c)
 		}
 	}
-	if !ClassRead.Clean() {
-		t.Error("read must be clean")
+	if !ClassRead.Permitted(true) {
+		t.Error("a read must be permitted on a read-only host")
+	}
+
+	// A host declared writable permits writes too, but never loses the
+	// protection that matters: dropping and privilege changes still meet a
+	// human, and so does anything unclassifiable.
+	if !ClassWrite.Permitted(false) {
+		t.Error("a write must be permitted on a writable host")
+	}
+	for _, c := range []Class{ClassDestructive, ClassAdmin, ClassOpaque} {
+		if c.Permitted(false) {
+			t.Errorf("%s must meet a human even on a writable host", c)
+		}
 	}
 }
 
@@ -53,7 +66,7 @@ func TestDecideNamesTheDecidingStatement(t *testing.T) {
 		{Index: 2, Class: ClassDestructive, DecidedBy: "DeleteStmt"},
 	}}
 	v.Reduce()
-	d := Decide(v)
+	d := Decide(v, true)
 	if d.Action != ActionChallenge {
 		t.Errorf("action: got %q, want challenge", d.Action)
 	}
@@ -69,7 +82,7 @@ func TestDecideNamesTheDecidingStatement(t *testing.T) {
 func TestDecideAllowsReads(t *testing.T) {
 	v := Verdict{Statements: []Statement{{Index: 1, Class: ClassRead, DecidedBy: "SelectStmt"}}}
 	v.Reduce()
-	if d := Decide(v); d.Action != ActionAllow || d.ReasonCode != ReasonOKRead {
+	if d := Decide(v, true); d.Action != ActionAllow || d.ReasonCode != ReasonOKRead {
 		t.Errorf("got %+v, want allow/OK_READ", d)
 	}
 }
@@ -81,14 +94,14 @@ func TestOpaqueVerdictIsWellFormed(t *testing.T) {
 	if v.Class != ClassOpaque || v.ClassName != "opaque" || len(v.Statements) != 1 {
 		t.Errorf("got %+v, want a one-statement opaque verdict", v)
 	}
-	if Decide(v).Action == ActionAllow {
+	if Decide(v, true).Action == ActionAllow {
 		t.Error("an opaque verdict must never allow")
 	}
 }
 
 func TestUnknownClassDenies(t *testing.T) {
-	if Class(99).String() != "opaque" || Class(99).Clean() {
-		t.Error("an out-of-range class must read as opaque and never be clean")
+	if Class(99).String() != "opaque" || Class(99).Permitted(true) || Class(99).Permitted(false) {
+		t.Error("an out-of-range class must read as opaque and never be permitted")
 	}
 }
 

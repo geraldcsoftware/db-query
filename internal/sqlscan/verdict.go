@@ -40,9 +40,21 @@ func (c Class) String() string {
 	return classNames[c]
 }
 
-// Clean reports whether a class may run without an operator challenge. Only
-// reads are clean: §13.12 mints a precheck token for nothing else.
-func (c Class) Clean() bool { return c == ClassRead }
+// Permitted reports whether a class may run on a host without an operator
+// challenge. The threshold is the host's posture, not a global constant.
+//
+// A read-only host permits reads and nothing else. A host explicitly declared
+// writable permits writes too, because that declaration is the operator
+// already saying so; requiring a challenge for every INSERT on a development
+// host would make the gate intolerable, and a gate people turn off protects
+// nothing. Destructive and administrative statements still meet a human on
+// either kind of host, and so does anything unclassifiable.
+func (c Class) Permitted(readOnly bool) bool {
+	if readOnly {
+		return c == ClassRead
+	}
+	return c == ClassRead || c == ClassWrite
+}
 
 // Statement is one statement's verdict, carrying what decided it so a refusal
 // can name the statement and the reason rather than the whole submission.
@@ -163,13 +175,17 @@ type Decision struct {
 	Reason     string     `json:"reason"`
 }
 
-// Decide turns a verdict into a decision. Reads run; everything else meets a
-// human. Refusals that are never an operator's call to make (directives,
-// unsafe params, a failed privilege probe) are raised by their own call sites
-// with ActionBlock.
-func Decide(v Verdict) Decision {
-	if v.Class.Clean() {
-		return Decision{Action: ActionAllow, ReasonCode: ReasonOKRead, Reason: "every statement reads"}
+// Decide turns a verdict into a decision for a host of the given posture.
+// Refusals that are never an operator's call to make (directives, unsafe
+// params, a failed privilege probe) are raised by their own call sites with
+// ActionBlock.
+func Decide(v Verdict, readOnly bool) Decision {
+	if v.Class.Permitted(readOnly) {
+		return Decision{
+			Action:     ActionAllow,
+			ReasonCode: CodeFor(v.Class),
+			Reason:     "permitted on this host: " + v.Class.String(),
+		}
 	}
 	// Name the first statement at the deciding class: a refusal that cannot
 	// say which statement of twelve caused it is not actionable.

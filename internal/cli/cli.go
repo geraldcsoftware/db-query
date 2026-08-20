@@ -52,6 +52,8 @@ Flags:
   --save <name>           : save the query under this name after it runs successfully (query)
   --category (-C) <cat>   : saved-query category for --save/--source (default "default")
   --force                 : with --save: overwrite an existing query and bypass the duplicate check
+  --dry-run               : classify the query, print the decision as JSON, and run nothing (query)
+  --show-sql              : with --dry-run, include the resolved SQL in the document (query)
   --timeout (-t) <dur>    : per-invocation deadline (default 30s)
   --refresh-schema        : rebuild the cached schema first (query, schema, introspect)
   --no-headers            : omit the header line; text tab-separates rows, table drops the
@@ -131,6 +133,14 @@ Exit codes:
   2  client binary could not start
   3  schema error — the query references an unknown table or column; re-run with --refresh-schema
   4  other SQL error — the client ran and exited nonzero
+  5  refused by the safety gate — the query would modify state, or carries a client directive
+  6  the query, parameters or target changed since they were checked
+
+Safety gate. Hosts default to readonly = true, which asks the engine to refuse
+writes and refuses a query classified as anything but a read. Set
+readonly = false on a host to allow writes there. --dry-run classifies without
+running anything and prints the decision as JSON, which is the interface a tool
+wrapper reads before deciding whether to let a command through.
 `
 
 // BuildInfo carries release metadata reported by the `version` command and
@@ -390,6 +400,10 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	fs.IntVar(&maxColWidth, "max-col-width", defaultMaxColWidth, "table output: truncate cells wider than this (0 = unlimited)")
 	fs.StringVar(&border, "border", render.DefaultBorder, "table output: frame style ("+strings.Join(render.Borders(), "|")+")")
 	fs.BoolVar(&force, "force", false, "with --save: overwrite an existing query and bypass the duplicate check")
+	var pre precheckFlags
+	fs.BoolVar(&pre.dryRun, "dry-run", false, "classify the query and print the decision as JSON; run nothing")
+	fs.StringVar(&pre.token, "precheck", "", "the token from a prior --dry-run of this exact invocation")
+	fs.BoolVar(&pre.showSQL, "show-sql", false, "with --dry-run: include the resolved SQL in the document (may contain sensitive literals)")
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
 		return exitParse(err, stdout)
@@ -451,6 +465,23 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 			return 1
 		}
 		sql = sq.SQL
+	}
+
+	// The safety gate sits here: after every source of SQL has resolved to one
+	// final string, and before anything is sent anywhere. A pre-check that ran
+	// earlier would be classifying something other than what runs.
+	pre.resolve()
+	pre.source = sourceOf(positional, sqlFile, sourceName)
+	doc, tuple, key, err := evaluate(r, c, pre, sql, params)
+	if err != nil {
+		render.Error(stderr, c.output, err.Error())
+		return 1
+	}
+	if pre.dryRun {
+		return emitDocument(doc, stdout)
+	}
+	if code := gate(doc, pre, tuple, key, c, stderr); code != 0 {
+		return code
 	}
 
 	// The schema cache is a silent side effect: build it the first time a

@@ -85,7 +85,13 @@ func Evaluate(in Input) Document {
 		return doc
 	}
 
-	verdict, err := in.Adapter.Classify(in.SQL)
+	// Placeholders are expanded by the client, so neither a grammar nor a
+	// planner can parse one. Classification sees them replaced by inert
+	// literals; the digest above binds the original text, and the adapter
+	// validates the values themselves.
+	classifiable := sqlscan.NormalisePlaceholders(in.SQL, in.Adapter.Dialect())
+
+	verdict, err := in.Adapter.Classify(classifiable)
 	if err == sqlscan.ErrNeedsPlan {
 		verdict, err = classifyByPlan(in)
 		if err != nil {
@@ -110,7 +116,7 @@ func Evaluate(in Input) Document {
 	}
 
 	doc.Classification = verdict
-	doc.Decision = sqlscan.Decide(verdict)
+	doc.Decision = sqlscan.Decide(verdict, in.Host.ReadOnly)
 
 	// A token exists only for SQL that classified clean. Without that rule the
 	// token would prove that a pre-check happened rather than that it passed,
@@ -129,7 +135,7 @@ func classifyByPlan(in Input) (sqlscan.Verdict, error) {
 	if in.RunPlan == nil {
 		return sqlscan.Verdict{}, fmt.Errorf("this provider classifies through the engine, and no connection is available")
 	}
-	statements, _ := sqlscan.Scan(in.SQL, in.Adapter.Dialect())
+	statements, _ := sqlscan.Scan(sqlscan.NormalisePlaceholders(in.SQL, in.Adapter.Dialect()), in.Adapter.Dialect())
 	if len(statements) == 0 {
 		return sqlscan.Verdict{}, fmt.Errorf("no statements found")
 	}

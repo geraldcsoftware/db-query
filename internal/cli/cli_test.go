@@ -99,6 +99,23 @@ credential = "env:DBQ_TEST_PW"
 `, 0o600)
 }
 
+// writableConfig is testConfig with the safety gate's readonly default turned
+// off, for the tests whose subject is a write reaching the client rather than
+// the gate that would otherwise stop it.
+func writableConfig(t *testing.T) string {
+	t.Helper()
+	return writeFile(t, t.TempDir(), "config.toml", `
+[hosts.testpg]
+provider   = "postgres"
+host       = "localhost"
+port       = 5432
+database   = "testdb"
+username   = "app"
+credential = "env:DBQ_TEST_PW"
+readonly   = false
+`, 0o600)
+}
+
 func run(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
 	var out, errb strings.Builder
@@ -609,7 +626,9 @@ func TestQueryOtherSQLError(t *testing.T) {
 	seedSchemaCache(t)
 	fakePsql(t, `echo 'ERROR:  23505: duplicate key value violates unique constraint' >&2; exit 1`)
 	t.Setenv("DBQ_TEST_PW", "pw")
-	cfg := testConfig(t)
+	// A writable host: the subject here is the exit code a failing client
+	// produces, which a query stopped by the safety gate would never reach.
+	cfg := writableConfig(t)
 	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "INSERT INTO people VALUES (1)")
 	if code != 4 {
 		t.Fatalf("code = %d, want 4 (other SQL error)", code)
