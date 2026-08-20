@@ -53,6 +53,14 @@ builds:
       - -X main.commit={{ .Commit }}
       - -X main.date={{ .Date }}
 
+# A tag carrying a prerelease part (v0.11.0-rc.1) is published as a GitHub
+# prerelease and is not marked Latest. Without this the default is a normal
+# release, verified against GoReleaser v2.17.1: release.prerelease is only
+# inferred from the tag when it is set to "auto", and make_latest is forced
+# false only once a release is known to be a prerelease.
+release:
+  prerelease: auto
+
 archives:
   - id: db-query
     ids:
@@ -82,6 +90,11 @@ changelog:
 
 brews:
   - name: db-query
+    # Keep prerelease tags out of the tap. The formula is what `brew install
+    # db-query` resolves to, so publishing one for a release candidate would
+    # hand every user the candidate. The guard matches the literal "auto":
+    # GoReleaser skips the upload when the tag carries a prerelease part.
+    skip_upload: auto
     # Publish into Formula/ (Homebrew's convention, matching the rest of the
     # tap) rather than the tap root.
     directory: Formula
