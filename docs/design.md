@@ -324,6 +324,7 @@ var renderers = map[string]Renderer{
 - **`sqlcmd` `$(...)` substitution is unsafe by default** — a textual macro with no quoting. Every param bound into a SQL Server saved query is untrusted input. Sharpest edge in the design; v1 mitigation and the v2 ceiling are locked in §7.3.
 - **No secrets in the query cache or logs.** Saved queries store SQL with placeholders only. If logging invocations, log param *names*, never values.
 - **Destructive-statement safety is specified in §13.12**, which amends this section: hosts default to `readonly = true`, client directives are rejected, parameter validation applies to both providers, and escalation is an operator challenge rather than a terminal test.
+- **The no-values rule extends to SQL literals (§13.14).** Logging param names only is not sufficient: a literal written into the SQL text, such as an account number in a `WHERE` clause, would reach the dry-run output and the audit record. The audit record stores the tuple digest and never the SQL; the dry-run document omits the SQL unless explicitly asked for.
 
 ## 10. Open decisions
 
@@ -351,6 +352,7 @@ Genuinely unresolved — not yet locked:
 - **`--raw` passthrough is out of v1** (deferred to v2). Every query in v1 goes through the normal build → run → parse → render path.
 - **Destructive-statement safety (§13.12):** `readonly = true` by default, grants as the control, `opaque` classified as `destructive`, precheck tokens minted only for clean SQL, no automation exemption.
 - **Classifier mechanism (§13.13):** postgres classifies offline with PostgreSQL's own grammar, SQL Server through the engine planner; callers switch on a capability error, not a provider name.
+- **Dry-run document (§13.14):** a versioned API with stable reason codes; unrecognised version or code denies; no SQL text or param values, ever, in the audit record.
 
 ## 12. Build order
 
@@ -1320,3 +1322,139 @@ deferred rather than specified here.
   are rejected without a parser or a connection.
 - **The parser is build-tagged with a fail-closed stand-in**, never silently
   absent.
+
+### 13.14 The dry-run document (extends §13.12, §13.13; amends §9)
+
+`--dry-run` resolves SQL from whichever of §13.12's five sources applies,
+classifies it by §13.13's provider mechanism, and prints one JSON document
+without running the query. It is the interface a hook reads, and it is
+therefore an API: the fields below are a contract, not debug output.
+
+```json
+{
+  "schema_version": 1,
+  "status": "classified",
+  "tool": { "version": "0.12.0", "commit": "5fa5f58" },
+  "target": { "provider": "postgres", "host": "prod-core", "database": "core" },
+  "source": { "kind": "file", "ref": "/tmp/report.sql" },
+  "readonly": { "configured": true, "probe": "passed", "engine_enforced": true },
+  "classification": {
+    "class": "destructive",
+    "mechanism": "parser",
+    "decided_by_version": "pg_query_go/v6 (PostgreSQL 17 grammar)",
+    "statements": [
+      { "index": 1, "class": "read",        "decided_by": "SelectStmt" },
+      { "index": 2, "class": "destructive", "decided_by": "DeleteStmt in CTE" }
+    ]
+  },
+  "params": { "names": ["who"], "count": 1 },
+  "digest": { "alg": "hmac-sha256", "value": "…" },
+  "precheck_token": null,
+  "decision": {
+    "action": "challenge",
+    "reason_code": "CLASS_DESTRUCTIVE",
+    "reason": "statement 2 deletes rows"
+  }
+}
+```
+
+#### Why each field is there
+
+**`schema_version`, and the rule attached to it.** A consumer that does not
+recognise the version **must refuse**, never proceed. Everything else in
+§13.12 rests on the hook reading this document correctly, and the failure it
+guards against is quiet: rename `decision.action` in a later release and a hook
+testing `action == "block"` reads undefined and allows. An ordinary upgrade
+would silently disable the control. Versioning is what turns that into a
+refusal.
+
+**`status`** is `classified` or `incomplete`. §13.13's asymmetry makes this
+load-bearing: the planner mechanism needs a reachable database, so a SQL Server
+pre-check can fail for reasons that have nothing to do with the SQL. An
+`incomplete` document carries no verdict and must never read as a clean one.
+
+**`mechanism` and `decided_by_version`** record how the verdict was reached and
+under which grammar or which server. A parser verdict is a claim about the text;
+a planner verdict is a claim about what one server at one version would do with
+it. A reviewer reading an audit record a year later needs to know which, and
+needs the version to reproduce it.
+
+**`source`** names which of the five inputs the SQL came from. A hook's
+confidence legitimately differs: it cannot replay stdin, and a file can change
+between the check and the run. It also answers the forensic question the digest
+cannot, which is where the statement came from.
+
+**`readonly`** exposes the posture actually in force, distinguishing the
+configured value from whether the privilege probe passed. §13.12 lets a hook
+demand a strict posture for production hosts, and it can only do that if the
+posture is visible rather than assumed.
+
+**`statements`** carries per-statement index, class and what decided it. A
+refusal on statement seven of twelve that cannot say which statement is not
+actionable.
+
+**`decision.reason_code`** is a stable machine-readable code, separate from the
+human prose in `reason`. Hooks branch on the code. A hook branching on English
+breaks the first time the wording is improved.
+
+**`precheck_token`** is explicitly `null` rather than absent when no token was
+minted, because per §13.12 a token exists only for SQL that classified clean,
+and a missing key is indistinguishable from a truncated document.
+
+#### Reason codes
+
+Append-only. A code is never repurposed, and a consumer meeting an unknown code
+treats it as a refusal.
+
+| Code | Meaning | Action |
+| --- | --- | --- |
+| `OK_READ` | every statement reads | allow |
+| `CLASS_WRITE` | a statement writes | challenge |
+| `CLASS_DESTRUCTIVE` | a statement drops, truncates or deletes | challenge |
+| `CLASS_ADMIN` | a statement changes privileges or server state | challenge |
+| `CLASS_OPAQUE` | the mechanism could not classify a statement | challenge |
+| `CLIENT_DIRECTIVE` | a psql or sqlcmd directive was present | block |
+| `PARAM_UNSAFE` | a parameter value carries statement-terminating syntax | block |
+| `READONLY_PROBE_FAILED` | `readonly` is set but the credential can write | block |
+| `PARSER_UNAVAILABLE` | built without the classifier for this provider | block |
+| `PRECHECK_INCOMPLETE` | classification could not be completed | challenge |
+| `DIGEST_MISMATCH` | the tuple differs from the one pre-checked | block |
+
+`block` refuses outright. `challenge` routes to §13.12's operator challenge.
+Exit codes follow §13.12: **5** for a refusal, **6** for `DIGEST_MISMATCH`,
+which is distinct so a caller can tell "policy says no" from "the input changed
+between check and execution".
+
+#### What the document must never carry
+
+§9 forbids logging parameter values. That rule does not reach literals written
+into the SQL itself, and this is where the gap bites: `SELECT * FROM cards WHERE
+pan = '4111…'` would put a primary account number into the dry-run output and
+from there into the audit record. **§9 is amended accordingly:** the audit record
+stores the digest and never the SQL text, and the dry-run document omits the SQL
+by default. It appears only under an explicit debugging flag, which is also the
+only way to obtain the argv preview.
+
+Parameter values are likewise absent. `params` carries names and a count; the
+values are covered by the digest and reach nothing else.
+
+#### Compatibility rules
+
+- Additive changes only within a major `schema_version`.
+- Consumers ignore fields they do not recognise.
+- An unrecognised `schema_version` or `reason_code` is a refusal.
+- The digest covers §13.12's tuple, never this document, so adding a field never
+  invalidates a token.
+- `generated_at` belongs to the audit record, not to this document. Two
+  dry-runs over identical input produce identical bytes, which makes the
+  document diffable and testable as a fixture.
+
+#### Locked decisions
+
+- **The dry-run document is a versioned API**, and an unrecognised version or
+  reason code denies.
+- **`status` distinguishes "classified clean" from "could not classify".**
+- **Reason codes are stable, append-only, and separate from human prose.**
+- **The SQL text and parameter values never appear by default**, and never in
+  the audit record, which stores the digest alone.
+- **The document is byte-reproducible**: no timestamps, no ordering instability.
