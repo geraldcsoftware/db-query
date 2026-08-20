@@ -198,3 +198,72 @@ func TestMergeCredential(t *testing.T) {
 		}
 	})
 }
+
+// loadTOML writes and loads a config, failing the test if it does not parse.
+func loadTOML(t *testing.T, body string) Config {
+	t.Helper()
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// tryLoadTOML loads a config and returns the error for tests that expect one.
+func tryLoadTOML(t *testing.T, body string) (Config, error) {
+	t.Helper()
+	return Load(writeConfig(t, body))
+}
+
+func TestReadOnlyDefaultsTrue(t *testing.T) {
+	cfg := loadTOML(t, `
+[hosts.a]
+provider = "postgres"
+`)
+	if !cfg.Hosts["a"].ReadOnly {
+		t.Error("a host that never mentions readonly must get the safe posture")
+	}
+}
+
+func TestReadOnlyExplicitAndInherited(t *testing.T) {
+	cfg := loadTOML(t, `
+[profiles.dev]
+provider = "postgres"
+readonly = false
+
+[hosts.scratch]
+inherit = "dev"
+
+[hosts.prod]
+inherit  = "dev"
+readonly = true
+
+[hosts.quoted]
+provider = "postgres"
+readonly = "false"
+`)
+	if cfg.Hosts["scratch"].ReadOnly {
+		t.Error("scratch should inherit readonly = false from its profile")
+	}
+	if !cfg.Hosts["prod"].ReadOnly {
+		t.Error("an explicit host key must beat the profile")
+	}
+	if cfg.Hosts["quoted"].ReadOnly {
+		t.Error(`readonly = "false" should parse as false`)
+	}
+	// The origin is what `db-query hosts <name>` reports, so it has to name
+	// the section that actually supplied the value.
+	if got := cfg.Hosts["scratch"].Origins["readonly"]; got != "profile dev" {
+		t.Errorf("origin: got %q, want %q", got, "profile dev")
+	}
+}
+
+func TestReadOnlyRejectsNonBoolean(t *testing.T) {
+	// This key decides whether writes are permitted. A config that does not
+	// say what it meant must not be guessed at.
+	for _, bad := range []string{`readonly = "yes"`, `readonly = 2`, `readonly = "on"`} {
+		if _, err := tryLoadTOML(t, "[hosts.a]\nprovider = \"postgres\"\n"+bad+"\n"); err == nil {
+			t.Errorf("%s: expected an error, got none", bad)
+		}
+	}
+}

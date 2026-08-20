@@ -898,6 +898,16 @@ func hostDetailRows(h config.HostConfig) adapter.Rows {
 	add("database", h.Database)
 	add("username", h.Username)
 	add("credential", h.Credential)
+	// readonly always prints, unlike the keys above, because its default is
+	// true and the absence of a line would read as "not set" rather than
+	// "writes are refused here". A posture has to be visible to be trusted.
+	{
+		k, v, src := "readonly", strconv.FormatBool(h.ReadOnly), h.Origins["readonly"]
+		if src == "" {
+			src = "default"
+		}
+		rows.Rows = append(rows.Rows, []*string{&k, &v, &src})
+	}
 
 	extras := make([]string, 0, len(h.Extra))
 	for k := range h.Extra {
