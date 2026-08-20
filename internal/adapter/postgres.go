@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
@@ -57,6 +58,21 @@ func (postgresAdapter) Env(cred credential.Credential, host config.HostConfig) m
 		ssl = "prefer"
 	}
 	env["PGSSLMODE"] = ssl
+
+	// A read-only host asks the engine to refuse writes, which holds against
+	// statements generated at runtime that no text scan can see: a DROP built
+	// inside a DO block is refused here even though the submission reads as a
+	// harmless call.
+	//
+	// This is a second layer, not the guarantee. The setting is a default
+	// rather than a constraint, and `SELECT set_config('default_transaction_
+	// read_only','off',false)` turns it off from inside a submission. The
+	// classifier refuses that call and grants are the actual control
+	// (docs/design.md §13.12); this catches the accidents and turns them into
+	// a clean early error.
+	if host.ReadOnly {
+		env["PGOPTIONS"] = "-c default_transaction_read_only=on"
+	}
 	return env
 }
 
@@ -69,6 +85,14 @@ func (postgresAdapter) Build(host config.HostConfig, q Query) (executor.Invocati
 		"-v", "ON_ERROR_STOP=1",
 		"-v", "VERBOSITY=verbose", // stderr carries SQLSTATE for schema-error detection
 		"-P", "null=" + pgNullSentinel,
+	}
+	// psql interpolates :name as raw text, so a bound value can close the
+	// statement and open another: with `WHERE id = :id`, a value of
+	// `1; DROP TABLE t` runs the DROP, and the SQL text stays clean, which
+	// puts it out of reach of any classifier. Refusing the unquoted form is
+	// the fix; :'name' and :"name" are quoted and escaped by psql itself.
+	if err := rejectUnquotedInterpolation(q.SQL, q.Params); err != nil {
+		return executor.Invocation{}, err
 	}
 	// User params bind only through psql's own -v; emitted only when the
 	// query has at least one param.
@@ -209,3 +233,85 @@ func (postgresAdapter) ParsePlan(executor.RawResult) (sqlscan.Class, string, err
 }
 
 func (postgresAdapter) Dialect() sqlscan.Dialect { return sqlscan.DialectPostgres }
+
+// rejectUnquotedInterpolation refuses a bound parameter referenced as :name
+// rather than :'name'. Only bound names are checked, because psql interpolates
+// nothing else.
+//
+// Literals, quoted identifiers, dollar-quoted bodies and comments are skipped:
+// psql does not interpolate inside them either, so flagging a colon there
+// would refuse legitimate SQL. A `::` cast is stepped over whole.
+//
+// The error names the parameter and never its value (§9).
+func rejectUnquotedInterpolation(sql string, params map[string]string) error {
+	if len(params) == 0 {
+		return nil
+	}
+	src := []rune(sql)
+	for i := 0; i < len(src); i++ {
+		switch {
+		case src[i] == '\'':
+			for i++; i < len(src); i++ {
+				if src[i] == '\'' {
+					if i+1 < len(src) && src[i+1] == '\'' {
+						i++
+						continue
+					}
+					break
+				}
+			}
+		case src[i] == '"':
+			for i++; i < len(src) && src[i] != '"'; i++ {
+			}
+		case src[i] == '-' && i+1 < len(src) && src[i+1] == '-':
+			for ; i < len(src) && src[i] != '\n'; i++ {
+			}
+		case src[i] == '/' && i+1 < len(src) && src[i+1] == '*':
+			for i += 2; i+1 < len(src) && !(src[i] == '*' && src[i+1] == '/'); i++ {
+			}
+			i++
+		case src[i] == '$':
+			if end, ok := skipDollarQuoted(src, i); ok {
+				i = end - 1
+			}
+		case src[i] == ':':
+			if i+1 < len(src) && src[i+1] == ':' {
+				i++ // a cast, not an interpolation
+				continue
+			}
+			if i+1 < len(src) && (src[i+1] == '\'' || src[i+1] == '"') {
+				continue // the quoted forms, which psql escapes
+			}
+			j := i + 1
+			for j < len(src) && (src[j] == '_' || unicode.IsLetter(src[j]) || unicode.IsDigit(src[j])) {
+				j++
+			}
+			name := string(src[i+1 : j])
+			if _, bound := params[name]; bound {
+				return fmt.Errorf(
+					"parameter %q is interpolated as :%s, which psql substitutes as raw text; "+
+						"write :'%s' so the value is quoted", name, name, name)
+			}
+			i = j - 1
+		}
+	}
+	return nil
+}
+
+// skipDollarQuoted returns the index just past a $tag$…$tag$ body starting at i.
+func skipDollarQuoted(src []rune, i int) (int, bool) {
+	j := i + 1
+	for j < len(src) && (src[j] == '_' || unicode.IsLetter(src[j]) || unicode.IsDigit(src[j])) {
+		j++
+	}
+	if j >= len(src) || src[j] != '$' {
+		return 0, false
+	}
+	delim := string(src[i : j+1])
+	rest := string(src[j+1:])
+	k := strings.Index(rest, delim)
+	if k < 0 {
+		return len(src), true
+	}
+	return j + 1 + len([]rune(rest[:k])) + len([]rune(delim)), true
+}
