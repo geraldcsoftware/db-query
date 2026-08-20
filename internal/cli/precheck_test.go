@@ -23,6 +23,7 @@ func dryRun(t *testing.T, cfg string, args ...string) (int, precheck.Document, s
 }
 
 func TestDryRunClassifiesWithoutRunning(t *testing.T) {
+	needsClassifier(t)
 	seedSchemaCache(t)
 	// No fake client is installed: a dry run must not need one, because it
 	// runs nothing.
@@ -54,6 +55,7 @@ func TestDryRunClassifiesWithoutRunning(t *testing.T) {
 }
 
 func TestDryRunReportsButDoesNotRefuse(t *testing.T) {
+	needsClassifier(t)
 	seedSchemaCache(t)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -75,6 +77,7 @@ func TestDryRunReportsButDoesNotRefuse(t *testing.T) {
 
 func TestGateRefusesAWriteOnAReadOnlyHost(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `echo "should not run"; exit 0`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -94,6 +97,7 @@ func TestGateRefusesAWriteOnAReadOnlyHost(t *testing.T) {
 
 func TestGateAllowsAWriteOnAWritableHost(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'n\n1\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	// A host declared writable is the operator having already said so; a
@@ -107,6 +111,7 @@ func TestGateAllowsAWriteOnAWritableHost(t *testing.T) {
 
 func TestGateRefusesADropEvenOnAWritableHost(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `echo "should not run"; exit 0`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	code, out, _ := run(t, "query", "--host", "testpg", "--config", writableConfig(t), "DROP TABLE people")
@@ -120,6 +125,7 @@ func TestGateRefusesADropEvenOnAWritableHost(t *testing.T) {
 
 func TestGateRefusesAClientDirective(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `echo "should not run"; exit 0`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	code, out, errb := run(t, "query", "--host", "testpg", "--config", writableConfig(t),
@@ -137,6 +143,7 @@ func TestGateRefusesAClientDirective(t *testing.T) {
 
 func TestPrecheckTokenMismatchIsItsOwnExitCode(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'n\n1\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -156,6 +163,7 @@ func TestPrecheckTokenMismatchIsItsOwnExitCode(t *testing.T) {
 
 func TestPrecheckTokenRoundTrips(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'id\n1\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -169,6 +177,7 @@ func TestPrecheckTokenRoundTrips(t *testing.T) {
 }
 
 func TestDryRunHonoursTheEnvironmentForm(t *testing.T) {
+	needsClassifier(t)
 	seedSchemaCache(t)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	t.Setenv("DB_QUERY_DRY_RUN", "1")
@@ -183,6 +192,7 @@ func TestDryRunHonoursTheEnvironmentForm(t *testing.T) {
 }
 
 func TestDryRunOmitsSQLUnlessAsked(t *testing.T) {
+	needsClassifier(t)
 	seedSchemaCache(t)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)

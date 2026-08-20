@@ -12,6 +12,7 @@ import (
 func queryOut(t *testing.T, extra ...string) string {
 	t.Helper()
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'id,name\n1,Ada\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
@@ -146,6 +147,7 @@ func TestQueryTableNoHeaders(t *testing.T) {
 
 func TestQueryMaxColWidth(t *testing.T) {
 	seedSchemaCache(t)
+	needsClassifier(t)
 	fakePsql(t, `printf 'note\nLorem ipsum dolor sit amet consectetur\n'`)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)

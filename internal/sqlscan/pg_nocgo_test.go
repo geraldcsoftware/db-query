@@ -13,7 +13,7 @@ func TestClassifyPostgresWithoutCgoRefuses(t *testing.T) {
 		if got.Class != ClassOpaque {
 			t.Errorf("%q: got %s, want opaque", sql, got.Class)
 		}
-		if Decide(got).Action == ActionAllow {
+		if Decide(got, false).Action == ActionAllow {
 			t.Errorf("%q: a build without the parser must never allow", sql)
 		}
 	}

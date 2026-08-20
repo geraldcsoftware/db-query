@@ -9,7 +9,10 @@ package sqlscan
 // build. This stand-in exists so that a CGO_ENABLED=0 build still compiles and
 // still runs, but reports every postgres submission as opaque with a reason
 // naming the absent parser, which §13.12 turns into a refusal.
-func ClassifyPostgres(sql string) Verdict {
+func ClassifyPostgres(string) Verdict {
 	return Opaque(MechanismParser, "unavailable",
 		"built without cgo: the PostgreSQL grammar is not compiled into this binary")
 }
+
+// ParserAvailable reports whether this build carries the PostgreSQL grammar.
+func ParserAvailable() bool { return false }

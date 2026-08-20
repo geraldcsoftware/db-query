@@ -226,3 +226,8 @@ func funcName(m protoreflect.Message) string {
 	}
 	return parts[len(parts)-1]
 }
+
+// ParserAvailable reports whether this build carries the PostgreSQL grammar.
+// Callers use it to tell "refused by policy" from "this build cannot decide",
+// which are the same refusal to a user but different facts to a test.
+func ParserAvailable() bool { return true }

@@ -13,6 +13,15 @@ import (
 
 var testKey = []byte("0123456789abcdef0123456789abcdef")
 
+// needsClassifier skips a test that expects a real postgres verdict. Without
+// cgo there is no grammar, so every submission is opaque by design (§13.13).
+func needsClassifier(t *testing.T) {
+	t.Helper()
+	if !sqlscan.ParserAvailable() {
+		t.Skip("built without cgo: the postgres classifier refuses every submission by design")
+	}
+}
+
 func TestDigestBindsMoreThanTheSQL(t *testing.T) {
 	base := Tuple{Provider: "postgres", Host: "dev", Database: "app", SQL: "SELECT 1",
 		ParamValues: map[string]string{"id": "1"}}
@@ -71,6 +80,7 @@ func evalPostgres(t *testing.T, sql string, params map[string]string) Document {
 }
 
 func TestTokenIsMintedOnlyForCleanSQL(t *testing.T) {
+	needsClassifier(t)
 	clean := evalPostgres(t, "SELECT 1", nil)
 	if clean.Decision.Action != sqlscan.ActionAllow {
 		t.Fatalf("a plain SELECT should be allowed, got %+v", clean.Decision)
@@ -182,6 +192,7 @@ func TestGateDoesNotLetATokenAnswerAChallenge(t *testing.T) {
 }
 
 func TestGateAllowsACleanRead(t *testing.T) {
+	needsClassifier(t)
 	doc := evalPostgres(t, "SELECT 1", nil)
 	tuple := Tuple{Provider: "postgres", Host: "h", Database: "d", SQL: "SELECT 1"}
 	if got, why := Gate(doc, Digest(tuple, testKey), tuple, testKey, nil); got != Proceed {
