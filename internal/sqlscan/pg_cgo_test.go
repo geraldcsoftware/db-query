@@ -14,12 +14,40 @@ func TestClassifyPostgres(t *testing.T) {
 		{"show", "SHOW search_path", ClassRead},
 		{"insert", "INSERT INTO t (a) VALUES (1)", ClassWrite},
 		{"update", "UPDATE t SET a = 1 WHERE id = 2", ClassWrite},
-		{"create", "CREATE TABLE t (a int)", ClassWrite},
-		{"alter", "ALTER TABLE t ADD COLUMN x int", ClassWrite},
 		{"drop", "DROP TABLE t", ClassDestructive},
 		{"truncate", "TRUNCATE t", ClassDestructive},
 		{"delete", "DELETE FROM t WHERE id = 1", ClassDestructive},
 		{"grant", "GRANT ALL ON t TO public", ClassAdmin},
+
+		// Schema changes are destructive whatever their surface verb: the
+		// boundary is data versus schema, not the presence of the word DROP.
+		// ALTER TABLE t DROP COLUMN x loses a column and its data while
+		// parsing as an ordinary AlterTableStmt, so a subtype walk is the
+		// wrong place to draw the line.
+		{"create table", "CREATE TABLE t (a int)", ClassDestructive},
+		{"alter table add column", "ALTER TABLE t ADD COLUMN x int", ClassDestructive},
+		{"alter table drop column", "ALTER TABLE t DROP COLUMN x", ClassDestructive},
+		{"alter table change type", "ALTER TABLE t ALTER COLUMN x TYPE text", ClassDestructive},
+		{"alter table detach partition", "ALTER TABLE t DETACH PARTITION p", ClassDestructive},
+		{"create index", "CREATE INDEX i ON t (a)", ClassDestructive},
+		{"create view", "CREATE VIEW v AS SELECT 1", ClassDestructive},
+		{"replace view", "CREATE OR REPLACE VIEW v AS SELECT 2", ClassDestructive},
+		{"create materialized view", "CREATE MATERIALIZED VIEW mv AS SELECT 1", ClassDestructive},
+		{"create table as", "CREATE TABLE u AS SELECT * FROM t", ClassDestructive},
+		{"create function", "CREATE FUNCTION f() RETURNS int AS 'SELECT 1' LANGUAGE sql", ClassDestructive},
+		{"rename table", "ALTER TABLE t RENAME TO u", ClassDestructive},
+		{"rename column", "ALTER TABLE t RENAME COLUMN a TO b", ClassDestructive},
+
+		// SELECT ... INTO creates and populates a table, but the grammar
+		// gives it a bare SelectStmt carrying an IntoClause. Read the top
+		// node alone and it passes for an ordinary read.
+		{"select into creates a table", "SELECT * INTO u FROM t", ClassDestructive},
+		{"select into in a CTE body", "WITH g AS (SELECT 1 AS n) SELECT * INTO u FROM g", ClassDestructive},
+
+		// Data movement that leaves the schema alone stays a write.
+		{"copy into a table", "COPY t FROM '/tmp/x'", ClassWrite},
+		{"copy out of a query", "COPY (SELECT * FROM t) TO '/tmp/x'", ClassWrite},
+		{"refresh materialized view", "REFRESH MATERIALIZED VIEW mv", ClassWrite},
 
 		// The cases a keyword scan gets wrong, in both directions.
 		{"delete carried in a CTE", "WITH g AS (DELETE FROM t RETURNING *) SELECT * FROM g", ClassDestructive},

@@ -80,6 +80,13 @@ func TestSQLServerParsePlan(t *testing.T) {
 			sqlscan.ClassWrite,
 		},
 		{
+			// SELECT INTO creates the target table, so it is a schema change
+			// on this provider for the same reason it is on postgres.
+			"select into",
+			executor.RawResult{Stdout: []byte(`<StmtSimple StatementType="SELECT INTO" />`)},
+			sqlscan.ClassDestructive,
+		},
+		{
 			"a batch takes its worst statement",
 			executor.RawResult{Stdout: []byte(`<StmtSimple StatementType="SELECT" /><StmtSimple StatementType="DELETE" />`)},
 			sqlscan.ClassDestructive,

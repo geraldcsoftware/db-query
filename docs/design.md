@@ -959,11 +959,40 @@ classify with confidence is therefore `opaque`, and **`opaque` is treated as
 `destructive`**, never as safe. A scanner that permits what it failed to
 understand manufactures false assurance, which is worse than no scanner.
 
-Statements are classified into `read`, `write`, `ddl`, `destructive`, `admin`,
+Statements are classified into `read`, `write`, `destructive`, `admin`,
 `client_directive` and `opaque`. `WITH` is followed to its terminal statement
 and any DML inside a CTE body is flagged, so row 6 above classifies as
 `destructive`. `EXPLAIN ANALYZE` classifies as the statement it wraps, because it
 executes it.
+
+**The write/destructive boundary is data versus schema.** `write` covers
+statements that change rows and nothing else: `INSERT`, `UPDATE`, `MERGE`,
+`COPY` in either direction, and `REFRESH MATERIALIZED VIEW`. Everything that
+changes the shape of the database is `destructive` alongside the statements
+that lose data outright, including `CREATE TABLE`, `CREATE INDEX`, `CREATE
+VIEW`, `CREATE FUNCTION`, `CREATE TABLE AS`, `ALTER TABLE` and `ALTER …
+RENAME`. There is no separate `ddl` class: the two would gate identically on
+both host postures, so a split would add a class and a reason code without
+changing any outcome.
+
+The boundary is drawn at data versus schema rather than at the lossiness of
+the individual statement, because lossiness is not visible where the
+classification happens. `ALTER TABLE t DROP COLUMN x` discards a column and
+every value in it, but the grammar gives it the same `AlterTableStmt` node as
+`ADD COLUMN`; separating them means enumerating every `AlterTableCmd` subtype
+and misclassifying whichever ones a later PostgreSQL adds. The consequence is
+that a harmless `CREATE INDEX` meets the same challenge as a `DROP TABLE`,
+which is accepted: both warrant a human look.
+
+`SELECT … INTO` needs naming separately. It creates and populates a table, yet
+parses as a bare `SelectStmt` whose target survives only as an `IntoClause`
+hanging off it, so a classifier reading statement nodes alone passes it as an
+ordinary read. The clause itself is therefore what classifies. On SQL Server
+the equivalent is the `SELECT INTO` plan `StatementType`, which classifies
+destructive for the same reason. Other DDL is not enumerated on either
+provider: an unlisted statement type falls to `opaque`, which this section
+already treats as `destructive`, so the allowlists stay short and stay
+fail-closed.
 
 #### The `readonly` host property
 

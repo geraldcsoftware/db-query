@@ -251,9 +251,12 @@ func mssqlClassFor(t string) sqlscan.Class {
 	switch strings.ToUpper(strings.TrimSpace(t)) {
 	case "SELECT":
 		return sqlscan.ClassRead
-	case "INSERT", "UPDATE", "MERGE", "SELECT INTO":
+	case "INSERT", "UPDATE", "MERGE":
 		return sqlscan.ClassWrite
-	case "DELETE", "TRUNCATE TABLE", "DROP TABLE", "DROP INDEX":
+	// SELECT INTO sits with the schema changes, not the writes: it creates the
+	// target table. Every other DDL verb reaches the default and denies, so the
+	// allowlist stays short without leaving DDL classified as a write.
+	case "DELETE", "TRUNCATE TABLE", "DROP TABLE", "DROP INDEX", "SELECT INTO":
 		return sqlscan.ClassDestructive
 	case "GRANT", "REVOKE", "DENY", "SET":
 		return sqlscan.ClassAdmin
