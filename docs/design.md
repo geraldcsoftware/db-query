@@ -323,6 +323,8 @@ var renderers = map[string]Renderer{
 - **Lazy, per-invocation resolution.** Resolve only the one host in play; never bulk-resolve the config. Unused hosts' vault paths are never hit; secrets don't linger resolved.
 - **`sqlcmd` `$(...)` substitution is unsafe by default** — a textual macro with no quoting. Every param bound into a SQL Server saved query is untrusted input. Sharpest edge in the design; v1 mitigation and the v2 ceiling are locked in §7.3.
 - **No secrets in the query cache or logs.** Saved queries store SQL with placeholders only. If logging invocations, log param *names*, never values.
+- **Destructive-statement safety is specified in §13.12**, which amends this section: hosts default to `readonly = true`, client directives are rejected, parameter validation applies to both providers, and escalation is an operator challenge rather than a terminal test.
+- **The no-values rule extends to SQL literals (§13.14).** Logging param names only is not sufficient: a literal written into the SQL text, such as an account number in a `WHERE` clause, would reach the dry-run output and the audit record. The audit record stores the tuple digest and never the SQL; the dry-run document omits the SQL unless explicitly asked for.
 
 ## 10. Open decisions
 
@@ -348,6 +350,9 @@ Genuinely unresolved — not yet locked:
 - `--output json|table|text|auto` (default `auto`, resolved by TTY in the CLI layer); parse-once into neutral `Rows`, render-once per format; errors honor the format.
 - NULL fidelity via `[][]*string`. **v1 accepts sqlcmd Path A rendering NULL as literal `NULL`; faithful SQL Server NULL is a v2 patch.**
 - **`--raw` passthrough is out of v1** (deferred to v2). Every query in v1 goes through the normal build → run → parse → render path.
+- **Destructive-statement safety (§13.12):** `readonly = true` by default, grants as the control, `opaque` classified as `destructive`, precheck tokens minted only for clean SQL, no automation exemption.
+- **Classifier mechanism (§13.13):** postgres classifies offline with PostgreSQL's own grammar, SQL Server through the engine planner; callers switch on a capability error, not a provider name.
+- **Dry-run document (§13.14):** a versioned API with stable reason codes; unrecognised version or code denies; no SQL text or param values, ever, in the audit record.
 
 ## 12. Build order
 
@@ -909,3 +914,605 @@ results therefore carry the session generation they were dispatched under, and a
 result whose generation no longer matches is discarded. Without it, rows fetched
 from the database just left would render into the pane of the one just arrived
 at — the failure mode that makes a switcher worse than no switcher.
+
+### 13.12 Destructive-statement safety (extends §6, §7.3; amends §9)
+
+SQL reaches `query` five ways: a positional argument, `-f file`, stdin, a
+`--source` saved query, and shell expansion into any of those. Parameter values
+arrive separately and are interpolated by the client, not by Go. A caller
+inspecting a command line therefore cannot know what will be executed, which
+matters because agent tooling increasingly sits in front of this CLI and is
+expected to decide whether a command is safe before it runs.
+
+Two problems hide behind that, and conflating them produces controls that do not
+work. **Transparency**: only db-query knows the final resolved SQL, so any
+external check must ask the tool rather than parse the command line.
+**Decidability**: even holding the exact text, effect is not statically
+decidable, because both providers can generate statements at runtime.
+
+#### What was measured
+
+Seven payloads were run against PostgreSQL 16.13 through the built binary using
+the adapter's real flags. All seven executed:
+
+| Payload as written | What actually happened |
+| --- | --- |
+| `SELECT 1 AS ok;` then `\! echo … > file` | shell command ran, no SQL effect |
+| `SELECT 'DROP TABLE victims'` then `\gexec` | table dropped |
+| `SELECT 1 AS harmless;` then `\i payload.sql` | table dropped from an unseen file |
+| `SELECT * FROM victims WHERE id = :id`, `--param "id=1; DROP TABLE victims"` | row returned **and** table dropped |
+| `DO $$ BEGIN EXECUTE 'DROP TABLE victims'; END $$;` | table dropped |
+| `WITH g AS (DELETE FROM victims WHERE id > 1 RETURNING *) SELECT …` | rows deleted, statement opens with `WITH` |
+| `\copy (SELECT * FROM victims) TO PROGRAM 'cat > file'` | rows piped to a shell command |
+
+A keyword scanner catches none of rows 1, 2, 3, 5 or 7. Row 4 is invisible even
+with the full SQL text, because the payload rides in a parameter value. Row 6
+defeats first-keyword classification. This is the evidence for treating
+classification as an affordance rather than a control.
+
+#### Classification informs, the engine enforces
+
+The classifier's verdict is advisory by construction. Stripping string literals
+is required to avoid false-positives on the word "delete" in prose, and it is
+exactly what hides `DO … EXECUTE` and `\gexec`. Anything the lexer cannot
+classify with confidence is therefore `opaque`, and **`opaque` is treated as
+`destructive`**, never as safe. A scanner that permits what it failed to
+understand manufactures false assurance, which is worse than no scanner.
+
+Statements are classified into `read`, `write`, `ddl`, `destructive`, `admin`,
+`client_directive` and `opaque`. `WITH` is followed to its terminal statement
+and any DML inside a CTE body is flagged, so row 6 above classifies as
+`destructive`. `EXPLAIN ANALYZE` classifies as the statement it wraps, because it
+executes it.
+
+#### The `readonly` host property
+
+`readonly` is a core config key, defaulting to `true`. It is a core key rather
+than an `Extra` passthrough so that `readonly = "yes"` is a config error instead
+of a silently ignored value. Because `flatten` merges raw key maps before any
+key is interpreted, it inherits through `[profiles.*]` with no change to the
+inheritance machinery, and `db-query hosts <name>` reports its origin for free.
+
+The obvious implementation, setting `PGOPTIONS=-c
+default_transaction_read_only=on`, is **not sufficient on its own**, and the
+measurements say why. Delivered on stdin as the adapter delivers it:
+
+| Escape attempt | Escapes | Catchable in text |
+| --- | --- | --- |
+| `SET default_transaction_read_only = off` | yes | yes |
+| `BEGIN; SET TRANSACTION READ WRITE; …` | yes | yes |
+| `SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE` | yes | yes |
+| `SELECT set_config('default_transaction_read_only','off',false)` | yes | probably |
+| the same via `DO $$ PERFORM set_config(…) $$` | **yes** | **no** |
+| the same with the parameter name concatenated at runtime | **yes** | **no** |
+| `SET transaction_read_only = off` at top level | no | n/a |
+| `RESET transaction_read_only`, `RESET ALL` | no | n/a |
+| `ALTER ROLE … SET default_transaction_read_only = off` | no | n/a |
+
+The split is per-transaction versus default-for-subsequent-transactions.
+`transaction_read_only` applies to the current transaction, and on stdin each
+statement is its own implicit transaction, so setting it affects nothing that
+follows. `default_transaction_read_only` sets the default for the next
+transaction, which is why the same payload escapes on stdin and does not under
+`-c`. Delivery mode is therefore part of the threat model, not an incidental
+detail. `REVOKE SET ON PARAMETER` does not close this: USERSET parameters cannot
+be locked down that way.
+
+The last two rows of the table are reachable from inside PL/pgSQL, so no text
+classifier closes them. Grants do. The same battery run against a login granted
+only `SELECT`, with `PGOPTIONS` unset, blocked every entry above and every
+payload from the first table, while ordinary `SELECT` continued to work.
+
+`readonly = true` therefore means two things, and the portable one is primary:
+
+1. **A connect-time privilege probe.** The credential is asked whether it can
+   write anywhere. If it can, the run is refused. This works on both providers
+   and is the part that is actually true.
+2. **`PGOPTIONS=-c default_transaction_read_only=on` on postgres**, as a second
+   layer that turns accidental writes into a clean early error.
+
+SQL Server gets the probe only. T-SQL has no session-level read-only switch:
+`ApplicationIntent=ReadOnly` routes to a readable secondary in an availability
+group and enforces nothing on a standalone server or a primary, `ALTER DATABASE
+… SET READ_ONLY` is database-wide, and `EXECUTE AS USER … WITH NO REVERT` needs
+a pre-created principal. Those three claims come from documentation and require
+verification against a real instance before the SQL Server half is built. The
+probe is what makes the property mean the same thing on both providers.
+
+The probe runs per invocation rather than being cached with the schema. It costs
+one round trip on a connection that is being made anyway, and a cached
+privilege result goes stale silently after a grant change, which is the wrong
+way for this particular fact to fail.
+
+**Upgrade consequence.** A host whose credential can write and whose config does
+not set `readonly = false` stops working on first upgrade. That is intended: the
+alternative is a default that quietly promises a guarantee it is not providing.
+The refusal names both remedies, and it names them without describing the
+precheck mechanism:
+
+```
+db-query: refusing to run: host "prod-core" is readonly = true, but its
+credential can write. Point the host at a read-only login, or set
+readonly = false for that host in ~/.config/db-query/config.toml.
+```
+
+#### The precheck token
+
+`--dry-run` resolves SQL from whichever of the five sources applies, classifies
+it, and prints the result as JSON without connecting to run it. This is the
+transparency surface: a hook re-invokes db-query in dry-run mode and reads a
+verdict rather than parsing a command line.
+
+The token binds a **canonical tuple**, not the SQL text: `provider, host,
+database, resolved SQL, parameter values`. Two replays require this. Hashing SQL
+alone lets a caller dry-run against `dev` and execute against `prod` with the
+same digest; and it lets a caller dry-run with `--param id=1` and execute with
+`--param "id=1; DROP TABLE victims"`, which is row 4 of the first table and
+would defeat the entire scheme. Parameter values are covered by the digest and
+never emitted: the tuple exists only long enough to be hashed, and the dry-run
+JSON carries the digest and parameter *names*, preserving §9's rule that values
+never reach a log.
+
+**A token is minted only for SQL that classified clean.** Dry-run still reports
+the full classification for anything else, but emits no passing token for it.
+Without this the token proves only that a precheck happened, which an agent can
+satisfy by running the precheck itself and ignoring the answer. With it, the
+token means "checked, and clean", which is a claim the tool can stand behind,
+and escalation is never something the tool hands out.
+
+Execution classifies again, on the same function and the same resolved value.
+This is not redundancy: it closes a genuine time-of-check-to-time-of-use window,
+because `-f` and `--source` both read files that can change between the check
+and the run, and stdin cannot be replayed at all.
+
+| Presented | Verdict at execution | Outcome |
+| --- | --- | --- |
+| token, tuple matches | clean | runs |
+| token, tuple differs | any | refused, exit 6 |
+| no token | clean | runs |
+| no token | destructive or opaque | operator challenge |
+| token | destructive or opaque | operator challenge; the token cannot override |
+
+Row 3 matters: a missing token is not itself a failure, or every scheduled
+`SELECT` would become interactive. It is a missing token *together with* a
+non-clean verdict that escalates.
+
+The hook passes both through the environment, `DB_QUERY_DRY_RUN=1` and
+`DB_QUERY_PRECHECK=<digest>`, rather than by appending flags. Appending to an
+agent-authored command line is string surgery that breaks on `db-query q "$SQL"`,
+on compound commands, and on heredocs. The environment carries the same
+information with no parsing, and it matches the pattern `envDefaults` already
+establishes. Equivalent flags exist for manual use.
+
+The digest is keyed with a per-installation secret generated at first run, not a
+build-time constant, so one extraction does not compromise every installation.
+The key is a deterrent and is documented as one: the agent and db-query run as
+the same user, so any secret the tool can read the caller can read, and the key
+is not what makes the scheme work. What makes it work is that a token can only
+exist for clean SQL.
+
+The digest is deterministic over the tuple rather than single-use. The tuple
+already binds everything that distinguishes one execution from another, and a
+nonce would add hook-side state for no additional guarantee.
+
+#### The operator challenge
+
+Escalation is a challenge answered on `/dev/tty`, not a test for a terminal.
+Testing for one fails in the wrong direction, which was measured with the same
+`os.ModeCharDevice` check the CLI already uses for output resolution:
+
+| Caller | stdin | stdout | `/dev/tty` |
+| --- | --- | --- | --- |
+| non-interactive shell | false | false | unavailable |
+| the same, wrapped in `script -qec` | true | true | openable |
+| the same, wrapped in a three-line `pty.spawn` | true | true | openable |
+| operator at a terminal, output piped | true | **false** | openable |
+| operator at a terminal, SQL on stdin | **false** | true | openable |
+
+Rows 2 and 3 are one word of prefix and grant a full terminal. Rows 4 and 5 are
+ordinary documented usage that a descriptor test would refuse. Whichever
+descriptor is chosen, a wrapped caller is admitted and a real operator is
+blocked.
+
+The challenge instead opens `/dev/tty` directly, prints the fully-qualified
+target and a nonce, and requires the nonce typed back. Opening `/dev/tty`
+explicitly is what survives rows 4 and 5, where stdin carries SQL and stdout is
+a pipe. An automated caller can still answer it, but only by reading a nonce and
+echoing it, which is a deliberate and visible act rather than a passive wrapper.
+
+There is no exemption for automation. Migrations and scheduled corrections run
+through their own paths, and a caller with no `/dev/tty` cannot escalate. This
+blocks some legitimate work, which is the accepted trade: an exemption is the
+thing that would be found and used.
+
+#### Client directives and parameter binding
+
+db-query builds its own invocation, pins its own output format and delivers SQL
+on stdin, so it never needs psql backslash commands or sqlcmd colon commands.
+Both are rejected lexically: any statement whose first non-whitespace character
+is `\` or `:` outside a literal is refused. This closes rows 1, 3 and 7 of the
+first table, which engine-side read-only cannot reach because those directives
+are executed by the client and never sent to the server. `-X` is added to the
+sqlcmd invocation, which is that client's own switch for disabling commands that
+compromise security.
+
+§7.3's sqlcmd value validation is extended to postgres, which had none: the
+postgres adapter appended `-v k=v` unchecked, which is why row 4 works there.
+Unquoted `:name` interpolation is refused in favour of `:'name'` when a
+parameter is bound, so a value cannot terminate a statement.
+
+#### Where the gate lives
+
+`session.RunOnce` and `tui.execute` are independent paths and both call
+`Adapter.Build` before `executor.Run`. `Build` is therefore the only choke point
+common to both, it already receives the `HostConfig` and the SQL, it is
+provider-specific so it knows the dialect, and both callers already handle a
+`Build` error. The gate goes there, and the CLI and the TUI are covered by
+construction. A gate in `RunOnce` alone would leave the TUI open.
+
+Exit codes extend §13.3: **5** for a policy refusal, **6** for a tuple mismatch.
+They are distinct so a caller can tell "policy says no" from "the SQL changed
+between check and execution", which are different failures needing different
+responses.
+
+#### What this does not do
+
+Recorded so the control set is not over-credited. The keyed digest is a
+deterrent, not a boundary, for the same-user reason above. The classifier cannot
+see inside dynamic SQL and is not relied on to. The read-only GUC is escapable
+and is a second layer, not the guarantee. The guarantee is the credential's
+grants, and a host pointed at a writable login has no guarantee at all, which is
+why `readonly = true` refuses rather than proceeds. Every run appends one record
+carrying timestamp, host, database, tuple digest, classification and decision,
+which is a detective control and the evidence trail for PCI DSS v4.0.1
+requirement 10.2 (clause verification required against current scoping).
+
+#### Locked decisions
+
+- **`readonly` is a core key, default `true`**, meaning privilege probe plus, on
+  postgres, `default_transaction_read_only`. It inherits through profiles.
+- **Grants are the control**; the GUC and the classifier are layers above it.
+- **`opaque` classifies as `destructive`.** Unclassifiable is never safe.
+- **A precheck token is minted only for clean SQL**, and binds `provider, host,
+  database, SQL, parameter values`, never SQL alone.
+- **Execution reclassifies**, closing the check-to-use window on `-f`,
+  `--source` and stdin.
+- **Escalation is a `/dev/tty` challenge**, never a terminal-descriptor test.
+- **No automation exemption.** Blocking legitimate work is preferred to an
+  exemption that would be discovered and used.
+- **Client directives are rejected lexically**; sqlcmd gains `-X`.
+- **Parameter validation applies to both providers**; postgres unquoted `:name`
+  is refused when a parameter is bound.
+- **The gate lives in `Adapter.Build`**, the choke point shared by the CLI and
+  the TUI.
+
+### 13.13 The classifier interface: one verdict, two mechanisms (extends §13.12)
+
+§13.12 specified *what* the classifier must decide and left *how* open. The two
+providers resolve it differently, because what is available to each differs.
+
+**Postgres classifies offline**, using `pganalyze/pg_query_go`, which vendors
+PostgreSQL's own grammar. Measured on the classification corpus it is correct on
+all thirty cases including the three that defeat text matching, and it falsely
+rejects none of twenty legitimate read queries. A verdict costs 0.11 ms for a
+short statement and 0.25 ms for a complex one, and needs no database.
+
+**SQL Server classifies through the engine's planner**, because no importable
+T-SQL parser exists as a Go module. `SET SHOWPLAN_XML ON` compiles a batch
+without executing it, which is the same shape as the `EXPLAIN (FORMAT JSON)`
+mechanism measured for postgres, where every write funnels through a single
+`ModifyTable` node carrying `Insert`, `Update`, `Delete` or `Merge`, and
+everything to be denied outright fails to plan at all. The SQL Server half rests
+on documentation rather than measurement and requires verification against a
+real instance.
+
+The pure-Go alternative for postgres was rejected on evidence: it pulls 181
+transitive modules against the project's fifteen and falsely rejects six of
+twenty ordinary read queries, including full-text search, `GROUPING SETS` and
+ordered-set aggregates. Under §13.12's fail-closed rule that is not a usable
+error rate.
+
+#### The interface
+
+Classification joins the adapter for the same reason everything else
+provider-specific does, and it keeps §11's separation intact: **adapters build
+and parse, the executor runs.** No adapter is handed a way to execute anything.
+
+```go
+// Classify reports what a submission would do. An adapter that can decide from
+// the text alone returns a verdict. One that needs the engine returns
+// ErrNeedsPlan, and the caller then drives PlanInvocation and ParsePlan for
+// each statement. Callers switch on that error, never on the provider name, so
+// a third provider chooses its own mechanism without touching the call site.
+Classify(sql string) (Verdict, error)
+
+// PlanInvocation builds a plan-only probe for one statement. ParsePlan turns
+// the raw result into that statement's verdict. Both are unused by an adapter
+// whose Classify succeeds.
+PlanInvocation(host config.HostConfig, stmt string) (executor.Invocation, error)
+ParsePlan(r executor.RawResult) (Verdict, error)
+```
+
+A `Verdict` records the mechanism that produced it:
+
+```go
+type Verdict struct {
+    Class      Class       // the highest class across every statement
+    Mechanism  string      // "parser" or "planner"
+    Statements []Statement
+}
+```
+
+`Mechanism` is not decoration. It reaches the dry-run JSON and the audit record
+because the two carry different guarantees: a parser verdict is a statement
+about the text, a planner verdict is a statement about what one server, at one
+version, would do with it. An auditor reading a record needs to know which.
+
+#### Order of operations
+
+1. **The lexical pre-pass**, shared by both providers and running first. It
+   rejects client directives per §13.12 and splits the submission into
+   statements. It needs neither a parser nor a connection, which is what lets it
+   reject `\!` and `:!!` on a host whose database is unreachable.
+2. **The provider mechanism**, selected by the `ErrNeedsPlan` contract above.
+3. **The verdict**, reduced to the highest class found.
+
+#### Two rules that make each mechanism fail closed
+
+**Postgres allowlists node types.** The set enumerates what is read-safe, and
+anything absent classifies `opaque`, which §13.12 already treats as
+`destructive`. A denylist would invert the failure: a statement type added by a
+future PostgreSQL release, and therefore absent from the list, would be
+permitted. The list must be an allowlist for the same reason the whole design is
+fail-closed, and its maintenance is a release-tracking task, not an optional
+tidy-up.
+
+**SQL Server treats an unplannable statement as opaque.** A batch that does not
+compile is not thereby safe, and the plan must contain no write operation at
+all. A failure to plan for a reason that is not policy, a missing table, say,
+stays distinguishable through the existing `IsSchemaError` path rather than
+being reported as a refusal.
+
+#### Build consequences
+
+`pg_query_go` requires cgo, which the current release configuration forbids.
+Measured: `CGO_ENABLED=0` yields `undefined: pg.Parse`, and the release binary
+grows from 5.7 MB to 12.3 MB and stops being statically linked.
+
+The release job runs on `ubuntu-latest` and cross-compiles, which cannot work
+with cgo. The remedy is narrower than it first appears, because the only targets
+are `darwin/amd64` and `darwin/arm64`: a single Apple Silicon runner can produce
+both, since the Xcode SDK carries both slices. That needs proving in CI before
+it is relied on.
+
+The parser sits behind a build tag so a cgo-less build still compiles. Its
+stand-in returns `opaque` with a reason naming the missing parser, so such a
+build refuses postgres work loudly rather than passing it through. A safety
+component must never be the thing that silently disappears from a build.
+
+#### The asymmetry this creates, stated plainly
+
+A postgres pre-check costs 0.11 ms and works with the database down. A SQL
+Server pre-check costs a connection, a credential resolution and a round trip,
+and fails when the database is unreachable. Under §13.12's rule that a missing
+token plus a non-clean verdict escalates, **an unreachable SQL Server host sends
+every destructive-looking query to the operator challenge**, which during an
+outage is an approval storm rather than a safety net. The dry-run JSON therefore
+reports the mechanism and whether the pre-check completed, so a hook can tell
+"classified clean" from "could not classify".
+
+Credential resolution is uncached and shells out (`internal/credential/bws.go`
+runs `bws secret get`), so on a SQL Server host the pre-check pays that cost a
+second time. Caching a resolved credential for the seconds between pre-check and
+execution is the only part of that latency that can be reclaimed, and it is
+deferred rather than specified here.
+
+#### Locked decisions
+
+- **Postgres classifies offline via `pg_query_go`; SQL Server classifies via the
+  engine planner.** The mechanism is the adapter's business.
+- **Callers switch on `ErrNeedsPlan`, never on the provider name.**
+- **Adapters still never execute.** Planner probes are built and parsed by the
+  adapter and run by the executor, as everything else is.
+- **The postgres node set is an allowlist**, so an unrecognised statement type
+  denies.
+- **The verdict records its mechanism**, and that reaches the dry-run JSON and
+  the audit record.
+- **The lexical pre-pass runs first for both providers**, so client directives
+  are rejected without a parser or a connection.
+- **The parser is build-tagged with a fail-closed stand-in**, never silently
+  absent.
+
+### 13.14 The dry-run document (extends §13.12, §13.13; amends §9)
+
+`--dry-run` resolves SQL from whichever of §13.12's five sources applies,
+classifies it by §13.13's provider mechanism, and prints one JSON document
+without running the query. It is the interface a hook reads, and it is
+therefore an API: the fields below are a contract, not debug output.
+
+```json
+{
+  "schema_version": 1,
+  "status": "classified",
+  "tool": { "version": "0.12.0", "commit": "5fa5f58" },
+  "target": { "provider": "postgres", "host": "prod-core", "database": "core" },
+  "source": { "kind": "file", "ref": "/tmp/report.sql" },
+  "readonly": { "configured": true, "probe": "passed", "engine_enforced": true },
+  "classification": {
+    "class": "destructive",
+    "mechanism": "parser",
+    "decided_by_version": "pg_query_go/v6 (PostgreSQL 17 grammar)",
+    "statements": [
+      { "index": 1, "class": "read",        "decided_by": "SelectStmt" },
+      { "index": 2, "class": "destructive", "decided_by": "DeleteStmt in CTE" }
+    ]
+  },
+  "params": { "names": ["who"], "count": 1 },
+  "digest": { "alg": "hmac-sha256", "value": "…" },
+  "precheck_token": null,
+  "decision": {
+    "action": "challenge",
+    "reason_code": "CLASS_DESTRUCTIVE",
+    "reason": "statement 2 deletes rows"
+  }
+}
+```
+
+#### Why each field is there
+
+**`schema_version`, and the rule attached to it.** A consumer that does not
+recognise the version **must refuse**, never proceed. Everything else in
+§13.12 rests on the hook reading this document correctly, and the failure it
+guards against is quiet: rename `decision.action` in a later release and a hook
+testing `action == "block"` reads undefined and allows. An ordinary upgrade
+would silently disable the control. Versioning is what turns that into a
+refusal.
+
+**`status`** is `classified` or `incomplete`. §13.13's asymmetry makes this
+load-bearing: the planner mechanism needs a reachable database, so a SQL Server
+pre-check can fail for reasons that have nothing to do with the SQL. An
+`incomplete` document carries no verdict and must never read as a clean one.
+
+**`mechanism` and `decided_by_version`** record how the verdict was reached and
+under which grammar or which server. A parser verdict is a claim about the text;
+a planner verdict is a claim about what one server at one version would do with
+it. A reviewer reading an audit record a year later needs to know which, and
+needs the version to reproduce it.
+
+**`source`** names which of the five inputs the SQL came from. A hook's
+confidence legitimately differs: it cannot replay stdin, and a file can change
+between the check and the run. It also answers the forensic question the digest
+cannot, which is where the statement came from.
+
+**`readonly`** exposes the posture actually in force, distinguishing the
+configured value from whether the privilege probe passed. §13.12 lets a hook
+demand a strict posture for production hosts, and it can only do that if the
+posture is visible rather than assumed.
+
+**`statements`** carries per-statement index, class and what decided it. A
+refusal on statement seven of twelve that cannot say which statement is not
+actionable.
+
+**`decision.reason_code`** is a stable machine-readable code, separate from the
+human prose in `reason`. Hooks branch on the code. A hook branching on English
+breaks the first time the wording is improved.
+
+**`precheck_token`** is explicitly `null` rather than absent when no token was
+minted, because per §13.12 a token exists only for SQL that classified clean,
+and a missing key is indistinguishable from a truncated document.
+
+#### Reason codes
+
+Append-only. A code is never repurposed, and a consumer meeting an unknown code
+treats it as a refusal.
+
+| Code | Meaning | Action |
+| --- | --- | --- |
+| `OK_READ` | every statement reads | allow |
+| `CLASS_WRITE` | a statement writes | challenge |
+| `CLASS_DESTRUCTIVE` | a statement drops, truncates or deletes | challenge |
+| `CLASS_ADMIN` | a statement changes privileges or server state | challenge |
+| `CLASS_OPAQUE` | the mechanism could not classify a statement | challenge |
+| `CLIENT_DIRECTIVE` | a psql or sqlcmd directive was present | block |
+| `PARAM_UNSAFE` | a parameter value carries statement-terminating syntax | block |
+| `READONLY_PROBE_FAILED` | `readonly` is set but the credential can write | block |
+| `PARSER_UNAVAILABLE` | built without the classifier for this provider | block |
+| `PRECHECK_INCOMPLETE` | classification could not be completed | challenge |
+| `DIGEST_MISMATCH` | the tuple differs from the one pre-checked | block |
+
+`block` refuses outright. `challenge` routes to §13.12's operator challenge.
+Exit codes follow §13.12: **5** for a refusal, **6** for `DIGEST_MISMATCH`,
+which is distinct so a caller can tell "policy says no" from "the input changed
+between check and execution".
+
+#### What the document must never carry
+
+§9 forbids logging parameter values. That rule does not reach literals written
+into the SQL itself, and this is where the gap bites: `SELECT * FROM cards WHERE
+pan = '4111…'` would put a primary account number into the dry-run output and
+from there into the audit record. **§9 is amended accordingly:** the audit record
+stores the digest and never the SQL text, and the dry-run document omits the SQL
+by default. It appears only under an explicit debugging flag, which is also the
+only way to obtain the argv preview.
+
+Parameter values are likewise absent. `params` carries names and a count; the
+values are covered by the digest and reach nothing else.
+
+#### Compatibility rules
+
+- Additive changes only within a major `schema_version`.
+- Consumers ignore fields they do not recognise.
+- An unrecognised `schema_version` or `reason_code` is a refusal.
+- The digest covers §13.12's tuple, never this document, so adding a field never
+  invalidates a token.
+- `generated_at` belongs to the audit record, not to this document. Two
+  dry-runs over identical input produce identical bytes, which makes the
+  document diffable and testable as a fixture.
+
+#### Locked decisions
+
+- **The dry-run document is a versioned API**, and an unrecognised version or
+  reason code denies.
+- **`status` distinguishes "classified clean" from "could not classify".**
+- **Reason codes are stable, append-only, and separate from human prose.**
+- **The SQL text and parameter values never appear by default**, and never in
+  the audit record, which stores the digest alone.
+- **The document is byte-reproducible**: no timestamps, no ordering instability.
+
+### 13.15 What the build changed (amends §13.12, §13.13)
+
+Three things the specification got wrong or left open, corrected here against
+what was built rather than left to diverge quietly.
+
+**The gate does not live in `Adapter.Build`.** §13.13 put it there on the
+grounds that `Build` is the choke point both execution paths share. It is, but
+it cannot see what the decision depends on: the presented token, the operator's
+answer, and the source the SQL arrived through. Threading those through
+`adapter.Query` would put command-line concerns into the adapter contract, which
+is the thing that contract exists to keep out.
+
+What `Build` does keep is the parameter check, which is genuinely provider
+knowledge. Everything else is a gate in `internal/precheck` that the query path
+calls once, after every source of SQL has resolved to one final string.
+
+**`readonly` is the gate's threshold, not just an engine setting.** §13.12
+described the decision table as though every host were read-only. Applied
+literally, a host explicitly configured `readonly = false` would still send
+every `INSERT` to the operator challenge, which makes the gate intolerable on a
+development host, and a gate people switch off protects nothing.
+
+The threshold now follows the posture. A read-only host permits reads. A
+writable host permits writes as well, because that configuration is the
+operator having already said so. Destructive and administrative statements meet
+a human on either kind of host, and so does anything the mechanism could not
+classify. Client directives are refused outright on both.
+
+**Placeholders had to be normalised before classification.** `:'name'` and
+`$(name)` are expanded by psql and sqlcmd, so neither PostgreSQL's grammar nor
+SQL Server's planner can parse one. Classified as written, every parameterised
+query fell to `opaque` and was refused, which would have made `--param`
+unusable. Classification therefore sees placeholders replaced by inert
+literals. The digest still binds the original text, and the values are still
+validated in the adapter: only the text handed to the mechanism changes.
+
+This was caught by the existing test suite rather than by the corpus, which is
+worth recording. The corpus tested SQL a database would receive; it did not
+test what this tool actually sends, and the gap between those two is exactly
+where a classifier goes wrong.
+
+#### Not yet built
+
+- **The connect-time privilege probe** (§13.12) is unimplemented. The dry-run
+  document reports `readonly.probe` as `skipped` rather than claiming a check
+  that did not happen. Until it exists, a host configured `readonly = true`
+  whose credential can in fact write is not detected, and the guarantee rests
+  on the engine setting and the classifier alone.
+- **The interactive mode is ungated.** `tui.execute` gets the read-only
+  environment and the parameter check, because both live in the adapter, but
+  not the classifier. The exposure is narrower than it reads, since an operator
+  is at the keyboard by definition, but a destructive statement against a
+  writable host is not challenged there.
+- **The SQL Server planner path is untested against a real instance**, as
+  §13.13 already records. The parsing is written to deny whatever it does not
+  recognise, so being wrong about the plan format costs availability rather
+  than safety.

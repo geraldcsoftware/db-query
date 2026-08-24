@@ -8,6 +8,7 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
 	"github.com/geraldcsoftware/db-query/internal/executor"
+	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
 // mssqlSep is the ASCII Unit Separator used as the column delimiter.
@@ -171,4 +172,106 @@ func quoteSQLServerIdent(name string) string {
 		parts[i] = "[" + strings.ReplaceAll(p, "]", "]]") + "]"
 	}
 	return strings.Join(parts, ".")
+}
+
+// Classify defers to the engine. No importable T-SQL parser exists as a Go
+// module, so SQL Server reaches a verdict the way §13.13 specifies: the
+// planner compiles each statement without executing it, and the plan says what
+// the statement would have done.
+func (sqlserverAdapter) Classify(string) (sqlscan.Verdict, error) {
+	return sqlscan.Verdict{}, sqlscan.ErrNeedsPlan
+}
+
+// PlanInvocation wraps one statement in SHOWPLAN_XML, which compiles a batch
+// and returns its plan without running it. The SET must stand alone in its own
+// batch, hence the GO separators.
+//
+// sqlcmd's own -X, which disables the commands that could compromise security,
+// is deliberately not passed. It is documented as also disabling environment
+// variables, which is precisely how Env delivers the credential, and that
+// interaction is unverified here. The lexical pre-pass already refuses every
+// directive -X would have blocked, under test, so the flag would add risk
+// without adding a control. Revisit once -X is confirmed against a real
+// instance.
+func (sqlserverAdapter) PlanInvocation(host config.HostConfig, stmt string) (executor.Invocation, error) {
+	if strings.TrimSpace(stmt) == "" {
+		return executor.Invocation{}, fmt.Errorf("empty statement")
+	}
+	argv := []string{
+		"sqlcmd",
+		"-b",
+		"-r", "1",
+		"-s", mssqlSep,
+		"-W",
+		"-w", "65535",
+		"-y", "0",
+		"-Y", "0",
+	}
+	sql := "SET SHOWPLAN_XML ON;\nGO\n" + stmt + "\nGO\n"
+	return executor.Invocation{Argv: argv, Stdin: strings.NewReader(sql)}, nil
+}
+
+// mssqlStatementType picks the StatementType attribute out of a showplan
+// document. The full plan schema is large and versioned; this one attribute is
+// the documented statement-level verb, so matching it directly is both smaller
+// and less brittle than binding a struct to the schema.
+var mssqlStatementType = regexp.MustCompile(`StatementType="([A-Za-z ]+)"`)
+
+// ParsePlan turns a showplan result into one statement's class.
+//
+// Everything unrecognised is opaque, deliberately. A statement that did not
+// compile is not thereby safe, and a plan carrying no statement type at all is
+// a plan this code does not understand.
+func (sqlserverAdapter) ParsePlan(r executor.RawResult) (sqlscan.Class, string, error) {
+	if r.ExitCode != 0 {
+		detail := strings.TrimSpace(string(r.Stderr))
+		if detail == "" {
+			detail = strings.TrimSpace(string(r.Stdout))
+		}
+		return sqlscan.ClassOpaque, "did not compile: " + firstLine(detail), nil
+	}
+	matches := mssqlStatementType.FindAllStringSubmatch(string(r.Stdout), -1)
+	if len(matches) == 0 {
+		return sqlscan.ClassOpaque, "no statement type in the plan", nil
+	}
+	worst, why := sqlscan.ClassRead, ""
+	for _, m := range matches {
+		c := mssqlClassFor(m[1])
+		if c > worst || why == "" {
+			worst, why = c, m[1]
+		}
+	}
+	return worst, why, nil
+}
+
+// mssqlClassFor maps a showplan StatementType onto a class. The mapping is an
+// allowlist for the same reason the postgres node set is: an unrecognised verb
+// denies rather than passing.
+func mssqlClassFor(t string) sqlscan.Class {
+	switch strings.ToUpper(strings.TrimSpace(t)) {
+	case "SELECT":
+		return sqlscan.ClassRead
+	case "INSERT", "UPDATE", "MERGE", "SELECT INTO":
+		return sqlscan.ClassWrite
+	case "DELETE", "TRUNCATE TABLE", "DROP TABLE", "DROP INDEX":
+		return sqlscan.ClassDestructive
+	case "GRANT", "REVOKE", "DENY", "SET":
+		return sqlscan.ClassAdmin
+	default:
+		return sqlscan.ClassOpaque
+	}
+}
+
+func (sqlserverAdapter) Dialect() sqlscan.Dialect { return sqlscan.DialectTSQL }
+
+// firstLine trims a client error down to something a decision can carry
+// without dragging a stack of driver noise into a JSON document.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 120 {
+		s = s[:120]
+	}
+	return s
 }

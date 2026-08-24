@@ -30,7 +30,12 @@ type HostConfig struct {
 	Database   string
 	Username   string // literal or resolver URI
 	Credential string // resolver URI for the password
-	Extra      map[string]string
+	// ReadOnly gates writes against this host (docs/design.md §13.12). It
+	// defaults to true: a host that has not said otherwise is treated as one
+	// nobody intended to write to. Setting it false does not disable the
+	// classifier, only the read-only posture.
+	ReadOnly bool
+	Extra    map[string]string
 	// Origins maps each effective key to the section that supplied it —
 	// "host lionel" or "profile eus". Populated for every key, inherited
 	// or not.
@@ -59,7 +64,7 @@ type Config struct {
 var coreKeys = map[string]bool{
 	"provider": true, "host": true, "port": true,
 	"database": true, "username": true, "credential": true,
-	"inherit": true,
+	"inherit": true, "readonly": true,
 }
 
 // credentialMistakeKeys are the keys users reach for when they mean
@@ -117,7 +122,9 @@ func Load(path string) (Config, error) {
 		if err != nil {
 			return Config{}, err
 		}
-		h := HostConfig{Name: name, Extra: map[string]string{}, Origins: r.origins}
+		// ReadOnly defaults to true before the merge, so a host that never
+		// mentions the key gets the safe posture rather than the zero value.
+		h := HostConfig{Name: name, ReadOnly: true, Extra: map[string]string{}, Origins: r.origins}
 		for k, v := range r.keys {
 			switch k {
 			case "provider":
@@ -143,6 +150,12 @@ func Load(path string) (Config, error) {
 				h.Username, _ = v.(string)
 			case "credential":
 				h.Credential, _ = v.(string)
+			case "readonly":
+				b, err := parseBoolKey(v)
+				if err != nil {
+					return Config{}, fmt.Errorf("%s: readonly %v", r.origins[k], err)
+				}
+				h.ReadOnly = b
 			default:
 				if credentialMistakeKeys[strings.ToLower(k)] {
 					return Config{}, fmt.Errorf(
@@ -159,6 +172,25 @@ func Load(path string) (Config, error) {
 		cfg.Hosts[name] = h
 	}
 	return cfg, nil
+}
+
+// parseBoolKey reads a boolean host key. A misspelling such as readonly = "yes"
+// is an error rather than a value quietly ignored: this key decides whether
+// writes are permitted, so a config that does not say what it meant must not
+// be guessed at.
+func parseBoolKey(v any) (bool, error) {
+	switch t := v.(type) {
+	case bool:
+		return t, nil
+	case string:
+		b, err := strconv.ParseBool(t)
+		if err != nil {
+			return false, fmt.Errorf("must be true or false, got %q", t)
+		}
+		return b, nil
+	default:
+		return false, fmt.Errorf("must be true or false, got %T", v)
+	}
 }
 
 func stringify(v any) string {

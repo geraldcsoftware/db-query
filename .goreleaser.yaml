@@ -8,16 +8,28 @@ before:
   hooks:
     - go mod tidy
 
+# The SQL classifier links PostgreSQL's own grammar (pg_query_go), which is
+# cgo. That rules out the previous CGO_ENABLED=0 cross-compile from Linux, so
+# these builds run on macOS and are split per architecture: cgo needs the
+# target architecture passed to the C compiler as well as to Go.
+#
+# One Apple Silicon runner covers both, because the Xcode SDK carries an
+# x86_64 slice, so `clang -arch x86_64` cross-compiles the C half natively.
+#
+# A binary built this way is dynamically linked against the system libSystem,
+# which is present on every supported macOS, so the Homebrew formula is
+# unaffected. What is lost is the fully static binary the CGO_ENABLED=0 build
+# produced.
 builds:
-  - id: db-query
+  - id: db-query-arm64
     main: ./cmd/db-query
     binary: db-query
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=clang
     goos:
       - darwin
     goarch:
-      - amd64
       - arm64
     ldflags:
       - -s -w
@@ -25,8 +37,35 @@ builds:
       - -X main.commit={{ .Commit }}
       - -X main.date={{ .Date }}
 
+  - id: db-query-amd64
+    main: ./cmd/db-query
+    binary: db-query
+    env:
+      - CGO_ENABLED=1
+      - CC=clang -arch x86_64
+    goos:
+      - darwin
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+# A tag carrying a prerelease part (v0.11.0-rc.1) is published as a GitHub
+# prerelease and is not marked Latest. Without this the default is a normal
+# release, verified against GoReleaser v2.17.1: release.prerelease is only
+# inferred from the tag when it is set to "auto", and make_latest is forced
+# false only once a release is known to be a prerelease.
+release:
+  prerelease: auto
+
 archives:
   - id: db-query
+    ids:
+      - db-query-arm64
+      - db-query-amd64
     formats:
       - tar.gz
     name_template: >-
@@ -51,6 +90,11 @@ changelog:
 
 brews:
   - name: db-query
+    # Keep prerelease tags out of the tap. The formula is what `brew install
+    # db-query` resolves to, so publishing one for a release candidate would
+    # hand every user the candidate. The guard matches the literal "auto":
+    # GoReleaser skips the upload when the tag carries a prerelease part.
+    skip_upload: auto
     # Publish into Formula/ (Homebrew's convention, matching the rest of the
     # tap) rather than the tap root.
     directory: Formula
