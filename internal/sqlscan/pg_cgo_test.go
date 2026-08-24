@@ -75,7 +75,14 @@ func TestClassifyPostgres(t *testing.T) {
 // TestClassifyPostgresAllowsOrdinaryReads guards the direction that actually
 // decides whether the tool is usable. Under a fail-closed policy a classifier
 // that refuses ordinary SELECTs gets switched off, so these must all pass.
+//
+// It runs the whole pipeline, normaliser included, rather than the classifier
+// alone. Testing the classifier by itself is what let a normaliser bug through:
+// it rewrote the colons in a time format as placeholders, and the corpus never
+// saw it because the corpus never called it.
 func TestClassifyPostgresAllowsOrdinaryReads(t *testing.T) {
+	// A bound parameter, since the normaliser only engages when one exists.
+	params := map[string]string{"who": "Ada"}
 	reads := []string{
 		"SELECT DISTINCT ON (a) a, b FROM t ORDER BY a, b",
 		"SELECT * FROM generate_series(1,10) WITH ORDINALITY",
@@ -98,9 +105,23 @@ func TestClassifyPostgresAllowsOrdinaryReads(t *testing.T) {
 		"SELECT jsonb_path_query(data, '$.a[*]') FROM t",
 		"SELECT * FROM xmltable('/r' PASSING x COLUMNS a int PATH 'a')",
 		"SELECT * FROM t FOR UPDATE",
+
+		// Colons that are not placeholders. Each of these was refused before
+		// the normaliser learned to leave them alone.
+		"SELECT to_char(created, 'DD Mon, HH:MM:SS') FROM t",
+		"SELECT somecol::date AS date, sometext::jsonb AS jsoncontent FROM t",
+		"SELECT arr[1:3] FROM t",
+		"SELECT arr[1:upper] FROM t",
+		"SELECT * FROM t WHERE url = 'https://x/y'",
+		"SELECT 'it''s 10:30' AS s",
+		"SELECT 1 -- note: something\n",
+		"SELECT E'a\\'b:c' AS s",
+
+		// And one that must still be normalised, or the grammar cannot parse it.
+		"SELECT * FROM t WHERE name = :'who'",
 	}
 	for _, sql := range reads {
-		if got := ClassifyPostgres(sql); got.Class != ClassRead {
+		if got := ClassifyPostgres(NormalisePlaceholders(sql, params, DialectPostgres)); got.Class != ClassRead {
 			t.Errorf("falsely refused an ordinary read as %s: %s\n  %+v", got.Class, sql, got.Statements)
 		}
 	}

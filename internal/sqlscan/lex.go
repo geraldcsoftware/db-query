@@ -38,7 +38,26 @@ func Scan(sql string, d Dialect) (statements []string, directives []string) {
 	}
 
 	src := []rune(sql)
-	for i := 0; i < len(src); i++ {
+	for i := 0; i < len(src); {
+		// Literals, quoted identifiers and comments first, through the same
+		// helper every other walk uses, so none of them can disagree about
+		// where code stops and text begins.
+		if end, kind := skipSpan(src, i, d); kind != spanNone {
+			if kind == spanQuoted {
+				cur.WriteString(string(src[i:end]))
+				atLineStart = false
+			} else {
+				// A comment contributes nothing but must not join the tokens
+				// on either side of it.
+				cur.WriteRune(' ')
+				if end < len(src) && src[end] == '\n' {
+					atLineStart = true
+				}
+			}
+			i = end
+			continue
+		}
+
 		c := src[i]
 
 		// A directive claims the rest of its line, and never reaches a
@@ -55,91 +74,15 @@ func Scan(sql string, d Dialect) (statements []string, directives []string) {
 		}
 
 		switch {
-		case c == '-' && i+1 < len(src) && src[i+1] == '-':
-			for i < len(src) && src[i] != '\n' {
-				i++
-			}
-			cur.WriteRune('\n')
-			atLineStart = true
-			continue
-
-		case c == '/' && i+1 < len(src) && src[i+1] == '*':
-			// Postgres nests block comments; T-SQL does too. Tracking depth
-			// costs one counter and avoids ending the comment early on an
-			// inner close, which would spill comment text into a statement.
-			depth, j := 1, i+2
-			for j < len(src) && depth > 0 {
-				if src[j] == '/' && j+1 < len(src) && src[j+1] == '*' {
-					depth++
-					j += 2
-					continue
-				}
-				if src[j] == '*' && j+1 < len(src) && src[j+1] == '/' {
-					depth--
-					j += 2
-					continue
-				}
-				j++
-			}
-			cur.WriteRune(' ')
-			i = j - 1
-			atLineStart = false
-			continue
-
-		case c == '\'':
-			j := i + 1
-			for j < len(src) {
-				if src[j] == '\'' {
-					if j+1 < len(src) && src[j+1] == '\'' { // '' is an escaped quote
-						j += 2
-						continue
-					}
-					break
-				}
-				j++
-			}
-			cur.WriteString(string(src[i:min(j+1, len(src))]))
-			i = j
-			atLineStart = false
-			continue
-
-		case c == '"':
-			j := i + 1
-			for j < len(src) && src[j] != '"' {
-				j++
-			}
-			cur.WriteString(string(src[i:min(j+1, len(src))]))
-			i = j
-			atLineStart = false
-			continue
-
-		case c == '[' && d == DialectTSQL:
-			j := i + 1
-			for j < len(src) && src[j] != ']' {
-				j++
-			}
-			cur.WriteString(string(src[i:min(j+1, len(src))]))
-			i = j
-			atLineStart = false
-			continue
-
-		case c == '$' && d == DialectPostgres:
-			if tag, end, ok := dollarQuote(src, i); ok {
-				cur.WriteString(string(src[i:end]))
-				i = end - 1
-				atLineStart = false
-				_ = tag
-				continue
-			}
-
 		case c == ';':
 			flush()
 			atLineStart = false
+			i++
 			continue
-
 		case c == '\n':
 			cur.WriteRune('\n')
 			atLineStart = true
+			i++
 			continue
 		}
 
@@ -157,6 +100,7 @@ func Scan(sql string, d Dialect) (statements []string, directives []string) {
 		if !unicode.IsSpace(c) {
 			atLineStart = false
 		}
+		i++
 	}
 	flush()
 	return statements, directives
@@ -175,27 +119,6 @@ func isDirectiveMarker(c rune, d Dialect) bool {
 		return c == ':' || c == '!'
 	}
 	return false
-}
-
-// dollarQuote matches a postgres $tag$…$tag$ literal starting at i, returning
-// the tag and the index just past the closing delimiter. Without this a
-// function body is scanned as ordinary SQL and its semicolons split it into
-// fragments that classify as nonsense.
-func dollarQuote(src []rune, i int) (tag string, end int, ok bool) {
-	j := i + 1
-	for j < len(src) && (src[j] == '_' || unicode.IsLetter(src[j]) || unicode.IsDigit(src[j])) {
-		j++
-	}
-	if j >= len(src) || src[j] != '$' {
-		return "", 0, false
-	}
-	delim := string(src[i : j+1])
-	rest := string(src[j+1:])
-	k := strings.Index(rest, delim)
-	if k < 0 {
-		return delim, len(src), true // unterminated: consume the remainder
-	}
-	return delim, j + 1 + len([]rune(rest[:k])) + len([]rune(delim)), true
 }
 
 // isGoLine reports whether a T-SQL batch separator starts at i. sqlcmd accepts
