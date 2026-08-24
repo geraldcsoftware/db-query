@@ -21,6 +21,7 @@ db-query query      --host reporting --output json -f report.sql
 db-query query      --host prod-core --save people-by-name --category reports \
                     "SELECT id, name FROM people WHERE name = :'who'" --param who=Ada
 db-query query      --host prod-core --source people-by-name --category reports --param who=Ada
+db-query query      --host prod-core --dry-run "DELETE FROM people"   # classify it, run nothing
 db-query list       --category reports        # list saved queries
 db-query schema     --host prod-core          # show the cached schema (tables + columns)
 db-query schema     --host prod-core people   # one table's columns (bare or schema-qualified name)
@@ -39,7 +40,8 @@ db-query hosts      lionel                    # one host's effective config, wit
   `--config (-c)`, `--output (-o)`, `--param (-p)`, `--file (-f)`, `--source (-s)`,
   `--category (-C)`, `--timeout (-t)`, `--help (-h)`, `--version (-v)`. Deliberate
   actions (`--save`, `--force`, `--refresh-schema`, `--no-headers`,
-  `--max-col-width`, `--border`) are long-only.
+  `--max-col-width`, `--border`, `--dry-run`, `--precheck`, `--show-sql`) are
+  long-only.
 - Commands have shorthands too: `query (q)`, `schema (s)`, `introspect (i)`,
   `list (ls, l)`.
 
@@ -58,8 +60,13 @@ db-query --host test --database testdb query "SELECT * FROM todos;"
 
 The same flag given after the command wins over one given before it
 (`--host a query --host b` runs against `b`). Only those five are accepted
-there; a command's own flags (`--tables`, `--param`, …) belong after the
-command and error out before it.
+there; a command's own flags (`--tables`, `--param`, `--dry-run`, …) belong
+after the command and error out before it, reporting the flag by name:
+
+```sh
+db-query --host test --dry-run q "SELECT 1"   # flag provided but not defined: -dry-run
+db-query --host test q --dry-run "SELECT 1"   # correct
+```
 
 ### Environment defaults
 
@@ -83,6 +90,10 @@ export DB_QUERY_OUTPUT=text   # or json — pin the machine-readable shape
 
 Piping already selects `text` on its own, so this is only needed when something
 runs `db-query` with a terminal attached and still wants the stable format.
+
+`DB_QUERY_DRY_RUN` set to anything other than `0` forces `--dry-run` for every
+invocation, which is how a wrapper that cannot add a flag screens what it is
+about to run. See [Query safety screening](#query-safety-screening).
 
 Precedence is flag (either position) → environment → config file. Note that an
 exported host is invisible state: `db-query hosts` shows what is configured, but
@@ -123,6 +134,179 @@ the host in effect is whatever `DB_QUERY_HOST` says until you override it.
   any shape, so a 1×1 result prints just the bare value; in `table` it drops the
   header row and the row-count footer, leaving only the framed data. It is a
   no-op for `--output json`, whose objects are already self-describing.
+
+### Query safety screening
+
+Every submission is classified before it runs. On PostgreSQL the classification
+comes from PostgreSQL's own grammar, so a statement is judged by the parse tree
+it actually produces rather than by pattern matching over its text; SQL Server
+goes through the planner instead. A submission the mechanism cannot understand
+is reported as `opaque`, which is treated as the least safe class rather than
+the safest.
+
+| Class | Means | Example |
+|---|---|---|
+| `read` | returns rows and changes nothing | `SELECT`, `WITH … SELECT`, `EXPLAIN` |
+| `write` | changes rows and nothing else | `INSERT`, `UPDATE`, `MERGE`, `COPY`, `REFRESH MATERIALIZED VIEW` |
+| `destructive` | removes data, or changes the shape of the database | `DELETE`, `DROP`, `TRUNCATE`, `CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `ALTER TABLE`, `ALTER … RENAME`, `SELECT … INTO` |
+| `admin` | changes the server or its accounts | `CREATE ROLE`, `GRANT` |
+| `opaque` | no class could be established | a syntax error, or a statement type the mapping does not recognise, such as `VACUUM` |
+
+Three of those cut against the usual reading and are worth knowing.
+
+`write` means data and nothing else. **Every schema change is `destructive`**,
+including ones whose verb sounds harmless: `CREATE INDEX` meets the same
+challenge as `DROP TABLE`. The line is drawn at data versus schema rather than
+at how lossy a particular statement looks, because the lossiness is not visible
+at the point of classification: `ALTER TABLE … DROP COLUMN` and `… ADD COLUMN`
+arrive as the same node, so splitting them would mean enumerating every
+subcommand PostgreSQL has and misclassifying whichever ones a later release
+adds. The cost is a challenge on a harmless `CREATE INDEX`; the benefit is that
+a column and every value in it cannot go unattended.
+
+`DELETE` is `destructive`, not `write`, whether or not it names a `WHERE`
+clause, so it meets a human even on a writable host.
+
+`SELECT … INTO` is `destructive` despite reading like a query: it creates and
+populates a table, and is caught through its `IntoClause` rather than its
+statement node, which is a bare `SelectStmt`.
+
+Classification is deny-by-default: a statement type the mapping does not list is
+`opaque` rather than assumed harmless, which is why an unremarkable `VACUUM` is
+challenged. That is also why the lists stay short — unenumerated DDL fails
+closed on its own.
+
+A submission is exactly as safe as its least safe statement, so
+`SELECT 1; DROP TABLE t` classifies `destructive` as a whole. The document names
+the first statement at the deciding class, so a refusal says which statement of
+twelve caused it.
+
+What a class is allowed to do depends on the host's posture, set by the
+`readonly` key, which **defaults to true** (see [Configuration](#configuration)):
+
+| Class | `readonly = true` (default) | `readonly = false` |
+|---|---|---|
+| `read` | runs | runs |
+| `write` | operator challenge | runs |
+| `destructive`, `admin`, `opaque` | operator challenge | operator challenge |
+
+A challenge prints the target and the deciding statement on `/dev/tty` and asks
+for a short nonce to be typed back. It opens the terminal directly rather than
+testing whether stdout is one, so it still reaches you when SQL arrives on stdin
+or output is piped to `jq`. Anything other than the nonce cancels, and a closed
+terminal is a decline rather than an approval.
+
+On PostgreSQL a read-only host also asks the engine to refuse writes, through
+`PGOPTIONS=-c default_transaction_read_only=on`. That catches what no text scan
+can see, such as a `DROP` built inside a `DO` block whose submission reads as a
+harmless call. Treat it as a second layer rather than the guarantee: it is a
+default rather than a constraint, and a submission can turn it off with
+`set_config`. Database grants remain the actual control.
+
+Client directives such as `\copy` are refused outright rather than challenged.
+They are executed by `psql` or `sqlcmd` and never reach a server, so no grammar
+or planner can see them, and no operator approval applies.
+
+#### Screening without running: `--dry-run`
+
+`--dry-run` classifies a query, prints the decision as JSON, and runs nothing.
+On PostgreSQL it opens no connection, so it works against a host that is
+unreachable, though the host's credential must still resolve.
+
+```sh
+db-query -H prod-core -d core q "SELECT id FROM people" --dry-run
+```
+
+```json
+{
+  "schema_version": 1,
+  "status": "classified",
+  "target":   { "provider": "postgres", "host": "prod-core", "database": "core" },
+  "readonly": { "configured": true, "probe": "skipped", "engine_enforced": true },
+  "classification": {
+    "class": "read",
+    "mechanism": "parser",
+    "decided_by_version": "pg_query_go/v6 (PostgreSQL 17 grammar)",
+    "statements": [ { "index": 1, "class": "read", "decided_by": "SelectStmt" } ]
+  },
+  "params": { "names": [], "count": 0 },
+  "digest": { "alg": "hmac-sha256", "value": "bc2cea36…" },
+  "precheck_token": "bc2cea36…",
+  "decision": { "action": "allow", "reason_code": "OK_READ", "reason": "permitted on this host: read" }
+}
+```
+
+The field names and the reason codes are an API, not a message for a person, so
+a hook can branch on them. `schema_version` is the contract: a consumer that
+does not recognise the version must refuse rather than proceed, because a
+renamed field would otherwise read as an empty decision and quietly allow.
+`status` separates a verdict from the absence of one, so "could not classify"
+never reads as "clean". `precheck_token` is explicitly `null` rather than
+omitted when no token was minted, since a missing key cannot be told from a
+truncated document.
+
+A dry run reports; it does not refuse. `db-query q "DROP TABLE people"
+--dry-run` exits `0` with `"action": "challenge"` and a null token, because the
+caller asked for the document and the document is what they get.
+
+| `action` | Meaning |
+|---|---|
+| `allow` | permitted on this host; a token is minted |
+| `challenge` | may run only after an operator answers at the terminal |
+| `block` | refused outright; no operator may wave it through |
+
+Reason codes: `OK_READ`, `CLASS_WRITE`, `CLASS_DESTRUCTIVE`, `CLASS_ADMIN`,
+`CLASS_OPAQUE`, `CLIENT_DIRECTIVE`, `PARAM_UNSAFE`, `READONLY_PROBE_FAILED`,
+`PARSER_UNAVAILABLE`, `PRECHECK_INCOMPLETE`, `DIGEST_MISMATCH`. They are
+append-only and never repurposed; treat an unknown one as a refusal.
+
+#### Reusing a verdict: `--precheck`
+
+A clean read mints a `precheck_token`, an HMAC over the invocation: the SQL, the
+parameter values, and the target. `--precheck <token>` presents it so an
+approved query runs without being classified twice.
+
+```sh
+tok=$(db-query -H prod-core q "SELECT id FROM people" --dry-run | jq -r .precheck_token)
+db-query -H prod-core q "SELECT id FROM people" --precheck "$tok"
+```
+
+Because the token covers the whole invocation and not just the text, changing
+the SQL, a parameter value, or the target invalidates it, and the invocation
+exits `6` rather than running something that was never checked. A token is
+minted only for a verdict that classified clean, so presenting one alongside a
+`challenge` does not answer the challenge.
+
+#### Inspecting the statement: `--show-sql`
+
+`--dry-run` omits the SQL by default, because literals written into a statement
+(an account number in a `WHERE` clause) would otherwise reach the document and
+any audit record built from it. `--show-sql` adds a `sql` field when the
+statement itself needs inspecting. Parameter **values** are never included under
+any flag: the document carries only their names and a count.
+
+#### Parameter quoting
+
+Parameters bind through the client's own mechanism, and only the quoted forms
+are accepted. A bare `:name` in PostgreSQL SQL is refused, naming the parameter:
+
+```
+db-query: parameter "who" is interpolated as :who, which psql substitutes as
+raw text; write :'who' so the value is quoted
+```
+
+This is a usage error rather than a policy refusal, so it exits `1`, not `5`,
+and no operator challenge applies: the fix is to quote the reference. It closes
+a hole no classifier could see, because with `:name` the SQL text reads clean
+and the payload rides in the value. A colon that is not a placeholder is
+left alone, so casts (`col::jsonb->>'k'`), array slices (`arr[1:3]`, `arr[:3]`),
+time formats (`to_char(t, 'HH:MI:SS')`) and colons inside string literals all
+behave as written.
+
+One known gap: where a bound parameter is named as a number and matches an array
+slice bound, as in `arr[1:3]` with a parameter named `3`, a dry run reports
+`read` and mints a token while execution refuses it. Naming a parameter as a
+number is the only way to reach this.
 
 ### Saved queries
 
@@ -212,6 +396,8 @@ replace the previous server's names.
 | `2`  | client binary could not start |
 | `3`  | schema error — the query references an unknown table or column (re-run with `--refresh-schema`) |
 | `4`  | other SQL error — the client ran and exited nonzero |
+| `5`  | refused by [safety screening](#query-safety-screening), or declined at the operator challenge |
+| `6`  | a `--precheck` token was presented for a different query, parameters, or target |
 
 ## Interactive mode
 
@@ -546,7 +732,26 @@ database   = "reports"
 username   = "keychain:reporting-sql/svc_reports"
 credential = "keychain:reporting-sql"
 encrypt    = "true"                # provider-specific keys pass through to the adapter
+
+[hosts.scratch]
+provider   = "postgres"
+host       = "scratch.internal"
+database   = "scratch"
+credential = "env:DB_SCRATCH_PW"
+readonly   = false                 # allow writes here without a challenge
 ```
+
+`readonly` **defaults to true**, so a host that never mentions it permits reads
+and sends everything else to an operator challenge. Set it to `false` on a host
+where writes are ordinary, such as a development database: that declaration is
+the operator saying so once, rather than answering a challenge for every
+`INSERT`. It buys row changes only. Schema changes, destructive statements and
+administrative ones still meet a human on either kind of host, on the reasoning
+that accepting unattended `INSERT`s is not the same as accepting unattended DDL. See [Query safety screening](#query-safety-screening) for what each
+class is allowed to do, and note that on PostgreSQL a read-only host is enforced
+by the engine and not only checked by this tool. The key takes a real boolean:
+`readonly = "yes"` is rejected at load with the offending section named, rather
+than being read as false.
 
 Credential schemes: `env:VAR`, `bws:<secret-id>[#field]` (Bitwarden
 Secrets Manager, needs `BWS_ACCESS_TOKEN`), `bw:item/<id-or-name>`
