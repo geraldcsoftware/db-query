@@ -89,7 +89,7 @@ func Evaluate(in Input) Document {
 	// planner can parse one. Classification sees them replaced by inert
 	// literals; the digest above binds the original text, and the adapter
 	// validates the values themselves.
-	classifiable := sqlscan.NormalisePlaceholders(in.SQL, in.Adapter.Dialect())
+	classifiable := sqlscan.NormalisePlaceholders(in.SQL, in.Params, in.Adapter.Dialect())
 
 	verdict, err := in.Adapter.Classify(classifiable)
 	if err == sqlscan.ErrNeedsPlan {
@@ -135,7 +135,7 @@ func classifyByPlan(in Input) (sqlscan.Verdict, error) {
 	if in.RunPlan == nil {
 		return sqlscan.Verdict{}, fmt.Errorf("this provider classifies through the engine, and no connection is available")
 	}
-	statements, _ := sqlscan.Scan(sqlscan.NormalisePlaceholders(in.SQL, in.Adapter.Dialect()), in.Adapter.Dialect())
+	statements, _ := sqlscan.Scan(sqlscan.NormalisePlaceholders(in.SQL, in.Params, in.Adapter.Dialect()), in.Adapter.Dialect())
 	if len(statements) == 0 {
 		return sqlscan.Verdict{}, fmt.Errorf("no statements found")
 	}

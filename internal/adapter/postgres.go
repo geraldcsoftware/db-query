@@ -236,11 +236,14 @@ func (postgresAdapter) Dialect() sqlscan.Dialect { return sqlscan.DialectPostgre
 
 // rejectUnquotedInterpolation refuses a bound parameter referenced as :name
 // rather than :'name'. Only bound names are checked, because psql interpolates
-// nothing else.
+// nothing else, and because a colon has other meanings in SQL: a cast, and an
+// array slice such as arr[1:3].
 //
-// Literals, quoted identifiers, dollar-quoted bodies and comments are skipped:
-// psql does not interpolate inside them either, so flagging a colon there
-// would refuse legitimate SQL. A `::` cast is stepped over whole.
+// Literals, quoted identifiers, dollar-quoted bodies and comments are skipped
+// through sqlscan.SkipSpan, the same helper the classifier uses, so the two
+// cannot disagree about where code stops and text begins. psql does not
+// interpolate inside them either, so flagging a colon there would refuse
+// legitimate SQL such as to_char(t, 'HH:MM:SS').
 //
 // The error names the parameter and never its value (§9).
 func rejectUnquotedInterpolation(sql string, params map[string]string) error {
@@ -248,70 +251,38 @@ func rejectUnquotedInterpolation(sql string, params map[string]string) error {
 		return nil
 	}
 	src := []rune(sql)
-	for i := 0; i < len(src); i++ {
-		switch {
-		case src[i] == '\'':
-			for i++; i < len(src); i++ {
-				if src[i] == '\'' {
-					if i+1 < len(src) && src[i+1] == '\'' {
-						i++
-						continue
-					}
-					break
-				}
-			}
-		case src[i] == '"':
-			for i++; i < len(src) && src[i] != '"'; i++ {
-			}
-		case src[i] == '-' && i+1 < len(src) && src[i+1] == '-':
-			for ; i < len(src) && src[i] != '\n'; i++ {
-			}
-		case src[i] == '/' && i+1 < len(src) && src[i+1] == '*':
-			for i += 2; i+1 < len(src) && !(src[i] == '*' && src[i+1] == '/'); i++ {
-			}
-			i++
-		case src[i] == '$':
-			if end, ok := skipDollarQuoted(src, i); ok {
-				i = end - 1
-			}
-		case src[i] == ':':
-			if i+1 < len(src) && src[i+1] == ':' {
-				i++ // a cast, not an interpolation
-				continue
-			}
-			if i+1 < len(src) && (src[i+1] == '\'' || src[i+1] == '"') {
-				continue // the quoted forms, which psql escapes
-			}
-			j := i + 1
-			for j < len(src) && (src[j] == '_' || unicode.IsLetter(src[j]) || unicode.IsDigit(src[j])) {
-				j++
-			}
-			name := string(src[i+1 : j])
-			if _, bound := params[name]; bound {
-				return fmt.Errorf(
-					"parameter %q is interpolated as :%s, which psql substitutes as raw text; "+
-						"write :'%s' so the value is quoted", name, name, name)
-			}
-			i = j - 1
+	for i := 0; i < len(src); {
+		if end, isSpan := sqlscan.SkipSpan(src, i, sqlscan.DialectPostgres); isSpan {
+			i = end
+			continue
 		}
+		if src[i] != ':' {
+			i++
+			continue
+		}
+		if i+1 < len(src) && src[i+1] == ':' {
+			i += 2 // a cast, not an interpolation
+			continue
+		}
+		if i+1 < len(src) && (src[i+1] == '\'' || src[i+1] == '"') {
+			i++ // the quoted forms, which psql escapes
+			continue
+		}
+		j := i + 1
+		for j < len(src) && isNameRune(src[j]) {
+			j++
+		}
+		name := string(src[i+1 : j])
+		if _, bound := params[name]; bound {
+			return fmt.Errorf(
+				"parameter %q is interpolated as :%s, which psql substitutes as raw text; "+
+					"write :'%s' so the value is quoted", name, name, name)
+		}
+		i = j
 	}
 	return nil
 }
 
-// skipDollarQuoted returns the index just past a $tag$…$tag$ body starting at i.
-func skipDollarQuoted(src []rune, i int) (int, bool) {
-	j := i + 1
-	for j < len(src) && (src[j] == '_' || unicode.IsLetter(src[j]) || unicode.IsDigit(src[j])) {
-		j++
-	}
-	if j >= len(src) || src[j] != '$' {
-		return 0, false
-	}
-	delim := string(src[i : j+1])
-	rest := string(src[j+1:])
-	k := strings.Index(rest, delim)
-	if k < 0 {
-		return len(src), true
-	}
-	return j + 1 + len([]rune(rest[:k])) + len([]rune(delim)), true
+func isNameRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
