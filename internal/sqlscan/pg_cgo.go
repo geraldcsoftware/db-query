@@ -56,10 +56,33 @@ var adminFuncs = map[string]bool{
 	"pg_logical_emit_message": true,
 }
 
-// destructiveNodes classify above write: they lose data or schema outright.
+// destructiveNodes classify above write: they lose data outright, or they
+// change the shape of the database rather than its contents.
+//
+// Every schema change belongs here, not only the ones whose surface verb
+// sounds lossy. `ALTER TABLE t DROP COLUMN x` loses a column and every value
+// in it while parsing as an ordinary AlterTableStmt, indistinguishable from
+// `ADD COLUMN` until the subcommand list is walked; `ALTER COLUMN … TYPE`
+// rewrites values through a cast that can fail or truncate. Drawing the line
+// at the subtype would mean tracking every AlterTableCmd PostgreSQL has, and
+// silently misclassifying whichever ones a later release adds. Drawing it at
+// data-versus-schema needs no such list and errs in the safe direction, at
+// the cost of routing a harmless `CREATE INDEX` through the same challenge as
+// a `DROP TABLE`. That cost is deliberate: both warrant a human look, so
+// splitting them would add a class without changing an outcome.
 var destructiveNodes = map[string]bool{
+	// Data loss.
 	"DropStmt": true, "TruncateStmt": true, "DeleteStmt": true,
 	"DropdbStmt": true, "DropRoleStmt": true, "DropTableSpaceStmt": true,
+	// Schema change.
+	"CreateStmt": true, "AlterTableStmt": true, "IndexStmt": true,
+	"ViewStmt": true, "CreateFunctionStmt": true, "RenameStmt": true,
+	"CreateTableAsStmt": true,
+	// SELECT ... INTO creates and populates a table, yet the grammar hands
+	// back a bare SelectStmt: the target survives only as an IntoClause
+	// hanging off it, so the clause is what has to be named. CTAS carries one
+	// too, which is harmless — it is already destructive by its own node.
+	"IntoClause": true,
 }
 
 // adminNodes change privileges or server state.
@@ -74,12 +97,16 @@ var adminNodes = map[string]bool{
 	"VariableSetStmt": true, "TransactionStmt": true,
 }
 
-// writeNodes modify rows or schema without losing either outright.
+// writeNodes change rows and nothing else. Confining write to data is what
+// makes the class mean something on a host declared writable, where it is the
+// one non-read class that runs without meeting a human: an operator who
+// accepts unattended INSERTs has not thereby accepted unattended DDL.
+//
+// COPY moves rows in either direction and REFRESH MATERIALIZED VIEW recomputes
+// a view's contents, both leaving the schema as they found it.
 var writeNodes = map[string]bool{
 	"InsertStmt": true, "UpdateStmt": true, "MergeStmt": true,
-	"CreateStmt": true, "AlterTableStmt": true, "IndexStmt": true,
-	"ViewStmt": true, "CreateFunctionStmt": true, "CopyStmt": true,
-	"RenameStmt": true, "CreateTableAsStmt": true, "RefreshMatViewStmt": true,
+	"CopyStmt": true, "RefreshMatViewStmt": true,
 }
 
 // ClassifyPostgres decides from the text alone, using PostgreSQL's own
