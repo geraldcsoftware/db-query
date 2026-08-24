@@ -18,10 +18,11 @@ const (
 // Every walk over SQL in this package and in the adapters needs the same
 // answer to this one question, and the walk that answered it differently
 // produced a real bug: a normaliser that did not skip literals rewrote the
-// colons in `to_char(created, 'DD Mon, HH:MM:SS')` as parameter placeholders,
+// colons in a time format such as HH:MM:SS as parameter placeholders,
 // unbalancing the quotes so the statement no longer parsed and was refused as
 // unclassifiable. Answering it in one place is what stops the walks drifting
-// apart again.
+// apart again, and span_oracle_test.go checks the answers against PostgreSQL's
+// own scanner.
 func skipSpan(src []rune, i int, d Dialect) (int, spanKind) {
 	if i >= len(src) {
 		return i, spanNone
@@ -54,7 +55,20 @@ func skipSpan(src []rune, i int, d Dialect) (int, spanKind) {
 		return j, spanComment
 
 	case src[i] == '\'':
-		return skipQuoted(src, i, '\'', escapesBackslash(src, i)), spanQuoted
+		return skipQuoted(src, i, '\'', false), spanQuoted
+
+	case stringPrefixAt(src, i, d):
+		// A prefixed literal is one token to PostgreSQL, prefix included: an
+		// E-prefixed string is a single SCONST starting at the E, not at the
+		// quote. Starting the span at the quote would leave the prefix looking
+		// like code, which is harmless today and exactly the sort of near-miss
+		// that stops being harmless later.
+		quote := i + 1
+		if src[i+1] == '&' {
+			quote = i + 2
+		}
+		escapes := src[i] == 'E' || src[i] == 'e'
+		return skipQuoted(src, quote, '\'', escapes), spanQuoted
 
 	case src[i] == '"':
 		return skipQuoted(src, i, '"', false), spanQuoted
@@ -70,13 +84,14 @@ func skipSpan(src []rune, i int, d Dialect) (int, spanKind) {
 	return i, spanNone
 }
 
-// skipQuoted returns the index just past a run delimited by close. A doubled
-// delimiter is an escaped one and does not end the run, which is how both
-// dialects spell a quote inside a quoted thing. backslash additionally honours
-// C-style escapes, which postgres applies only to an E” string.
-func skipQuoted(src []rune, i int, close rune, backslash bool) int {
-	for j := i + 1; j < len(src); j++ {
-		if backslash && src[j] == '\\' {
+// skipQuoted returns the index just past a run whose opening delimiter sits at
+// open. A doubled delimiter is an escaped one and does not end the run, which
+// is how both dialects spell a quote inside a quoted thing. escapes
+// additionally honours backslash escapes, which postgres applies only to an
+// E-prefixed string.
+func skipQuoted(src []rune, open int, close rune, escapes bool) int {
+	for j := open + 1; j < len(src); j++ {
+		if escapes && src[j] == '\\' {
 			j++ // the escaped character cannot close the run
 			continue
 		}
@@ -91,18 +106,34 @@ func skipQuoted(src []rune, i int, close rune, backslash bool) int {
 	return len(src) // unterminated: consume the remainder rather than re-enter code
 }
 
-// escapesBackslash reports whether the literal starting at i is an E” string,
-// in which case a backslash escapes the next character. Without this, E'a\'b'
-// ends at the escaped quote and the rest of the literal is walked as code.
-func escapesBackslash(src []rune, i int) bool {
-	if i == 0 || (src[i-1] != 'E' && src[i-1] != 'e') {
+// stringPrefixAt reports whether a prefixed string literal starts at i. The
+// prefixes differ by dialect: postgres has E (backslash escapes), B and X (bit
+// and hex) and U& (unicode); T-SQL has N (national character).
+//
+// A prefix must not be the tail of an identifier, or a name ending in e
+// followed by a literal would be read as one prefixed literal where PostgreSQL
+// sees an identifier and then an ordinary string.
+func stringPrefixAt(src []rune, i int, d Dialect) bool {
+	if i > 0 && isIdentRune(src[i-1]) {
 		return false
 	}
-	// The E must be a prefix, not the tail of an identifier.
-	return i < 2 || !isIdentRune(src[i-2])
+	switch d {
+	case DialectPostgres:
+		switch src[i] {
+		case 'E', 'e', 'B', 'b', 'X', 'x':
+			return i+1 < len(src) && src[i+1] == '\''
+		case 'U', 'u':
+			return i+2 < len(src) && src[i+1] == '&' && src[i+2] == '\''
+		}
+	case DialectTSQL:
+		if src[i] == 'N' || src[i] == 'n' {
+			return i+1 < len(src) && src[i+1] == '\''
+		}
+	}
+	return false
 }
 
-// skipDollarQuoted returns the index just past a postgres $tag$…$tag$ body.
+// skipDollarQuoted returns the index just past a postgres dollar-quoted body.
 func skipDollarQuoted(src []rune, i int) (int, bool) {
 	j := i + 1
 	for j < len(src) && isIdentRune(src[j]) {
