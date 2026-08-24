@@ -1500,6 +1500,21 @@ worth recording. The corpus tested SQL a database would receive; it did not
 test what this tool actually sends, and the gap between those two is exactly
 where a classifier goes wrong.
 
+Deciding which colons are placeholders turned out to be the hard part, and it
+is now PostgreSQL's scanner that decides. A cast is a single TYPECAST token so
+it is never two colons, a literal is a single SCONST so the colons inside a
+time format are not visible, and a slice bound is separated from its colon by
+the scanner's own offsets, which is psql's adjacency rule expressed exactly.
+Only the last step, recognising that a colon followed by a name is a psql
+placeholder, stays ours: that syntax is a client feature and the scanner is the
+server's.
+
+The hand-rolled walk it replaced could not go away entirely, because T-SQL has
+no PostgreSQL lexer to borrow and a build without cgo still has to refuse
+client directives. It is instead checked against the real scanner by a
+differential test, on the principle that two implementations of the same
+judgement will drift unless something fails when they do.
+
 #### Not yet built
 
 - **The connect-time privilege probe** (§13.12) is unimplemented. The dry-run
