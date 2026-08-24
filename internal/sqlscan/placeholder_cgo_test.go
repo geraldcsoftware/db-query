@@ -12,9 +12,26 @@ func TestNormaliseLeavesNonPlaceholderColonsAlone(t *testing.T) {
 	params := map[string]string{"who": "Ada", "id": "1"}
 	unchanged := []struct{ name, sql string }{
 		{"time format in a literal", "select to_char(created, 'DD Mon, HH:MM:SS') from t"},
+		{"minute format in a literal", "select to_char(created, 'DD/MM HH:MI:SS') from t"},
+		{"24-hour time format", "select to_char(now(), 'HH24:MI:SS')"},
+		{"an interval literal", "select interval '1:30'"},
 		{"casts", "select somecol::date as date, sometext::jsonb as jsoncontent from t"},
+		{"a cast feeding a json operator", "select col::jsonb->>'someProperty' from t"},
+		{"a schema-qualified cast", "select col::public.mytype from t"},
+		{"nested casts", "select (col::text)::int from t"},
 		{"array slice with literals", "SELECT arr[1:3] FROM t"},
+		{"array slice from zero", "SELECT arr[0:3] FROM t"},
+		{"array slice with the lower bound omitted", "SELECT arr[:3] FROM t"},
+		{"array slice with the upper bound omitted", "SELECT arr[2:] FROM t"},
+		{"array slice with both bounds omitted", "SELECT arr[:] FROM t"},
+		{"chained array slices", "SELECT arr[1:3][2:4] FROM t"},
 		{"array slice with an identifier", "SELECT arr[1:upper] FROM t"},
+		{"a colon in a literal", "SELECT 'some: thing'"},
+		{"a cast written inside a literal", "SELECT 'a::b'"},
+		// := is named-argument notation, and `id` is bound: the pair is a
+		// single token to the scanner, so the binding cannot reach it.
+		{"named-argument notation", "SELECT f(id := 1)"},
+		{"named-argument notation without spaces", "SELECT f(id:=1)"},
 		{"a url in a literal", "SELECT * FROM t WHERE url = 'https://x/y'"},
 		{"a colon in a line comment", "SELECT 1 -- note: something\n"},
 		{"a colon in a block comment", "/* note: something */ SELECT 1"},
@@ -91,8 +108,13 @@ func TestNormalisedSQLStillParses(t *testing.T) {
 	params := map[string]string{"who": "Ada", "id": "1"}
 	for _, sql := range []string{
 		"SELECT to_char(created, 'DD Mon, HH:MM:SS') FROM t",
+		"SELECT to_char(created, 'DD/MM HH:MI:SS') FROM t WHERE n = :'who'",
 		"SELECT a::date, b::jsonb FROM t",
+		"SELECT a::jsonb->>'someProperty' FROM t WHERE n = :'who'",
 		"SELECT arr[1:3] FROM t",
+		"SELECT arr[:3], arr[2:], arr[0:3] FROM t WHERE n = :'who'",
+		"SELECT f(id := 1) FROM t WHERE n = :'who'",
+		"SELECT :'who'::date FROM t",
 		"SELECT * FROM t WHERE name = :'who' AND id = :id",
 		`SELECT * FROM :"who"`,
 		"SELECT E'a\\'b:c', $tag$ x:y $tag$ FROM t WHERE n = :'who'",
