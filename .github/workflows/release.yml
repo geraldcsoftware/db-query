@@ -16,16 +16,19 @@ jobs:
     # runner is Apple Silicon and builds the amd64 slice through
     # `clang -arch x86_64`, which the Xcode SDK supports natively.
     runs-on: macos-latest
+    # The actions below are on their v7 line, which targets the node24
+    # runtime rather than the deprecated node20. v7 requires a runner of
+    # at least v2.327.1, which the hosted macOS image provides.
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # GoReleaser needs the full history and all tags to compute the
           # version and build the changelog.
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "1.25"
           cache: true
@@ -45,7 +48,7 @@ jobs:
         run: CGO_ENABLED=1 go test ./...
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
