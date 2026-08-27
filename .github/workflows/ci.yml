@@ -1,0 +1,134 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# Nothing in this workflow writes to the repository. Dependabot's pull
+# requests are handed a read-only token whoever asks, so declaring the same
+# thing here keeps both paths identical and removes a class of surprise.
+permissions:
+  contents: read
+
+# A second push to a branch makes the run already in flight redundant. Cancel
+# it there, but keep every result on main, where each commit's status is the
+# record of whether that commit was good.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    # macOS is here because release.yml builds on macOS with clang. The SQL
+    # classifier links PostgreSQL's own grammar through cgo, so a break that
+    # only clang sees would otherwise first appear part-way through a release,
+    # after the tag is already public. The runners are free on a public repo.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # Read the version from go.mod so the toolchain is declared once
+          # rather than copied into every workflow that needs it.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: CGO_ENABLED=1 go vet ./...
+
+      # -race because the embedded Neovim session drives goroutines over
+      # shared state guarded by a mutex (internal/tui/nvimpane/session.go,
+      # internal/tui/schema_source.go). A race there surfaces as an
+      # intermittent panic in front of a user, not as a reproducible failure.
+      - name: Test
+        run: CGO_ENABLED=1 go test -race ./...
+
+  nocgo:
+    # internal/sqlscan carries a pure-Go fallback behind //go:build !cgo for
+    # builds without a C toolchain. Neither the release nor the job above ever
+    # compiles it, so without this it can break silently and stay broken.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build without cgo
+        run: CGO_ENABLED=0 go build -o /dev/null ./cmd/db-query
+
+      - name: Test without cgo
+        run: CGO_ENABLED=0 go test ./...
+
+  modules:
+    # Dependabot runs `go mod tidy` itself, but not on grouped updates, and a
+    # tidy that fails does not fail its job. This verifies rather than fixes:
+    # it never pushes to the pull request, so it cannot stop Dependabot
+    # rebasing, and it cannot land a commit that no CI run has seen.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Before tidy, so this checks the committed go.sum rather than one this
+      # job has just rewritten.
+      - name: Module cache matches go.sum
+        run: go mod verify
+
+      - name: go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  govulncheck:
+    # The complement to Dependabot rather than a duplicate of it: Dependabot
+    # matches versions against advisories, govulncheck matches reachable call
+    # paths, so it can clear a flagged version whose vulnerable function this
+    # code never calls. Deliberately not a required check, so an advisory with
+    # no fix available cannot deadlock every merge.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # @latest on purpose: a scanner pinned to an old release stops finding
+      # new advisories, which is the one job it has. It may pull a newer Go
+      # toolchain than go.mod asks for, which the toolchain handles itself.
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
