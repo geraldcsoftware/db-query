@@ -11,7 +11,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/neovim/go-client v1.2.1
 	github.com/pganalyze/pg_query_go/v6 v6.2.2
-	google.golang.org/protobuf v1.31.0
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
