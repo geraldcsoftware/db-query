@@ -1,0 +1,77 @@
+version: 2
+
+updates:
+  # Go module dependencies. Note there is no cooldown block here: since July
+  # 2026 Dependabot holds a version update until the release has been on the
+  # registry three days, by default, and security updates bypass that hold.
+  # The default is what we want, so it is left alone rather than restated.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Africa/Harare
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      # Conventional Commits, matching the log: build for dependency changes,
+      # with include: scope adding the (deps) marker.
+      prefix: build
+      include: scope
+    groups:
+      # These release in lockstep and account for seven of the module graph's
+      # entries. Left ungrouped they would be most of every week's pull
+      # requests on their own. Majors are excluded deliberately: a v2 to v3
+      # move changes the import path, which is a code change, not a bump.
+      charm:
+        patterns:
+          - "charm.land/*"
+          - "github.com/charmbracelet/*"
+        update-types:
+          - minor
+          - patch
+      golang-x:
+        patterns:
+          - "golang.org/x/*"
+        update-types:
+          - minor
+          - patch
+      # Everything not caught above, patch level only, in one pull request.
+      # Anything left over, meaning a minor or major on a direct dependency,
+      # gets its own pull request and its own review.
+      patch:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+    # Groups apply to version updates only. Security updates stay ungrouped
+    # and unscheduled on purpose: one advisory, one pull request, opened when
+    # the advisory lands rather than on Monday.
+
+  # The actions used by release.yml, ci.yml and integration.yml. This is the
+  # thing that stops the v6-to-v7 move in PR #33 having to be done by hand
+  # again next time.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Africa/Harare
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
