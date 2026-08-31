@@ -37,6 +37,45 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # db-query drives the real clients rather than a Go driver, so the
+      # runner needs them on PATH, not just the containers. psql ships with
+      # the image; sqlcmd does not. go-sqlcmd is the build this adapter's
+      # flags were verified against (see the -y 0 note in
+      # internal/adapter/sqlserver.go), and installing it through the
+      # toolchain set up above beats pinning an OS codename or a release
+      # asset name, both of which move without notice. Pinned rather than
+      # @latest: a nightly that reports on main should not also be the first
+      # thing to find out an upstream release is broken.
+      - name: Install sqlcmd
+        run: |
+          # An explicit GOBIN rather than wherever the default resolves to,
+          # so the rename below has one known target and nothing lands in
+          # the working tree.
+          export GOBIN="$RUNNER_TEMP/db-clients"
+          go install github.com/microsoft/go-sqlcmd/cmd/modern@v1.10.0
+          # The adapter execs "sqlcmd"; the module names its binary after
+          # the package it lives in.
+          mv "$GOBIN/modern" "$GOBIN/sqlcmd"
+          echo "$GOBIN" >> "$GITHUB_PATH"
+
+      # Before the databases, not after: without a client the suite's
+      # three-minute readiness wait cannot pass, and when it gives up it
+      # blames the container stack rather than the missing binary. Asserting
+      # the prerequisite here costs a second and names the real cause.
+      - name: Check the clients are on PATH
+        run: |
+          missing=""
+          for client in psql sqlcmd; do
+            command -v "$client" >/dev/null 2>&1 || missing="$missing $client"
+          done
+          if [ -n "$missing" ]; then
+            echo "Not on PATH:$missing" >&2
+            echo "The integration suite drives the real clients; see README.md." >&2
+            exit 1
+          fi
+          psql --version
+          sqlcmd --version
+
       # --wait holds until both containers report healthy, so a slow SQL
       # Server start fails here with a clear cause rather than as a connection
       # refused inside the first test.
