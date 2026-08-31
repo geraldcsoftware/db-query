@@ -131,6 +131,28 @@ func runTool(t testing.TB, env []string, args ...string) result {
 	return result{code: code, stdout: out.String(), stderr: errb.String()}
 }
 
+// seedMSSQL runs one batch straight through sqlcmd, connecting the way the
+// adapter does: every detail through the SQLCMD* overlay, nothing on argv, so
+// the fixture and the subject under test reach the same server the same way.
+// -b matches the adapter too, making a batch error exit nonzero.
+//
+// It bypasses db-query deliberately. See the note in mssqlReady for why the
+// fixture cannot be built with the tool itself.
+func seedMSSQL(t testing.TB, database, sql string) {
+	t.Helper()
+	cmd := exec.Command("sqlcmd", "-b", "-Q", sql)
+	cmd.Env = append(os.Environ(),
+		"SQLCMDSERVER=tcp:127.0.0.1,"+envOr("DBQ_MSSQL_PORT", "11433"),
+		"SQLCMDUSER=sa",
+		"SQLCMDPASSWORD="+mssqlPassword,
+		"SQLCMDDBNAME="+database,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seeding %s failed: %v\n%s", database, err, out)
+	}
+}
+
 // waitReady polls a trivial query until the database accepts it.
 func waitReady(t testing.TB, host string, deadline time.Duration) {
 	t.Helper()

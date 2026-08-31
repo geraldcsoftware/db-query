@@ -154,22 +154,35 @@ func TestPostgresIntrospection(t *testing.T) {
 			}
 		}
 	})
-	t.Run("schema error carries an introspection hint", func(t *testing.T) {
+	// The next three assert exit codes rather than message text. The 3/4/5
+	// split is the contract: internal/cli/cli.go lists it and
+	// internal/cli/cli_test.go pins each code against a stubbed client,
+	// while the wording that travels alongside a code is free to move, and
+	// did. The first two of these once asserted a hint reading "introspect";
+	// the schema cache reworded it to --refresh-schema and left both cases
+	// red against a tool that was behaving correctly.
+	t.Run("a schema error exits 3", func(t *testing.T) {
 		res := runTool(t, nil, "query", "--host", "pg", "SELECT no_such_column FROM people")
-		if res.code == 0 {
-			t.Fatal("must fail")
-		}
-		if !strings.Contains(res.stderr, "introspect") {
-			t.Fatalf("schema error should hint at introspection: %s", res.stderr)
+		if res.code != 3 {
+			t.Fatalf("code = %d, want 3 (schema error); stderr=%s", res.code, res.stderr)
 		}
 	})
-	t.Run("non-schema error carries no hint", func(t *testing.T) {
-		res := runTool(t, nil, "query", "--host", "pg", "SELEC 1")
-		if res.code == 0 {
-			t.Fatal("must fail")
+	// Division by zero rather than a syntax error: proving the 3-vs-4 split
+	// needs a statement that reaches the server, and the safety gate stops
+	// anything it cannot parse before psql is ever started (next case).
+	t.Run("a non-schema SQL error exits 4", func(t *testing.T) {
+		res := runTool(t, nil, "query", "--host", "pg", "SELECT 1/0 AS boom")
+		if res.code != 4 {
+			t.Fatalf("code = %d, want 4 (other SQL error); stderr=%s", res.code, res.stderr)
 		}
-		if strings.Contains(res.stderr, "introspect") {
-			t.Fatalf("syntax error must not hint at introspection: %s", res.stderr)
+	})
+	// What the old "non-schema error" case was really covering: SELEC is
+	// unparseable, so it is refused as opaque and psql never runs. Worth
+	// keeping, under a name that says so.
+	t.Run("unparseable SQL is refused, exit 5", func(t *testing.T) {
+		res := runTool(t, nil, "query", "--host", "pg", "SELEC 1")
+		if res.code != 5 {
+			t.Fatalf("code = %d, want 5 (refused by the safety gate); stderr=%s", res.code, res.stderr)
 		}
 	})
 }

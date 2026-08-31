@@ -249,7 +249,10 @@ func (sqlserverAdapter) ParsePlan(r executor.RawResult) (sqlscan.Class, string, 
 // denies rather than passing.
 func mssqlClassFor(t string) sqlscan.Class {
 	switch strings.ToUpper(strings.TrimSpace(t)) {
-	case "SELECT":
+	// "SELECT WITHOUT QUERY" is the engine's label for a SELECT that touches
+	// no table (SELECT 1, SELECT @@VERSION); observed in a real 2022 showplan
+	// by the integration suite, whose readiness probe is exactly that shape.
+	case "SELECT", "SELECT WITHOUT QUERY":
 		return sqlscan.ClassRead
 	case "INSERT", "UPDATE", "MERGE":
 		return sqlscan.ClassWrite

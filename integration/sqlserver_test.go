@@ -18,25 +18,29 @@ func mssqlReady(t testing.TB) {
 	mssqlOnce.Do(func() {
 		waitReady(t, "mssql-master", 180*time.Second)
 
-		seed := []struct{ host, sql string }{
-			{"mssql-master", "IF DB_ID('dbqtest') IS NULL CREATE DATABASE dbqtest"},
-			{"mssql", "IF OBJECT_ID('people') IS NOT NULL DROP TABLE people"},
-			{"mssql", `CREATE TABLE people (
-				id int PRIMARY KEY,
-				name nvarchar(100) NOT NULL,
-				nickname nvarchar(100) NULL,
-				note nvarchar(200) NULL)`},
-			{"mssql", `INSERT INTO people (id, name, nickname, note) VALUES
-				(1, 'Ada', NULL, 'first programmer'),
-				(2, 'Grace', '', 'compiler pioneer'),
-				(3, 'Edsger', 'EWD', 'structured, humble, precise')`},
-		}
-		for _, s := range seed {
-			res := runTool(t, nil, "query", "--host", s.host, "--timeout", "30s", s.sql)
-			if res.code != 0 {
-				t.Fatalf("seeding %q failed (code=%d): %s", s.sql, res.code, res.stderr)
-			}
-		}
+		// The fixture is loaded with sqlcmd rather than with db-query, which
+		// refuses to build it: CREATE and DROP classify as destructive and
+		// CREATE DATABASE as admin, and sqlscan.Class.Permitted allows only
+		// reads on a read-only host and only reads and writes on a writable
+		// one, so no config setting opens this path. What would is the
+		// operator challenge, and that wants a /dev/tty no runner has.
+		// Postgres meets the same wall and answers it the same way, with a
+		// script the container runs for itself
+		// (integration/init/postgres/01-init.sql); the SQL Server image has
+		// no equivalent mount point, so its fixture is loaded here instead.
+		// Building it with the subject under test would mean weakening that
+		// gate or leaving this suite permanently red.
+		seedMSSQL(t, "master", "IF DB_ID('dbqtest') IS NULL CREATE DATABASE dbqtest")
+		seedMSSQL(t, "dbqtest", "IF OBJECT_ID('people') IS NOT NULL DROP TABLE people")
+		seedMSSQL(t, "dbqtest", `CREATE TABLE people (
+			id int PRIMARY KEY,
+			name nvarchar(100) NOT NULL,
+			nickname nvarchar(100) NULL,
+			note nvarchar(200) NULL)`)
+		seedMSSQL(t, "dbqtest", `INSERT INTO people (id, name, nickname, note) VALUES
+			(1, 'Ada', NULL, 'first programmer'),
+			(2, 'Grace', '', 'compiler pioneer'),
+			(3, 'Edsger', 'EWD', 'structured, humble, precise')`)
 	})
 }
 
@@ -185,13 +189,22 @@ func TestSQLServerIntrospection(t *testing.T) {
 			}
 		}
 	})
-	t.Run("schema error carries an introspection hint", func(t *testing.T) {
+	// Exit 5, where the Postgres suite asserts 3 for the same query, and the
+	// difference is structural rather than a quirk. SQL Server has no local
+	// grammar, so every statement is classified by asking the engine for a
+	// plan, and SHOWPLAN_XML cannot compile one naming a column that does
+	// not exist. ParsePlan reads that failure as opaque ("did not compile"),
+	// opaque is permitted on no host, and the query is refused before it
+	// runs for real. The invalid column is still caught, one layer earlier
+	// than on Postgres, which is why exit 3 is not reachable here.
+	//
+	// This case asserted a hint reading "introspect" until the schema cache
+	// reworded it, and the wording it moved to was never the reason it
+	// failed: the code is the stable claim.
+	t.Run("an invalid column is caught by the pre-check, exit 5", func(t *testing.T) {
 		res := runTool(t, nil, "query", "--host", "mssql", "SELECT no_such_column FROM people")
-		if res.code == 0 {
-			t.Fatal("must fail")
-		}
-		if !strings.Contains(res.stderr, "introspect") {
-			t.Fatalf("schema error should hint at introspection: %s", res.stderr)
+		if res.code != 5 {
+			t.Fatalf("code = %d, want 5 (refused: the plan does not compile); stderr=%s", res.code, res.stderr)
 		}
 	})
 }
