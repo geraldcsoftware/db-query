@@ -70,6 +70,13 @@ func TestSQLServerParsePlan(t *testing.T) {
 			sqlscan.ClassRead,
 		},
 		{
+			// The engine's label for a SELECT that touches no table
+			// (SELECT 1, SELECT @@VERSION). A read, not an unknown verb.
+			"select without query",
+			executor.RawResult{Stdout: []byte(`<StmtSimple StatementType="SELECT WITHOUT QUERY" />`)},
+			sqlscan.ClassRead,
+		},
+		{
 			"delete",
 			executor.RawResult{Stdout: []byte(`<StmtSimple StatementType="DELETE" />`)},
 			sqlscan.ClassDestructive,
