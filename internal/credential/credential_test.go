@@ -173,6 +173,34 @@ func TestBwsResolver(t *testing.T) {
 			t.Fatalf("want backend error, got %v", err)
 		}
 	})
+	// bws defaults to --color auto, which is env-driven rather than tty-driven:
+	// FORCE_COLOR or CLICOLOR_FORCE in the inherited environment makes it wrap
+	// the JSON in ANSI escapes that no parser accepts. The explicit flag
+	// outranks those variables, so it must always be on the argv.
+	t.Run("disables colour explicitly", func(t *testing.T) {
+		t.Setenv("BWS_ACCESS_TOKEN", "tok")
+		var seen []string
+		withBackend(t, func(env map[string]string, name string, args ...string) ([]byte, error) {
+			seen = args
+			return []byte(`{"key":"k","value":"v"}`), nil
+		})
+		if _, err := Resolve("bws:1a2b"); err != nil {
+			t.Fatal(err)
+		}
+		if !hasFlagValue(seen, "--color", "no") {
+			t.Fatalf("args = %v, want --color no", seen)
+		}
+	})
+}
+
+// hasFlagValue reports whether args contains flag immediately followed by value.
+func hasFlagValue(args []string, flag, value string) bool {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) && args[i+1] == value {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBwsResolverConfiguredToken(t *testing.T) {

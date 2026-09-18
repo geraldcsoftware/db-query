@@ -35,8 +35,12 @@ func (r bwsResolver) Resolve(rest string) (Credential, error) {
 	if token == "" {
 		return Credential{}, fmt.Errorf("bws: no access token — set bws.accessToken in config or the BWS_ACCESS_TOKEN environment variable")
 	}
+	// --color no is load-bearing, not cosmetic: bws defaults to --color auto,
+	// which keys off FORCE_COLOR and CLICOLOR_FORCE rather than off an attached
+	// terminal, so a harness that exports either one makes bws wrap this JSON in
+	// ANSI escapes even though stdout is a pipe. The flag outranks both.
 	out, err := runBackend(map[string]string{"BWS_ACCESS_TOKEN": token},
-		"bws", "secret", "get", id, "--output", "json")
+		"bws", "secret", "get", id, "--output", "json", "--color", "no")
 	if err != nil {
 		return Credential{}, err
 	}
