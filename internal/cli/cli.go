@@ -60,7 +60,7 @@ Flags:
                             row-count footer (query, schema)
   --max-col-width <n>     : table output: truncate cells wider than n cells (default 50,
                             0 = unlimited) (query, schema)
-  --border <style>        : table output: ascii|light|markdown|none (default ascii)
+  --border <style>        : table output: ascii|light|markdown|none (default ascii, or $DB_QUERY_BORDER)
                             (query, schema)
   --tables (-T)           : schema: print one schema-qualified table name per line instead of columns
   --help (-h)             : show this help (works on any command)
@@ -77,7 +77,9 @@ query, list, schema, introspect, hosts — honours the same setting.
 box-drawing), markdown (paste into an issue or notes file), or none (aligned
 columns, no frame). markdown omits the row-count footer so the output pastes
 verbatim; combined with --no-headers it emits data rows without the --- rule,
-which appends to an existing table rather than standing alone.
+which appends to an existing table rather than standing alone. Export
+DB_QUERY_BORDER to pin the frame for a whole shell; it applies to every command
+that prints a table, and --border beats it.
 
 The shared flags (--host, --database, --config, --output, --timeout) may also be
 given before the command, which keeps the part that changes between runs at the
@@ -93,6 +95,7 @@ Environment:
   DB_QUERY_HOST          default for --host
   DB_QUERY_DATABASE      default for --database
   DB_QUERY_OUTPUT        default for --output
+  DB_QUERY_BORDER        default for --border
   DB_QUERY_CONFIG        default config file path
   DB_QUERY_QUERIES_DIR   saved-query store directory
   DB_QUERY_TUI_PAGE_SIZE rows per page in the interactive mode's Results pane (default 100)
@@ -302,6 +305,17 @@ func envDefaults() commonFlags {
 	}
 }
 
+// envBorder is the table frame used when --border is not given: DB_QUERY_BORDER
+// when set, else render.DefaultBorder. The value is validated where it is used,
+// so a bad export fails like a bad --border. Commands without a --border flag
+// use it directly, which keeps every table in a shell framed the same way.
+func envBorder() string {
+	if b := os.Getenv("DB_QUERY_BORDER"); b != "" {
+		return b
+	}
+	return render.DefaultBorder
+}
+
 // addCommon registers the flags shared by every subcommand. Each long flag
 // and its single-letter shorthand bind the same variable, so either spelling
 // sets the value. def supplies every default, which is how a value given
@@ -398,7 +412,7 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache before running")
 	fs.BoolVar(&noHeaders, "no-headers", false, "text/table output: omit the header line")
 	fs.IntVar(&maxColWidth, "max-col-width", defaultMaxColWidth, "table output: truncate cells wider than this (0 = unlimited)")
-	fs.StringVar(&border, "border", render.DefaultBorder, "table output: frame style ("+strings.Join(render.Borders(), "|")+")")
+	fs.StringVar(&border, "border", envBorder(), "table output: frame style ("+strings.Join(render.Borders(), "|")+")")
 	fs.BoolVar(&force, "force", false, "with --save: overwrite an existing query and bypass the duplicate check")
 	var pre precheckFlags
 	fs.BoolVar(&pre.dryRun, "dry-run", false, "classify the query and print the decision as JSON; run nothing")
@@ -552,7 +566,7 @@ func runList(args []string, globals commonFlags, stdout, stderr io.Writer) int {
 		preview := previewSQL(q.SQL)
 		rows.Rows = append(rows.Rows, []*string{&cat, &name, &prov, &hash, &preview})
 	}
-	return renderRows(rows, c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
+	return renderRows(rows, c.output, false, defaultMaxColWidth, envBorder(), stdout, stderr)
 }
 
 // queryListing is the JSON shape of one saved query in the list command:
@@ -637,7 +651,7 @@ func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) int
 	fs.BoolVar(&refreshSchema, "refresh-schema", false, "rebuild the schema cache first")
 	fs.BoolVar(&noHeaders, "no-headers", false, "text/table output: omit the header line")
 	fs.IntVar(&maxColWidth, "max-col-width", defaultMaxColWidth, "table output: truncate cells wider than this (0 = unlimited)")
-	fs.StringVar(&border, "border", render.DefaultBorder, "table output: frame style ("+strings.Join(render.Borders(), "|")+")")
+	fs.StringVar(&border, "border", envBorder(), "table output: frame style ("+strings.Join(render.Borders(), "|")+")")
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
 		return exitParse(err, stdout)
@@ -802,7 +816,7 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 	// The connection is already open and this command exists to rebuild caches,
 	// so the database list is refreshed in the same run. Failure is a warning.
 	refreshDatabaseList(r, c, stderr)
-	return renderRows(rows, c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
+	return renderRows(rows, c.output, false, defaultMaxColWidth, envBorder(), stdout, stderr)
 }
 
 // refreshDatabaseList re-runs a host's catalog listing and persists the names
@@ -847,7 +861,7 @@ func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) 
 	if code != 0 {
 		return code
 	}
-	return renderRows(databaseListRows(rows), c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
+	return renderRows(databaseListRows(rows), c.output, false, defaultMaxColWidth, envBorder(), stdout, stderr)
 }
 
 // listDatabases runs a host's catalog listing and persists the names for
@@ -893,7 +907,7 @@ func runHosts(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 			render.Error(stderr, c.output, err.Error())
 			return 1
 		}
-		return renderRows(hostDetailRows(h), c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
+		return renderRows(hostDetailRows(h), c.output, false, defaultMaxColWidth, envBorder(), stdout, stderr)
 	}
 	rows := adapter.Rows{Columns: []string{"host", "provider", "database"}}
 	for _, name := range cfg.HostNames() {
@@ -901,7 +915,7 @@ func runHosts(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 		n, p, d := name, h.Provider, h.Database
 		rows.Rows = append(rows.Rows, []*string{&n, &p, &d})
 	}
-	return renderRows(rows, c.output, false, defaultMaxColWidth, render.DefaultBorder, stdout, stderr)
+	return renderRows(rows, c.output, false, defaultMaxColWidth, envBorder(), stdout, stderr)
 }
 
 // hostDetailRows renders one host's effective configuration as key/value/source

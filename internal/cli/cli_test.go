@@ -137,11 +137,12 @@ func run(t *testing.T, args ...string) (int, string, string) {
 }
 
 // TestMain clears the environment defaults the CLI reads, so a developer who
-// has DB_QUERY_HOST/DB_QUERY_DATABASE/DB_QUERY_CONFIG/DB_QUERY_OUTPUT exported
-// in their own shell does not change what the tests see. The tests that
-// exercise the environment path set these explicitly with t.Setenv.
+// has DB_QUERY_HOST/DB_QUERY_DATABASE/DB_QUERY_CONFIG/DB_QUERY_OUTPUT/
+// DB_QUERY_BORDER exported in their own shell does not change what the tests
+// see. The tests that exercise the environment path set these explicitly with
+// t.Setenv.
 func TestMain(m *testing.M) {
-	for _, k := range []string{"DB_QUERY_HOST", "DB_QUERY_DATABASE", "DB_QUERY_CONFIG", "DB_QUERY_OUTPUT"} {
+	for _, k := range []string{"DB_QUERY_HOST", "DB_QUERY_DATABASE", "DB_QUERY_CONFIG", "DB_QUERY_OUTPUT", "DB_QUERY_BORDER"} {
 		os.Unsetenv(k)
 	}
 	os.Exit(m.Run())

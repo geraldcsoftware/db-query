@@ -125,6 +125,10 @@ the host in effect is whatever `DB_QUERY_HOST` says until you override it.
   `markdown` omits the row-count footer so the output pastes verbatim. Combined
   with `--no-headers` it emits data rows without the `---` rule, which appends
   to an existing table rather than standing alone.
+
+  Export `DB_QUERY_BORDER` to pin the frame for a whole shell. It applies to
+  every command that prints a table, including `list`, `introspect`, `hosts`,
+  and `databases`, and `--border` beats it.
 - `--database <db>` (`-d`) overrides the host's configured `database` for this
   run (on `query`, `schema`, `introspect`, and `databases`), so one host entry
   can reach sibling databases on the same server without a second config block.
