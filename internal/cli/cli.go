@@ -60,7 +60,7 @@ Flags:
                             row-count footer (query, schema)
   --max-col-width <n>     : table output: truncate cells wider than n cells (default 50,
                             0 = unlimited) (query, schema)
-  --border <style>        : table output: ascii|light|markdown|none (default ascii)
+  --border <style>        : table output: ascii|light|markdown|none (default ascii, or $DB_QUERY_BORDER)
                             (query, schema)
   --tables (-T)           : schema: print one schema-qualified table name per line instead of columns
   --help (-h)             : show this help (works on any command)
@@ -96,7 +96,7 @@ Environment:
   DB_QUERY_DATABASE      default for --database
   DB_QUERY_OUTPUT        default for --output
   DB_QUERY_BORDER        default for --border
-  DB_QUERY_CONFIG       default config file path
+  DB_QUERY_CONFIG        default config file path
   DB_QUERY_QUERIES_DIR   saved-query store directory
   DB_QUERY_TUI_PAGE_SIZE rows per page in the interactive mode's Results pane (default 100)
 
