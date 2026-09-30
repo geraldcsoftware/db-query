@@ -1,6 +1,6 @@
 module github.com/geraldcsoftware/db-query
 
-go 1.25.14
+go 1.26.8
 
 require (
 	charm.land/bubbles/v2 v2.2.1
