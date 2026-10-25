@@ -611,7 +611,7 @@ func TestASuccessfulRunFocusesTheResultsPane(t *testing.T) {
 	m := newTestModel(t)
 	m.focus = paneQuery
 
-	next, _ := m.Update(queryResultMsg{rows: rowsOf(50)})
+	next, _ := m.Update(queryResultMsg{sets: []adapter.Rows{rowsOf(50)}})
 	if got := next.(model).focus; got != paneResults {
 		t.Errorf("focus = %v after a run returned rows, want the Results pane", got)
 	}
@@ -646,7 +646,7 @@ func TestAStaleResultDoesNotMoveFocus(t *testing.T) {
 	m.focus = paneQuery
 	m.runGen = 2
 
-	next, _ := m.Update(queryResultMsg{rows: rowsOf(50), gen: 1})
+	next, _ := m.Update(queryResultMsg{sets: []adapter.Rows{rowsOf(50)}, gen: 1})
 	if got := next.(model).focus; got != paneQuery {
 		t.Errorf("focus = %v after a disowned result, want it left on the Query pane", got)
 	}

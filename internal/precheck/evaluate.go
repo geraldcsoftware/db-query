@@ -6,6 +6,7 @@ import (
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/config"
+	"github.com/geraldcsoftware/db-query/internal/credential"
 	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
@@ -21,6 +22,7 @@ type PlanRunner func(inv executor.Invocation) (executor.RawResult, error)
 type Input struct {
 	Adapter    adapter.Adapter
 	Host       config.HostConfig
+	Cred       credential.Credential // for a planner probe's connection only
 	SQL        string
 	Params     map[string]string
 	Source     Source
@@ -69,7 +71,7 @@ func Evaluate(in Input) Document {
 	doc.Digest = DigestField{Alg: "hmac-sha256", Value: Digest(tuple, in.Key)}
 
 	// The lexical pre-pass runs first, for every provider. A client directive
-	// is executed by psql or sqlcmd and never reaches a server, so neither
+	// is a psql or sqlcmd command and never reaches a server, so neither
 	// mechanism can see one: it is caught here or not at all. It is also the
 	// one refusal that holds with the database unreachable.
 	_, directives := sqlscan.Scan(in.SQL, in.Adapter.Dialect())
@@ -141,7 +143,7 @@ func classifyByPlan(in Input) (sqlscan.Verdict, error) {
 	}
 	v := sqlscan.Verdict{Mechanism: sqlscan.MechanismPlanner, Version: in.Host.Provider + " engine planner"}
 	for i, stmt := range statements {
-		inv, err := in.Adapter.PlanInvocation(in.Host, stmt)
+		inv, err := in.Adapter.PlanInvocation(in.Cred, in.Host, stmt)
 		if err != nil {
 			return sqlscan.Verdict{}, err
 		}

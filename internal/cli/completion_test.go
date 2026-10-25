@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/geraldcsoftware/db-query/internal/dblist"
+	"github.com/geraldcsoftware/db-query/internal/pgfake"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 )
 
@@ -267,8 +268,7 @@ func TestCompleteDatabasesCorruptCacheIsSilent(t *testing.T) {
 // touched, and the database client is never invoked.
 func TestCompleteDatabasesNeverConnects(t *testing.T) {
 	seedDatabaseList(t, "lionel", "postgres")
-	marker := filepath.Join(t.TempDir(), "psql-was-called")
-	fakePsql(t, "touch "+marker+"\nexit 1\n")
+	srv := fakePG(t, replyAll(pgfake.Error("XX000", "completion connected")))
 	cfg := writeFile(t, t.TempDir(), "config.toml", `
 [hosts.lionel]
 provider   = "postgres"
@@ -278,7 +278,7 @@ credential = "env:DBQ_NO_SUCH_VAR"
 	if got := complete(t, "--config", cfg, "--host", "lionel", "database"); got != "postgres\n" {
 		t.Fatalf("got %q", got)
 	}
-	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("completion must never invoke the database client")
+	if srv.Connections() != 0 {
+		t.Fatal("completion must never connect to the database")
 	}
 }

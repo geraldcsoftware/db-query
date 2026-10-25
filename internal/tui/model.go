@@ -61,7 +61,7 @@ type model struct {
 	// runner performs a single query run; it defaults to execute and is
 	// swapped out in tests so run dispatch can be tested without invoking a
 	// real adapter subprocess.
-	runner func(ctx context.Context, r session.Resolved, sql string) (adapter.Rows, bool, error)
+	runner func(ctx context.Context, r session.Resolved, sql string) ([]adapter.Rows, bool, error)
 
 	// cancel stops the currently in-flight run, if any. It is set by
 	// startRun and invoked by cancelRunning; nil whenever running is false.
@@ -476,7 +476,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.results.showError(text)
 			return m, nil
 		default:
-			m.results.showRows(msg.rows)
+			m.results.showSets(msg.sets)
 			// Rows are what was asked for, so the pane holding them takes focus
 			// and its scroll keys work without a Ctrl+J first. Only this branch
 			// does it: the three above leave the user beside the SQL they are
@@ -547,9 +547,9 @@ func introspectFailure(err error) string {
 }
 
 // quit cancels any in-flight run before asking Bubble Tea to exit. The held
-// CancelFunc is the only path to the adapter's child process (started with
-// exec.CommandContext), so skipping it would leave a slow psql/sqlcmd running
-// after the TUI is gone.
+// CancelFunc is the only way to stop it: it asks a postgres server to cancel
+// the statement and kills a sqlcmd child process, so skipping it would leave a
+// slow query running after the TUI is gone.
 func (m *model) quit() tea.Cmd {
 	if m.cancel != nil {
 		m.cancel()

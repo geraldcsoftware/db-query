@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/geraldcsoftware/db-query/internal/config"
+	"github.com/geraldcsoftware/db-query/internal/pgfake"
 	"github.com/geraldcsoftware/db-query/internal/schema"
 )
 
@@ -15,15 +16,16 @@ import (
 func catalogPsql(t *testing.T, introspectExit int) {
 	t.Helper()
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	introspect := "printf 'table_schema,table_name,column_name,data_type,is_nullable\\npublic,widgets,id,integer,NO\\n'"
-	if introspectExit != 0 {
-		introspect = "echo 'FATAL: permission denied for database' >&2\nexit 1"
-	}
-	fakeBin(t, "psql", `sql=$(cat)
-case "$sql" in
-  *pg_database*) printf 'datname\nalpha\ntestdb\n' ;;
-  *) `+introspect+` ;;
-esac`)
+	fakePG(t, func(q pgfake.Query) pgfake.Reply {
+		if strings.Contains(q.SQL, "pg_database") {
+			return pgfake.Rows([]string{"datname"}, []string{"alpha"}, []string{"testdb"})
+		}
+		if introspectExit != 0 {
+			return pgfake.Error("42501", "permission denied for database")
+		}
+		return pgfake.Rows([]string{"table_schema", "table_name", "column_name", "data_type", "is_nullable"},
+			[]string{"public", "widgets", "id", "integer", "NO"})
+	})
 }
 
 // stubPickerAnswers answers each picker in turn rather than by prompt, so a
@@ -97,8 +99,8 @@ func TestIntrospectReturnsTheClientsFailure(t *testing.T) {
 // database with no cached schema offers to build one, and accepting lands the
 // session on it with a schema to browse.
 func TestBootstrapIntrospectsOnConfirmation(t *testing.T) {
-	cfg := bootstrapConfig(t)
 	catalogPsql(t, 0)
+	cfg := bootstrapConfig(t)
 	shown := stubPickerAnswers(t, "testpg", "alpha")
 	asked := stubConfirms(t, true)
 
@@ -125,8 +127,8 @@ func TestBootstrapIntrospectsOnConfirmation(t *testing.T) {
 // one", not "open it without a schema" — the session's rule is that whatever
 // it lands on has one.
 func TestBootstrapDecliningIntrospectReturnsToTheList(t *testing.T) {
-	cfg := bootstrapConfig(t)
 	catalogPsql(t, 0)
+	cfg := bootstrapConfig(t)
 	shown := stubPickerAnswers(t, "testpg", "alpha", "")
 	asked := stubConfirms(t, false)
 
@@ -153,8 +155,8 @@ func TestBootstrapDecliningIntrospectReturnsToTheList(t *testing.T) {
 // error path too. A database that could not be introspected is not one the
 // session may open.
 func TestBootstrapFailedIntrospectReturnsToTheList(t *testing.T) {
-	cfg := bootstrapConfig(t)
 	catalogPsql(t, 1)
+	cfg := bootstrapConfig(t)
 	shown := stubPickerAnswers(t, "testpg", "alpha", "")
 	stubConfirms(t, true)
 
@@ -177,8 +179,8 @@ func TestBootstrapFailedIntrospectReturnsToTheList(t *testing.T) {
 // TestBootstrapSkipsTheGateForACachedDatabase: the gate is a cost, so it must
 // not be paid by the common case of choosing a database already browsed.
 func TestBootstrapSkipsTheGateForACachedDatabase(t *testing.T) {
-	cfg := bootstrapConfig(t)
 	catalogPsql(t, 1) // any introspection at all would fail this test loudly
+	cfg := bootstrapConfig(t)
 	seedSchema(t, "localhost", "alpha")
 	stubPickerAnswers(t, "testpg", "alpha")
 	asked := stubConfirms(t, false)

@@ -70,6 +70,7 @@ var (
 		{"F2", "switch db"},
 		{"g/G", "page ends"},
 		{"Home/End", "col ends"},
+		{"[/]", "result set"},
 		{"PgUp/PgDn", "page"},
 	}
 

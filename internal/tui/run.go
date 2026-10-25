@@ -14,7 +14,7 @@ import (
 // (err wraps context.Canceled or context.DeadlineExceeded in that case —
 // checked in Update via errors.Is, not by string-matching).
 type queryResultMsg struct {
-	rows      adapter.Rows
+	sets      []adapter.Rows
 	schemaErr bool
 	err       error
 
@@ -55,8 +55,8 @@ func (m *model) startRun(sql, source string) tea.Cmd {
 	sess := m.session
 	gen := m.runGen
 	return func() tea.Msg {
-		rows, schemaErr, err := run(ctx, sess, sql)
-		return queryResultMsg{rows: rows, schemaErr: schemaErr, err: err, gen: gen}
+		sets, schemaErr, err := run(ctx, sess, sql)
+		return queryResultMsg{sets: sets, schemaErr: schemaErr, err: err, gen: gen}
 	}
 }
 

@@ -44,6 +44,12 @@ type resultsPane struct {
 	rows    adapter.Rows
 	page    int
 
+	// sets is every result set the run returned, one per statement that
+	// produced columns, and set is the index of the one rows holds. A run of
+	// several statements shows them one at a time, switched with [ and ].
+	sets []adapter.Rows
+	set  int
+
 	// top is the first row of the current page on screen and left the first
 	// column, the two halves of the pane's scroll position. They index into the
 	// page, not into the whole result: paging moves between blocks of rows,
@@ -66,6 +72,24 @@ func (r resultsPane) hasContent() bool { return r.errText != "" || len(r.rows.Co
 func (r *resultsPane) showError(msg string) { *r = resultsPane{errText: msg, w: r.w, h: r.h} }
 
 func (r *resultsPane) showRows(rows adapter.Rows) { *r = resultsPane{rows: rows, w: r.w, h: r.h} }
+
+// showSets shows a run's result sets, starting from the first.
+func (r *resultsPane) showSets(sets []adapter.Rows) {
+	*r = resultsPane{sets: sets, rows: adapter.First(sets), w: r.w, h: r.h}
+}
+
+// showSet moves to another result set. Its columns and rows are unrelated to
+// the last one's, so the view starts over at its top-left corner.
+func (r *resultsPane) showSet(i int) {
+	if i < 0 || i >= len(r.sets) || i == r.set {
+		return
+	}
+	r.set, r.rows = i, r.sets[i]
+	r.page, r.top, r.left = 0, 0, 0
+}
+
+func (r *resultsPane) nextSet() { r.showSet(r.set + 1) }
+func (r *resultsPane) prevSet() { r.showSet(r.set - 1) }
 
 // setSize records the room the layout gives the pane and brings both offsets
 // back inside it. A terminal that grows can otherwise leave the view scrolled
@@ -141,6 +165,10 @@ func (r *resultsPane) update(msg tea.KeyPressMsg) {
 		r.scrollFirstColumn()
 	case "end":
 		r.scrollLastColumn()
+	case "]":
+		r.nextSet()
+	case "[":
+		r.prevSet()
 	}
 }
 
@@ -208,6 +236,7 @@ func (r resultsPane) view() string {
 }
 
 // meta is the pane's summary as one string, for callers that want it whole.
+// For a run of several result sets it leads with which one is showing.
 func (r resultsPane) meta() string { return strings.Join(r.metaParts(), metaSep) }
 
 // metaParts is the summary right-aligned on the pane's label row, in clauses so
@@ -225,6 +254,9 @@ func (r resultsPane) metaParts() []string {
 		count = "1 row"
 	}
 	out := []string{count}
+	if len(r.sets) > 1 {
+		out = append([]string{"result " + strconv.Itoa(r.set+1) + "/" + strconv.Itoa(len(r.sets))}, out...)
+	}
 	rows := r.rowSpan()
 	if r.pageCount() > 1 {
 		out = append(out, pageIndicator(r, rows == ""))

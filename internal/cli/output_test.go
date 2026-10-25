@@ -5,15 +5,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/geraldcsoftware/db-query/internal/pgfake"
 	"github.com/geraldcsoftware/db-query/internal/render"
 )
 
-// queryOut runs a one-row query through the psql stub and returns stdout.
+// queryOut runs a one-row query against the fake server and returns stdout.
 func queryOut(t *testing.T, extra ...string) string {
 	t.Helper()
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'id,name\n1,Ada\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"id", "name"}, []string{"1", "Ada"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	args := append([]string{"query", "--host", "testpg", "--config", cfg}, extra...)
@@ -148,7 +149,7 @@ func TestQueryTableNoHeaders(t *testing.T) {
 func TestQueryMaxColWidth(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'note\nLorem ipsum dolor sit amet consectetur\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"note"}, []string{"Lorem ipsum dolor sit amet consectetur"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 
@@ -191,7 +192,7 @@ func TestDBQueryOutputEnv(t *testing.T) {
 	t.Run("invalid env value is reported", func(t *testing.T) {
 		t.Setenv("DB_QUERY_OUTPUT", "yaml")
 		seedSchemaCache(t)
-		fakePsql(t, `printf 'id\n1\n'`)
+		fakePG(t, replyAll(pgfake.Rows([]string{"id"}, []string{"1"})))
 		t.Setenv("DBQ_TEST_PW", "pw")
 		cfg := testConfig(t)
 		code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "SELECT 1")
@@ -244,8 +245,8 @@ func TestTableOnEveryRowCommand(t *testing.T) {
 
 	t.Run("introspect", func(t *testing.T) {
 		isolateCache(t)
-		splitPsql(t, `printf 'table_schema,table_name,column_name,data_type,is_nullable\npublic,people,id,integer,NO\n'`)
-		callsFile(t)
+		splitPG(t, replyAll(pgfake.Rows([]string{"unused"})))
+		cfg := testConfig(t) // after the fake starts, so it points at it
 		t.Setenv("DBQ_TEST_PW", "pw")
 		code, out, errb := run(t, "introspect", "--host", "testpg", "--config", cfg, "--output", "table")
 		if code != 0 {

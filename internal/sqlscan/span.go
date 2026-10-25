@@ -134,8 +134,14 @@ func stringPrefixAt(src []rune, i int, d Dialect) bool {
 }
 
 // skipDollarQuoted returns the index just past a postgres dollar-quoted body.
+//
+// A tag cannot begin with a digit, which is what keeps a positional parameter
+// such as $1 from being read as the opening of one.
 func skipDollarQuoted(src []rune, i int) (int, bool) {
 	j := i + 1
+	if j < len(src) && unicode.IsDigit(src[j]) {
+		return 0, false
+	}
 	for j < len(src) && isIdentRune(src[j]) {
 		j++
 	}

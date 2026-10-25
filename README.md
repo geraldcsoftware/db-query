@@ -1,26 +1,27 @@
 # db-query
 
-A Go CLI that wraps native database clients (`psql`, `sqlcmd`), resolves
+A Go CLI that runs SQL against PostgreSQL and SQL Server, resolves
 credentials on demand from a configured source, and returns query output
 in a selectable format — an aligned table at a terminal, tab-separated text
-when piped. See `docs/design.md` for the full design.
+when piped. PostgreSQL is reached over its own wire protocol, so no client
+binary is needed; SQL Server is reached through `sqlcmd`. See
+`docs/design.md` for the full design.
 
 ```
- cred URI ─▶ [resolver] ─▶ Credential ─▶ [adapter.build] ─▶ Invocation ─▶ [executor.Run] ─▶ RawResult
-                                                                                                │
-                                        Rows (neutral) ◀─ [adapter.parse] ◀─────────────────────┘
-                                             │
-                                     [renderer[format]] ─▶ bytes ─▶ stdout
+ cred URI ─▶ [resolver] ─▶ Credential ─▶ [adapter.Execute] ─▶ []Rows (one per result set) ─▶ [renderer[format]] ─▶ stdout
+                                              │
+                    postgres: pgx, wire protocol · sqlserver: sqlcmd via the central executor
 ```
 
 ## Usage
 
 ```sh
-db-query query      --host prod-core "SELECT id, name FROM people WHERE name = :'who'" --param who=Ada
+db-query query      --host prod-core "SELECT id, name FROM people WHERE name = $1" --param 1=Ada
 db-query query      --host reporting --output json -f report.sql
 db-query query      --host prod-core --save people-by-name --category reports \
-                    "SELECT id, name FROM people WHERE name = :'who'" --param who=Ada
-db-query query      --host prod-core --source people-by-name --category reports --param who=Ada
+                    "SELECT id, name FROM people WHERE name = $1" --param 1=Ada
+db-query query      --host prod-core --source people-by-name --category reports --param 1=Ada
+db-query query      --host prod-core -f migrate-and-check.sql  # several statements, one transaction
 db-query query      --host prod-core --dry-run "DELETE FROM people"   # classify it, run nothing
 db-query list       --category reports        # list saved queries
 db-query schema     --host prod-core          # show the cached schema (tables + columns)
@@ -34,7 +35,7 @@ db-query hosts      lionel                    # one host's effective config, wit
 
 - SQL is given as one positional argument, via `-f file` (`-` for stdin), piped on stdin,
   or by name with `--source` (a saved query). Flags may appear before or after the SQL
-  argument (`… "SELECT …" --param who=Ada` and `… --param who=Ada "SELECT …"` are equivalent);
+  argument (`… "SELECT …" --param 1=Ada` and `… --param 1=Ada "SELECT …"` are equivalent);
   SQL that itself begins with `-` must be passed via `-f` or stdin.
 - Most flags have a single-letter shorthand: `--host (-H)`, `--database (-d)`,
   `--config (-c)`, `--output (-o)`, `--param (-p)`, `--file (-f)`, `--source (-s)`,
@@ -98,9 +99,15 @@ about to run. See [Query safety screening](#query-safety-screening).
 Precedence is flag (either position) → environment → config file. Note that an
 exported host is invisible state: `db-query hosts` shows what is configured, but
 the host in effect is whatever `DB_QUERY_HOST` says until you override it.
-- Params bind through the client's own `-v` mechanism: `:'name'` in psql
-  SQL, `$(name)` in sqlcmd SQL. Values are never substituted into SQL by
-  this tool.
+- Params are values, never SQL text. On PostgreSQL they are positional and
+  bound by the server: write `$1`, `$2` in the SQL and pass `--param 1=Ada
+  --param 2=42`. The server infers each one's type from where it is used, so
+  `WHERE id = $1` takes `--param 1=42` as an integer. On SQL Server they are
+  sqlcmd's own `$(name)` variables, bound with `--param name=value`. See
+  [Parameters](#parameters).
+- A submission may hold several statements. On PostgreSQL they run in order
+  inside one transaction, the first error stops the run and rolls it back, and
+  every result set is printed. See [Scripts](#scripts-several-statements).
 - `--output json|table|text|auto` (default `auto`). `auto` renders a bordered
   table when stdout is a terminal and tab-separated `text` otherwise, so
   results are readable by eye while a pipe, a redirect, or a program calling
@@ -200,16 +207,16 @@ testing whether stdout is one, so it still reaches you when SQL arrives on stdin
 or output is piped to `jq`. Anything other than the nonce cancels, and a closed
 terminal is a decline rather than an approval.
 
-On PostgreSQL a read-only host also asks the engine to refuse writes, through
-`PGOPTIONS=-c default_transaction_read_only=on`. That catches what no text scan
+On PostgreSQL a read-only host also asks the engine to refuse writes, by
+opening the session with `default_transaction_read_only=on`. That catches what no text scan
 can see, such as a `DROP` built inside a `DO` block whose submission reads as a
 harmless call. Treat it as a second layer rather than the guarantee: it is a
 default rather than a constraint, and a submission can turn it off with
 `set_config`. Database grants remain the actual control.
 
 Client directives such as `\copy` are refused outright rather than challenged.
-They are executed by `psql` or `sqlcmd` and never reach a server, so no grammar
-or planner can see them, and no operator approval applies.
+They are commands to `psql` or `sqlcmd`, not SQL, and never reach a server, so
+no grammar or planner can see them, and no operator approval applies.
 
 #### Screening without running: `--dry-run`
 
@@ -289,28 +296,50 @@ any audit record built from it. `--show-sql` adds a `sql` field when the
 statement itself needs inspecting. Parameter **values** are never included under
 any flag: the document carries only their names and a count.
 
-#### Parameter quoting
+#### Parameters
 
-Parameters bind through the client's own mechanism, and only the quoted forms
-are accepted. A bare `:name` in PostgreSQL SQL is refused, naming the parameter:
+On PostgreSQL, parameters are the server's own: `$1`, `$2` in the SQL, bound by
+position with `--param 1=value`. The value travels separately from the
+statement and is never spliced into its text, so there is nothing to quote and
+nothing to inject: `--param "1=x'; DROP TABLE people; --"` is compared as a
+string and matches nothing. Because they are part of PostgreSQL's grammar, a
+parameterised statement is classified exactly as written.
+
+Two mistakes are refused before anything is sent, as usage errors (exit `1`):
 
 ```
-db-query: parameter "who" is interpolated as :who, which psql substitutes as
-raw text; write :'who' so the value is quoted
+db-query: --param "who": postgres parameters are positional; write $1, $2 in the SQL and bind them with --param 1=value
+db-query: $2 is not bound; pass --param 2=value
 ```
 
-This is a usage error rather than a policy refusal, so it exits `1`, not `5`,
-and no operator challenge applies: the fix is to quote the reference. It closes
-a hole no classifier could see, because with `:name` the SQL text reads clean
-and the payload rides in the value. A colon that is not a placeholder is
-left alone, so casts (`col::jsonb->>'k'`), array slices (`arr[1:3]`, `arr[:3]`),
-time formats (`to_char(t, 'HH:MI:SS')`) and colons inside string literals all
-behave as written.
+The first catches SQL written for `psql`'s `:'name'` interpolation, which this
+tool no longer uses. A parameter can stand only where a value can: a table or
+column name cannot be a parameter.
 
-One known gap: where a bound parameter is named as a number and matches an array
-slice bound, as in `arr[1:3]` with a parameter named `3`, a dry run reports
-`read` and mints a token while execution refuses it. Naming a parameter as a
-number is the only way to reach this.
+On SQL Server, parameters are sqlcmd's `$(name)` variables, a textual
+substitution; values containing quotes, `;`, `--` or `$(` are refused.
+
+### Scripts: several statements
+
+A PostgreSQL submission holding more than one statement runs as a script:
+
+- The statements run in order **inside one transaction**. If every one
+  succeeds the transaction commits; the first one to fail stops the run, nothing
+  after it is sent, and the whole script is rolled back.
+- The error names the failing statement, e.g. `statement 2 of 3: ERROR: column
+  "nope" does not exist (SQLSTATE 42703)`, and the exit code is that statement's
+  (`3` or `4`). A failed script prints no results.
+- **Every result set is printed**, one per statement that returns rows
+  (an `INSERT` or `UPDATE` without `RETURNING` contributes none). `text` and
+  `table` output separate them with a blank line; `json` wraps them in an outer
+  array, one array per result set. A single result set prints exactly as before.
+- Parameters are shared: `$1` is the same value in every statement that uses it.
+- A single statement runs on its own, outside any explicit transaction, so
+  statements PostgreSQL refuses inside one (`VACUUM`, `CREATE DATABASE`,
+  `CREATE INDEX CONCURRENTLY`) work only when submitted alone.
+
+The safety gate judges the script as a whole by its least safe statement, as
+it always has, before any of it is sent.
 
 ### Saved queries
 
@@ -397,9 +426,9 @@ replace the previous server's names.
 |------|---------|
 | `0`  | success |
 | `1`  | config, usage, or credential error |
-| `2`  | client binary could not start |
+| `2`  | the run could not happen: `sqlcmd` could not start, or `--timeout` expired |
 | `3`  | schema error — the query references an unknown table or column (re-run with `--refresh-schema`) |
-| `4`  | other SQL error — the client ran and exited nonzero |
+| `4`  | other SQL error, or the server could not be reached |
 | `5`  | refused by [safety screening](#query-safety-screening), or declined at the operator challenge |
 | `6`  | a `--precheck` token was presented for a different query, parameters, or target |
 
@@ -490,6 +519,7 @@ a number are right-aligned and coloured.
 | `F10` | quit, from every pane |
 | `Enter` | Schema: expand/collapse a table · Saved: load the query into the Query pane |
 | `PgUp` / `PgDn` | page through the results |
+| `[` / `]` | Results: previous / next result set, when a script returned several |
 | `↑` `↓` `←` `→` or `k` `j` `h` `l` | Results: scroll a row or a column |
 | `g` / `G` | Results: first / last row of the page |
 | `Home` / `End` | Results: first / last column |
@@ -505,7 +535,9 @@ out or is cancelled leaves focus where it was, beside the SQL. The header row
 and the row-number gutter stay put as
 you scroll, and a `‹` or `›` against the edge marks columns still hidden that
 way. The label row carries both positions, e.g.
-`4312 rows · page 2/44 · showing 118-130 · cols 3-7/12`.
+`4312 rows · page 2/44 · showing 118-130 · cols 3-7/12`. A script that returned
+several result sets shows one at a time, led on the label row by which it is
+(`result 2/3 · 12 rows · …`); `[` and `]` move between them.
 
 `PgUp`/`PgDn`, `Ctrl+C` and `Esc` belong to the editor while the Query pane
 holds an embedded Neovim, which is what it holds wherever one can run. `F10` is
@@ -883,7 +915,6 @@ zsh's completion cache picks up the new function.
 
 ## Requirements
 
-- `psql` on PATH for postgres hosts
 - `sqlcmd` on PATH for sqlserver hosts ([go-sqlcmd](https://github.com/microsoft/go-sqlcmd) or legacy mssql-tools)
 - `nvim` 0.12.0 or newer on PATH, optional: interactive mode uses it as the
   Query pane's editor when it is there, and falls back to a plain text area when
@@ -896,10 +927,11 @@ make build          # build bin/db-query
 make install        # build, then copy the binary to ~/.local/bin (created if absent)
 make test           # unit tests
 make cover          # unit tests + coverage summary
-make integration    # docker compose up, run psql + sqlcmd suites, tear down
+make integration    # docker compose up, run the postgres + sqlserver suites, tear down
 ```
 
-Integration tests need Docker and local `psql`/`sqlcmd` binaries. Image
+Integration tests need Docker and a local `sqlcmd` binary; the postgres suite
+needs no client binary. Image
 refs are overridable when pulling through a mirror:
 
 ```sh

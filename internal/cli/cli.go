@@ -46,7 +46,7 @@ Flags:
   --database (-d) <db>    : override the host's configured database (query, schema, introspect, databases)
   --config (-c) <path>    : config file (default: $DB_QUERY_CONFIG or ~/.config/db-query/config.toml)
   --output (-o) <format>  : json|table|text|auto (default auto)
-  --param (-p) k=v        : bind a query parameter (repeatable); psql: :'k', sqlcmd: $(k)
+  --param (-p) k=v        : bind a query parameter (repeatable); postgres: $1 bound by --param 1=v, sqlcmd: $(k)
   --file (-f) <path>      : read SQL from file ("-" for stdin)
   --source (-s) <name>    : run a previously saved query by name (query)
   --save <name>           : save the query under this name after it runs successfully (query)
@@ -133,9 +133,9 @@ host's merged result and which section each key came from.
 Exit codes:
   0  success
   1  config, usage, or credential error
-  2  client binary could not start
+  2  the run could not happen: sqlcmd could not start, or --timeout expired
   3  schema error — the query references an unknown table or column; re-run with --refresh-schema
-  4  other SQL error — the client ran and exited nonzero
+  4  other SQL error, or the server could not be reached
   5  refused by the safety gate — the query would modify state, or carries a client directive
   6  the query, parameters or target changed since they were checked
 
@@ -185,10 +185,10 @@ func canonicalCommand(name string) string {
 	return name
 }
 
-// Exit codes: 0 success; 1 config/usage/credential error; 2 client binary
-// failed to start; 3 schema error (unknown table/column) — the
-// reintrospect-worthy signal; 4 other SQL error (client ran, exited
-// nonzero, but not a schema error).
+// Exit codes: 0 success; 1 config/usage/credential error; 2 the run could
+// not happen (sqlcmd failed to start, or the deadline expired); 3 schema
+// error (unknown table/column) — the reintrospect-worthy signal; 4 other SQL
+// error, or a server that could not be reached.
 func Run(args []string, stdout, stderr io.Writer) int {
 	// No arguments at all is not a special case: it parses to no shared flags
 	// and no command, which the len(rest) == 0 branch below already handles —
@@ -509,11 +509,11 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 		}
 	}
 
-	rows, code := session.RunOnce(r, adapter.Query{SQL: sql, Params: params}, toSessionFlags(c), true, stderr)
+	sets, code := session.RunOnce(r, adapter.Query{SQL: sql, Params: params}, toSessionFlags(c), true, stderr)
 	if code != 0 {
 		return code // a non-zero run saves nothing and returns its own code
 	}
-	if code := renderRows(rows, c.output, noHeaders, maxColWidth, border, stdout, stderr); code != 0 {
+	if code := renderSets(sets, c.output, noHeaders, maxColWidth, border, stdout, stderr); code != 0 {
 		return code
 	}
 
@@ -805,10 +805,11 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 
 	// introspect always rebuilds: run the provider catalog query, persist
 	// it to the cache, then print it.
-	rows, code := session.RunOnce(r, adapter.Query{SQL: r.Adapter.IntrospectSQL()}, toSessionFlags(c), false, stderr)
+	sets, code := session.RunOnce(r, adapter.Query{SQL: r.Adapter.IntrospectSQL()}, toSessionFlags(c), false, stderr)
 	if code != 0 {
 		return code
 	}
+	rows := adapter.First(sets)
 	if err := schema.Write(schema.CachePath(r.Host.Host, r.Host.Database), rows); err != nil {
 		render.Error(stderr, c.output, err.Error())
 		return 1
@@ -1008,6 +1009,17 @@ func renderRows(rows adapter.Rows, output string, noHeaders bool, maxColWidth in
 	output = resolveOutput(output, stdout)
 	opts := render.Options{NoHeaders: noHeaders, MaxColWidth: maxColWidth, Border: border}
 	if err := render.Render(stdout, output, rows, opts); err != nil {
+		render.Error(stderr, output, err.Error())
+		return 1
+	}
+	return 0
+}
+
+// renderSets is renderRows for every result set of a query run.
+func renderSets(sets []adapter.Rows, output string, noHeaders bool, maxColWidth int, border string, stdout, stderr io.Writer) int {
+	output = resolveOutput(output, stdout)
+	opts := render.Options{NoHeaders: noHeaders, MaxColWidth: maxColWidth, Border: border}
+	if err := render.RenderAll(stdout, output, sets, opts); err != nil {
 		render.Error(stderr, output, err.Error())
 		return 1
 	}
