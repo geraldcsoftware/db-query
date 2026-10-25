@@ -1,13 +1,15 @@
 package adapter
 
 import (
-	"bytes"
-	"encoding/csv"
+	"context"
+	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
-	"unicode"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
 
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
@@ -15,20 +17,30 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
-// pgNullSentinel is what psql prints for NULL (-P null=...). CSV quoting
-// alone can't round-trip NULL through encoding/csv (it hides whether a
-// field was quoted), so we print NULL as a control byte that cannot
-// appear in normal data and map it back to nil.
-const pgNullSentinel = "\x01"
+// pgSchemaCodes are the SQLSTATEs that mean the statement named a column or a
+// table the database does not have: the signal that the schema cache is stale.
+var pgSchemaCodes = map[string]bool{
+	"42703": true, // undefined_column
+	"42P01": true, // undefined_table
+}
+
+// textOID declares a parameter the statement does not use. The server infers
+// the type of every parameter a statement references, but must be told the
+// type of one it skips, or $2 alone fails with "could not determine data type
+// of parameter $1".
+const textOID = 25
 
 type postgresAdapter struct{}
 
 func (postgresAdapter) Name() string { return "postgres" }
 
-// Env sets every PG* var the client reads, even to defaults, so an
-// inherited PGDATABASE/PGHOST in the shell can't silently redirect the
-// query. The password rides this overlay, never argv.
-func (postgresAdapter) Env(cred credential.Credential, host config.HostConfig) map[string]string {
+// connConfig builds the connection from host config and the credential.
+//
+// Every setting the host decides is written into the connection string, even
+// at its default, so an inherited PGHOST or PGDATABASE in the shell cannot
+// silently redirect the query. The rest of the PG* environment still applies,
+// as it did under psql: PGSSLROOTCERT and the like keep working.
+func (postgresAdapter) connConfig(cred credential.Credential, host config.HostConfig) (*pgconn.Config, error) {
 	h := host.Host
 	if h == "" {
 		h = "localhost"
@@ -39,25 +51,33 @@ func (postgresAdapter) Env(cred credential.Credential, host config.HostConfig) m
 	}
 	db := host.Database
 	if db == "" {
-		db = cred.Username // psql's own default, made explicit
+		db = cred.Username // libpq's own default, made explicit
 	}
-	env := map[string]string{
-		"PGHOST":     h,
-		"PGPORT":     strconv.Itoa(port),
-		"PGDATABASE": db,
-		"PGUSER":     cred.Username,
-		"PGPASSWORD": cred.Password,
-		"PGAPPNAME":  "db-query",
-	}
-	// sslmode is a provider var this adapter cares about, so pin it even
-	// when host config omits it — otherwise an inherited shell PGSSLMODE
-	// would silently change connection behavior (e.g. downgrade or force
-	// SSL). "prefer" is libpq's own default, made explicit.
+	// sslmode is pinned for the same reason: an inherited PGSSLMODE would
+	// otherwise downgrade or force TLS. "prefer" is libpq's default.
 	ssl := host.Extra["sslmode"]
 	if ssl == "" {
 		ssl = "prefer"
 	}
-	env["PGSSLMODE"] = ssl
+	settings := [][2]string{
+		{"host", h},
+		{"port", strconv.Itoa(port)},
+		{"dbname", db},
+		{"user", cred.Username},
+		{"password", cred.Password},
+		{"sslmode", ssl},
+		{"application_name", "db-query"},
+	}
+	var dsn strings.Builder
+	for _, kv := range settings {
+		dsn.WriteString(kv[0] + "=" + quoteConnValue(kv[1]) + " ")
+	}
+	cfg, err := pgconn.ParseConfig(dsn.String())
+	if err != nil {
+		// pgconn's message can quote the connection string, password and all,
+		// so only the fact of the failure is reported.
+		return nil, &LocalError{Msg: "invalid postgres connection settings for host " + host.Name}
+	}
 
 	// A read-only host asks the engine to refuse writes, which holds against
 	// statements generated at runtime that no text scan can see: a DROP built
@@ -69,106 +89,219 @@ func (postgresAdapter) Env(cred credential.Credential, host config.HostConfig) m
 	// read_only','off',false)` turns it off from inside a submission. The
 	// classifier refuses that call and grants are the actual control
 	// (docs/design.md §13.12); this catches the accidents and turns them into
-	// a clean early error.
+	// a clean early error. It replaces any inherited PGOPTIONS outright, so an
+	// inherited setting cannot switch it back off.
 	if host.ReadOnly {
-		env["PGOPTIONS"] = "-c default_transaction_read_only=on"
+		cfg.RuntimeParams["options"] = "-c default_transaction_read_only=on"
 	}
-	return env
+
+	// Cancelling a run tells the server to stop the statement, rather than
+	// only dropping the connection and leaving it running until the server
+	// notices.
+	cfg.BuildContextWatcherHandler = func(c *pgconn.PgConn) ctxwatch.Handler {
+		return &pgconn.CancelRequestContextWatcherHandler{Conn: c, DeadlineDelay: 2 * time.Second}
+	}
+	return cfg, nil
 }
 
-func (postgresAdapter) Build(host config.HostConfig, q Query) (executor.Invocation, error) {
-	argv := []string{
-		"psql",
-		"-X", // no psqlrc — a user's rc must not change parse behavior
-		"-q",
-		"--csv",
-		"-v", "ON_ERROR_STOP=1",
-		"-v", "VERBOSITY=verbose", // stderr carries SQLSTATE for schema-error detection
-		"-P", "null=" + pgNullSentinel,
-	}
-	// psql interpolates :name as raw text, so a bound value can close the
-	// statement and open another: with `WHERE id = :id`, a value of
-	// `1; DROP TABLE t` runs the DROP, and the SQL text stays clean, which
-	// puts it out of reach of any classifier. Refusing the unquoted form is
-	// the fix; :'name' and :"name" are quoted and escaped by psql itself.
-	if err := rejectUnquotedInterpolation(q.SQL, q.Params); err != nil {
-		return executor.Invocation{}, err
-	}
-	// User params bind only through psql's own -v; emitted only when the
-	// query has at least one param.
-	for _, k := range sortedKeys(q.Params) {
-		argv = append(argv, "-v", k+"="+q.Params[k])
-	}
-	return executor.Invocation{
-		Argv:  argv,
-		Stdin: strings.NewReader(q.SQL),
-	}, nil
+// quoteConnValue quotes one value for a keyword/value connection string, which
+// escapes a quote or a backslash with a backslash.
+func quoteConnValue(v string) string {
+	v = strings.ReplaceAll(v, `\`, `\\`)
+	v = strings.ReplaceAll(v, `'`, `\'`)
+	return "'" + v + "'"
 }
 
-func (postgresAdapter) Parse(r executor.RawResult) (Rows, error) {
-	if r.ExitCode != 0 {
-		return Rows{}, fmt.Errorf("psql exited %d: %s", r.ExitCode, strings.TrimSpace(string(r.Stderr)))
+// pgStatement is one statement of a submission, ready to send: its text, and a
+// value and declared type for each parameter position up to the highest it
+// references.
+type pgStatement struct {
+	sql    string
+	values [][]byte
+	oids   []uint32
+}
+
+// plan splits a submission into statements and binds each one's parameters.
+// It runs before a connection is opened, so a submission with a mistake in its
+// last statement runs none of them.
+//
+// Parameters are positional and bound by the server, so the value of $1 never
+// becomes SQL text: there is nothing to quote and nothing to inject. Each
+// statement is sent on its own and so numbers its parameters on its own, but
+// they all draw on the one set of bound values, so $1 means the same value in
+// every statement that uses it.
+func (postgresAdapter) plan(q Query) ([]pgStatement, error) {
+	for k := range q.Params {
+		if !isParamPosition(k) {
+			// The name, never the value (§9).
+			return nil, &LocalError{Msg: fmt.Sprintf(
+				"--param %q: postgres parameters are positional; write $1, $2 in the SQL and bind them with --param 1=value", k)}
+		}
 	}
-	if len(bytes.TrimSpace(r.Stdout)) == 0 {
-		return Rows{}, nil // statement with no result set
+	stmts, directives := sqlscan.Scan(q.SQL, sqlscan.DialectPostgres)
+	if len(directives) > 0 {
+		return nil, &LocalError{Msg: fmt.Sprintf(
+			"client directive %q is not SQL; db-query sends SQL to the server, not commands to psql", directives[0])}
 	}
-	reader := csv.NewReader(bytes.NewReader(restoreEmptyRows(r.Stdout)))
-	reader.FieldsPerRecord = -1
-	records, err := reader.ReadAll()
-	if err != nil {
-		return Rows{}, fmt.Errorf("parsing psql csv output: %w", err)
-	}
-	if len(records) == 0 {
-		return Rows{}, nil
-	}
-	rows := Rows{Columns: records[0]}
-	for _, rec := range records[1:] {
-		row := make([]*string, len(rec))
-		for i, field := range rec {
-			if field == pgNullSentinel {
-				row[i] = nil
-			} else {
-				f := field
-				row[i] = &f
+	out := make([]pgStatement, 0, len(stmts))
+	for _, sql := range stmts {
+		st := pgStatement{sql: sql}
+		refs := sqlscan.PositionalParams(sql)
+		if len(refs) > 0 {
+			highest := refs[len(refs)-1]
+			st.values = make([][]byte, highest)
+			st.oids = make([]uint32, highest)
+			for i := range st.oids {
+				st.oids[i] = textOID
+			}
+			for _, n := range refs {
+				v, ok := q.Params[strconv.Itoa(n)]
+				if !ok {
+					return nil, &LocalError{Msg: fmt.Sprintf("$%d is not bound; pass --param %d=value", n, n)}
+				}
+				st.values[n-1] = []byte(v)
+				st.oids[n-1] = 0 // the server infers it from where $n is used
 			}
 		}
-		rows.Rows = append(rows.Rows, row)
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+// isParamPosition reports whether a --param name is a parameter position:
+// a positive decimal with no leading zero, within the protocol's limit.
+func isParamPosition(k string) bool {
+	if k == "" || k[0] == '0' {
+		return false
+	}
+	n, err := strconv.Atoi(k)
+	return err == nil && n > 0 && n <= 65535 && strconv.Itoa(n) == k
+}
+
+// Execute runs a submission over the wire protocol. A single statement runs on
+// its own. Several run inside one transaction, in order, and the first to fail
+// stops the run: nothing after it is sent and the transaction is rolled back,
+// so a script either applies whole or not at all. Every result set is kept, one
+// per statement that returned columns.
+//
+// Statements that cannot run inside a transaction (VACUUM, CREATE DATABASE,
+// CREATE INDEX CONCURRENTLY) therefore work only when submitted alone.
+func (a postgresAdapter) Execute(ctx context.Context, cred credential.Credential, host config.HostConfig, q Query) ([]Rows, error) {
+	stmts, err := a.plan(q)
+	if err != nil {
+		return nil, err
+	}
+	if len(stmts) == 0 {
+		return nil, nil
+	}
+	cfg, err := a.connConfig(cred, host)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := pgconn.ConnectConfig(ctx, cfg)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, interrupted("postgres", ctx.Err())
+		}
+		return nil, &QueryError{Msg: err.Error()}
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		conn.Close(closeCtx)
+	}()
+
+	script := len(stmts) > 1
+	if script {
+		if err := conn.Exec(ctx, "BEGIN").Close(); err != nil {
+			return nil, pgFailure(ctx, err, "starting the transaction")
+		}
+	}
+	var sets []Rows
+	for i, st := range stmts {
+		rows, err := runStatement(ctx, conn, st)
+		if err != nil {
+			where := ""
+			if script {
+				where = fmt.Sprintf("statement %d of %d", i+1, len(stmts))
+				// Closing the connection would roll back too; saying so
+				// explicitly does not leave it to the server to notice.
+				if ctx.Err() == nil {
+					_ = conn.Exec(ctx, "ROLLBACK").Close()
+				}
+			}
+			return nil, pgFailure(ctx, err, where)
+		}
+		if rows != nil {
+			sets = append(sets, *rows)
+		}
+	}
+	if script {
+		// A deferred constraint is checked here, so the commit can fail on
+		// its own after every statement succeeded.
+		if err := conn.Exec(ctx, "COMMIT").Close(); err != nil {
+			return nil, pgFailure(ctx, err, "committing the transaction")
+		}
+	}
+	return sets, nil
+}
+
+// runStatement sends one statement through the extended protocol and reads its
+// result as text, the server's own rendering of every value, so a date or a
+// numeric prints exactly as the server writes it. It returns nil Rows for a
+// statement with no result columns.
+func runStatement(ctx context.Context, conn *pgconn.PgConn, st pgStatement) (*Rows, error) {
+	rr := conn.ExecParams(ctx, st.sql, st.values, st.oids, nil, nil)
+	fields := rr.FieldDescriptions()
+	var rows *Rows
+	if len(fields) > 0 {
+		rows = &Rows{Columns: make([]string, len(fields))}
+		for i, f := range fields {
+			rows.Columns[i] = f.Name
+		}
+	}
+	for rr.NextRow() {
+		vals := rr.Values()
+		row := make([]*string, len(vals))
+		for i, v := range vals {
+			if v != nil { // nil is SQL NULL; an empty slice is ''
+				s := string(v)
+				row[i] = &s
+			}
+		}
+		if rows != nil {
+			rows.Rows = append(rows.Rows, row)
+		}
+	}
+	if _, err := rr.Close(); err != nil {
+		return nil, err
 	}
 	return rows, nil
 }
 
-// restoreEmptyRows rewrites each fully blank line — how psql --csv prints
-// a single-column row whose value is the empty string — as a quoted empty
-// field (`""`). encoding/csv documents that a blank line is not a record,
-// so without this the row would silently vanish, breaking the locked
-// &""-empty-string fidelity (§8). Blank lines inside a quoted multi-line
-// field are left untouched: quote state is tracked across the scan.
-func restoreEmptyRows(in []byte) []byte {
-	out := make([]byte, 0, len(in))
-	inQuote := false
-	lineLen := 0
-	for _, c := range in {
-		if c == '"' {
-			inQuote = !inQuote
-		}
-		if c == '\n' && !inQuote {
-			if lineLen == 0 {
-				out = append(out, '"', '"')
-			}
-			out = append(out, '\n')
-			lineLen = 0
-			continue
-		}
-		out = append(out, c)
-		lineLen++
+// pgFailure words a failed statement. A server error keeps its severity,
+// message and SQLSTATE, with any detail and hint the server offered; where
+// names the statement within a script, when there is more than one.
+func pgFailure(ctx context.Context, err error, where string) error {
+	if ctx.Err() != nil {
+		return interrupted("postgres", ctx.Err())
 	}
-	return out
-}
-
-var pgSchemaErr = regexp.MustCompile(`\b42703\b|\b42P01\b|column .* does not exist|relation .* does not exist`)
-
-func (postgresAdapter) IsSchemaError(r executor.RawResult) bool {
-	return r.ExitCode != 0 && pgSchemaErr.Match(r.Stderr)
+	prefix := ""
+	if where != "" {
+		prefix = where + ": "
+	}
+	var pe *pgconn.PgError
+	if !errors.As(err, &pe) {
+		return &QueryError{Msg: prefix + err.Error()}
+	}
+	msg := prefix + pe.Error()
+	if pe.Detail != "" {
+		msg += "\nDETAIL: " + pe.Detail
+	}
+	if pe.Hint != "" {
+		msg += "\nHINT: " + pe.Hint
+	}
+	return &QueryError{Msg: msg, Schema: pgSchemaCodes[pe.Code]}
 }
 
 // ListDatabasesSQL lists the databases this login can actually connect to, one
@@ -224,7 +357,7 @@ func (postgresAdapter) Classify(sql string) (sqlscan.Verdict, error) {
 // PlanInvocation and ParsePlan are unreachable for postgres, whose Classify
 // always succeeds. They return errors rather than panicking so that a future
 // caller wiring them by mistake fails closed and visibly.
-func (postgresAdapter) PlanInvocation(config.HostConfig, string) (executor.Invocation, error) {
+func (postgresAdapter) PlanInvocation(credential.Credential, config.HostConfig, string) (executor.Invocation, error) {
 	return executor.Invocation{}, fmt.Errorf("postgres classifies offline; no planner probe exists")
 }
 
@@ -233,56 +366,3 @@ func (postgresAdapter) ParsePlan(executor.RawResult) (sqlscan.Class, string, err
 }
 
 func (postgresAdapter) Dialect() sqlscan.Dialect { return sqlscan.DialectPostgres }
-
-// rejectUnquotedInterpolation refuses a bound parameter referenced as :name
-// rather than :'name'. Only bound names are checked, because psql interpolates
-// nothing else, and because a colon has other meanings in SQL: a cast, and an
-// array slice such as arr[1:3].
-//
-// Literals, quoted identifiers, dollar-quoted bodies and comments are skipped
-// through sqlscan.SkipSpan, the same helper the classifier uses, so the two
-// cannot disagree about where code stops and text begins. psql does not
-// interpolate inside them either, so flagging a colon there would refuse
-// legitimate SQL such as to_char(t, 'HH:MM:SS').
-//
-// The error names the parameter and never its value (§9).
-func rejectUnquotedInterpolation(sql string, params map[string]string) error {
-	if len(params) == 0 {
-		return nil
-	}
-	src := []rune(sql)
-	for i := 0; i < len(src); {
-		if end, isSpan := sqlscan.SkipSpan(src, i, sqlscan.DialectPostgres); isSpan {
-			i = end
-			continue
-		}
-		if src[i] != ':' {
-			i++
-			continue
-		}
-		if i+1 < len(src) && src[i+1] == ':' {
-			i += 2 // a cast, not an interpolation
-			continue
-		}
-		if i+1 < len(src) && (src[i+1] == '\'' || src[i+1] == '"') {
-			i++ // the quoted forms, which psql escapes
-			continue
-		}
-		j := i + 1
-		for j < len(src) && isNameRune(src[j]) {
-			j++
-		}
-		name := string(src[i+1 : j])
-		if _, bound := params[name]; bound {
-			return fmt.Errorf(
-				"parameter %q is interpolated as :%s, which psql substitutes as raw text; "+
-					"write :'%s' so the value is quoted", name, name, name)
-		}
-		i = j
-	}
-	return nil
-}
-
-func isNameRune(r rune) bool {
-	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
-}

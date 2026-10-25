@@ -25,7 +25,7 @@ type controlledRunner struct {
 	canceled bool
 }
 
-func (r *controlledRunner) run(ctx context.Context, _ session.Resolved, _ string) (adapter.Rows, bool, error) {
+func (r *controlledRunner) run(ctx context.Context, _ session.Resolved, _ string) ([]adapter.Rows, bool, error) {
 	r.mu.Lock()
 	r.calls++
 	r.mu.Unlock()
@@ -34,9 +34,9 @@ func (r *controlledRunner) run(ctx context.Context, _ session.Resolved, _ string
 		r.mu.Lock()
 		r.canceled = true
 		r.mu.Unlock()
-		return adapter.Rows{}, false, ctx.Err()
+		return nil, false, ctx.Err()
 	}
-	return adapter.Rows{Columns: []string{"id"}}, false, nil
+	return []adapter.Rows{{Columns: []string{"id"}}}, false, nil
 }
 
 func newRunnerTestModel(t *testing.T, r *controlledRunner) model {
@@ -152,7 +152,7 @@ func TestQueryResultMsgInvokesTheHeldCancelFunc(t *testing.T) {
 	// A completed run's context.WithTimeout timer stays armed until the full
 	// --timeout elapses unless its CancelFunc is actually called.
 	for name, msg := range map[string]queryResultMsg{
-		"success": {rows: adapter.Rows{Columns: []string{"id"}}},
+		"success": {sets: []adapter.Rows{{Columns: []string{"id"}}}},
 		"error":   {err: errors.New("boom")},
 	} {
 		m := newTestModel(t)

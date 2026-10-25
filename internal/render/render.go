@@ -92,6 +92,62 @@ func Render(w io.Writer, format string, rows adapter.Rows, opts Options) error {
 	return r.Render(w, rows, opts)
 }
 
+// RenderAll writes every result set of a run. One set renders exactly as
+// Render would, and so does none, as an empty result. Several render one after
+// another: text and table output separate them with a blank line, and json
+// wraps them in an outer array holding one array per set, so a consumer can
+// still tell where one result ends and the next begins.
+func RenderAll(w io.Writer, format string, sets []adapter.Rows, opts Options) error {
+	if len(sets) <= 1 {
+		return Render(w, format, adapter.First(sets), opts)
+	}
+	r, err := For(format)
+	if err != nil {
+		return err
+	}
+	if format == "json" {
+		return renderJSONSets(w, r, sets, opts)
+	}
+	for i, rows := range sets {
+		if i > 0 {
+			if _, err := io.WriteString(w, "\n"); err != nil {
+				return err
+			}
+		}
+		if err := r.Render(w, rows, opts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// renderJSONSets nests each set's own json array inside an outer one, indented
+// a level so the document reads the way the single-set form does.
+func renderJSONSets(w io.Writer, r Renderer, sets []adapter.Rows, opts Options) error {
+	var b strings.Builder
+	b.WriteString("[\n")
+	for i, rows := range sets {
+		var one strings.Builder
+		if err := r.Render(&one, rows, opts); err != nil {
+			return err
+		}
+		lines := strings.Split(strings.TrimSuffix(one.String(), "\n"), "\n")
+		for j, line := range lines {
+			b.WriteString("  " + line)
+			if j < len(lines)-1 {
+				b.WriteString("\n")
+			}
+		}
+		if i < len(sets)-1 {
+			b.WriteString(",")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("]\n")
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
 // textRenderer prints a tab-separated header + rows. NULL renders as an
 // empty cell (text mode is for human eyes; JSON carries fidelity).
 type textRenderer struct{}

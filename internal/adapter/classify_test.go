@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/geraldcsoftware/db-query/internal/config"
+	"github.com/geraldcsoftware/db-query/internal/credential"
 	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
@@ -40,7 +41,7 @@ func TestClassifyMechanismIsChosenByTheAdapter(t *testing.T) {
 }
 
 func TestSQLServerPlanInvocationCompilesWithoutExecuting(t *testing.T) {
-	inv, err := sqlserverAdapter{}.PlanInvocation(config.HostConfig{}, "SELECT 1")
+	inv, err := sqlserverAdapter{}.PlanInvocation(credential.Credential{}, config.HostConfig{}, "SELECT 1")
 	if err != nil {
 		t.Fatal(err)
 	}

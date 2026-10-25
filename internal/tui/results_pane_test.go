@@ -177,3 +177,54 @@ func TestResultsClearAndError(t *testing.T) {
 		t.Fatalf("view must show the error text:\n%s", p.view())
 	}
 }
+
+// TestResultsPaneSwitchesBetweenSets: a run of several statements shows one
+// result set at a time, ] and [ move between them, and each starts from its
+// own top-left corner because its rows and columns are unrelated to the last.
+func TestResultsPaneSwitchesBetweenSets(t *testing.T) {
+	t.Setenv("DB_QUERY_TUI_PAGE_SIZE", "10")
+	second := adapter.Rows{Columns: []string{"name"}}
+	v := "Ada"
+	second.Rows = append(second.Rows, []*string{&v})
+
+	m := newTestModel(t)
+	next, _ := m.Update(queryResultMsg{sets: []adapter.Rows{rowsOf(25), second}})
+	m = next.(model)
+	if m.focus != paneResults {
+		t.Fatalf("focus = %v, want the Results pane", m.focus)
+	}
+	if !strings.HasPrefix(m.results.meta(), "result 1/2") {
+		t.Fatalf("meta = %q, want it to lead with the set position", m.results.meta())
+	}
+	m.results.pageDown()
+
+	m = press(m, "]")
+	if m.results.set != 1 || m.results.page != 0 || m.results.rows.Columns[0] != "name" {
+		t.Fatalf("after ]: set %d page %d columns %v", m.results.set, m.results.page, m.results.rows.Columns)
+	}
+	if !strings.HasPrefix(m.results.meta(), "result 2/2") || !strings.Contains(ansi.Strip(m.results.view()), "Ada") {
+		t.Fatalf("after ]: meta %q view %q", m.results.meta(), ansi.Strip(m.results.view()))
+	}
+	m = press(m, "]") // already on the last set: nothing to move to
+	if m.results.set != 1 {
+		t.Fatalf("] past the last set moved to %d", m.results.set)
+	}
+	m = press(m, "[")
+	if m.results.set != 0 || m.results.rows.Columns[0] != "id" {
+		t.Fatalf("after [: set %d columns %v", m.results.set, m.results.rows.Columns)
+	}
+}
+
+// TestResultsPaneOneSetHasNoPosition: a single result set is the ordinary
+// case and needs no "result 1/1" taking room on the label row.
+func TestResultsPaneOneSetHasNoPosition(t *testing.T) {
+	var p resultsPane
+	p.showSets([]adapter.Rows{rowsOf(3)})
+	if strings.Contains(p.meta(), "result") {
+		t.Fatalf("meta = %q", p.meta())
+	}
+	p.showSets(nil)
+	if p.hasContent() {
+		t.Fatal("a run with no result sets leaves the pane empty")
+	}
+}

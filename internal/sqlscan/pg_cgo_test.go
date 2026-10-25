@@ -110,7 +110,7 @@ func TestClassifyPostgres(t *testing.T) {
 // saw it because the corpus never called it.
 func TestClassifyPostgresAllowsOrdinaryReads(t *testing.T) {
 	// A bound parameter, since the normaliser only engages when one exists.
-	params := map[string]string{"who": "Ada"}
+	params := map[string]string{"1": "Ada"}
 	reads := []string{
 		"SELECT DISTINCT ON (a) a, b FROM t ORDER BY a, b",
 		"SELECT * FROM generate_series(1,10) WITH ORDINALITY",
@@ -145,8 +145,8 @@ func TestClassifyPostgresAllowsOrdinaryReads(t *testing.T) {
 		"SELECT 1 -- note: something\n",
 		"SELECT E'a\\'b:c' AS s",
 
-		// And one that must still be normalised, or the grammar cannot parse it.
-		"SELECT * FROM t WHERE name = :'who'",
+		// A positional parameter is the grammar's own, so it needs no help.
+		"SELECT * FROM t WHERE name = $1",
 	}
 	for _, sql := range reads {
 		if got := ClassifyPostgres(NormalisePlaceholders(sql, params, DialectPostgres)); got.Class != ClassRead {

@@ -135,8 +135,8 @@ func TestSwitchingDiscardsAnInFlightRunsResult(t *testing.T) {
 	m.switcher.marks = schemaMarks(m.session.Host, m.switcher.names)
 
 	// A run dispatched against the current database, captured as it would be.
-	m.runner = func(context.Context, session.Resolved, string) (adapter.Rows, bool, error) {
-		return adapter.Rows{}, false, nil
+	m.runner = func(context.Context, session.Resolved, string) ([]adapter.Rows, bool, error) {
+		return nil, false, nil
 	}
 	cmd := m.startRun("select 1", "")
 	if !m.running {
@@ -150,7 +150,7 @@ func TestSwitchingDiscardsAnInFlightRunsResult(t *testing.T) {
 		t.Fatal("the switch left the session marked as running")
 	}
 
-	stale.rows = adapter.Rows{Columns: []string{"leaked"}, Rows: [][]*string{{nil}}}
+	stale.sets = []adapter.Rows{{Columns: []string{"leaked"}, Rows: [][]*string{{nil}}}}
 	final, _ := after.Update(stale)
 	if strings.Contains(ansi.Strip(final.(model).results.view()), "leaked") {
 		t.Fatal("a result from the old database was rendered after the switch")

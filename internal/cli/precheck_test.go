@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/geraldcsoftware/db-query/internal/pgfake"
 	"github.com/geraldcsoftware/db-query/internal/precheck"
 )
 
@@ -78,7 +79,7 @@ func TestDryRunReportsButDoesNotRefuse(t *testing.T) {
 func TestGateRefusesAWriteOnAReadOnlyHost(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `echo "should not run"; exit 0`)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"x"}, []string{"should not run"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 
@@ -86,8 +87,8 @@ func TestGateRefusesAWriteOnAReadOnlyHost(t *testing.T) {
 	if code != 5 {
 		t.Fatalf("code=%d, want 5; out=%q err=%q", code, out, errb)
 	}
-	if strings.Contains(out, "should not run") {
-		t.Error("the client ran despite the refusal")
+	if strings.Contains(out, "should not run") || srv.Connections() != 0 {
+		t.Error("the query ran despite the refusal")
 	}
 	// The refusal has to tell an operator what to do instead.
 	if !strings.Contains(errb, "readonly = false") {
@@ -98,7 +99,7 @@ func TestGateRefusesAWriteOnAReadOnlyHost(t *testing.T) {
 func TestGateAllowsAWriteOnAWritableHost(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'n\n1\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"n"}, []string{"1"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	// A host declared writable is the operator having already said so; a
 	// challenge on every INSERT would get the gate switched off.
@@ -112,29 +113,29 @@ func TestGateAllowsAWriteOnAWritableHost(t *testing.T) {
 func TestGateRefusesADropEvenOnAWritableHost(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `echo "should not run"; exit 0`)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"x"}, []string{"should not run"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	code, out, _ := run(t, "query", "--host", "testpg", "--config", writableConfig(t), "DROP TABLE people")
 	if code != 5 {
 		t.Errorf("code=%d, want 5: a drop meets a human on any host", code)
 	}
-	if strings.Contains(out, "should not run") {
-		t.Error("the client ran despite the refusal")
+	if strings.Contains(out, "should not run") || srv.Connections() != 0 {
+		t.Error("the query ran despite the refusal")
 	}
 }
 
 func TestGateRefusesAClientDirective(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `echo "should not run"; exit 0`)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"x"}, []string{"should not run"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	code, out, errb := run(t, "query", "--host", "testpg", "--config", writableConfig(t),
 		"SELECT 1;\n\\! whoami")
 	if code != 5 {
 		t.Fatalf("code=%d, want 5; err=%q", code, errb)
 	}
-	if strings.Contains(out, "should not run") {
-		t.Error("the client ran despite the refusal")
+	if strings.Contains(out, "should not run") || srv.Connections() != 0 {
+		t.Error("the query ran despite the refusal")
 	}
 	if !strings.Contains(errb, "client directive") && !strings.Contains(errb, "not commands to psql") {
 		t.Errorf("refusal does not explain the directive: %q", errb)
@@ -144,7 +145,7 @@ func TestGateRefusesAClientDirective(t *testing.T) {
 func TestPrecheckTokenMismatchIsItsOwnExitCode(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'n\n1\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"n"}, []string{"1"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 
@@ -164,7 +165,7 @@ func TestPrecheckTokenMismatchIsItsOwnExitCode(t *testing.T) {
 func TestPrecheckTokenRoundTrips(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'id\n1\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"id"}, []string{"1"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 

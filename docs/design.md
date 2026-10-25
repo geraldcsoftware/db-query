@@ -7,6 +7,10 @@
 
 `db-query` is a Go CLI wrapping native database clients (`psql`, `sqlcmd`) that:
 
+> Postgres is now reached over the wire protocol rather than through `psql`, and
+> its credential is handed to the connection rather than an environment
+> overlay (§13.16). The purpose below is otherwise unchanged.
+
 1. Resolves credentials from a configured source (Bitwarden SM, Bitwarden CLI, Apple Keychain, env/`.env`) **on demand**, per invocation.
 2. Injects them the way each **provider** expects (`PGUSER`/`PGPASSWORD` for Postgres; the SQL Server equivalents for `sqlcmd`) via an **environment overlay**, never argv.
 3. Runs a query — ad-hoc SQL or a **named, saved query** — and returns output in a selectable format (`--output json|table|text|auto`, default `auto`).
@@ -160,6 +164,9 @@ Load-time failures — unknown profile, inherit cycle, empty `inherit`, non-stri
 
 ## 6. Execution layer (central executor)
 
+> **Amended by §13.16.** Postgres no longer runs through the executor: it speaks
+> the wire protocol in-process. The executor below now serves SQL Server only.
+
 **[LOCKED]** One `Run` at the bottom; every adapter funnels through it. Adapters *build* an `Invocation`; the executor *runs* it and returns raw bytes. Two responsibilities, two places. The executor is **provider-blind**.
 
 ```go
@@ -237,6 +244,8 @@ type Adapter interface {
 
 ### 7.1 Postgres adapter (`psql`)
 
+> **Superseded by §13.16.** Kept as the record of the original design.
+
 | Concern      | Handling |
 |--------------|----------|
 | Credentials  | `PGUSER`, `PGPASSWORD` (+ explicit `PGHOST`/`PGPORT`/`PGDATABASE` to block inherited leakage) via env overlay |
@@ -271,6 +280,9 @@ type Adapter interface {
 - Requires SQL Server 2016+ and wraps cleanly only around a `SELECT`. Auto-wrapping *arbitrary* user SQL is fragile → fits **authored saved queries**, not ad-hoc input.
 
 ### 7.3 Parameter binding — [LOCKED]
+
+> **Amended by §13.16** for Postgres: parameters are now the server's own
+> positional `$1`, `$2`, bound by the protocol. The sqlcmd rules below stand.
 
 Saved queries are provider-bound (already locked), so **params are written in native provider syntax; there is no neutral placeholder and no rewrite layer.**
 
@@ -345,8 +357,9 @@ Genuinely unresolved — not yet locked:
 - SQL on stdin; params via `-v`; creds via env overlay; never argv.
 - Explicit env dedup-merge; adapters set provider vars explicitly to block inherited leakage.
 - Buffer output; run under a context deadline.
-- psql parses via `--csv`; sqlcmd via coaxed-tabular (default) or `FOR JSON` (opt-in, high-fidelity).
-- **Params: native per provider — psql `:'name'`/`:name`, sqlcmd `$(name)` (not `@name`). Always bound via client `-v`; Go never substitutes into SQL; `-v` emitted only when the query has ≥1 param.** sqlcmd value-validation as the v1 injection mitigation.
+- Postgres runs over the wire protocol (pgx), no client binary (§13.16); sqlcmd parses via coaxed-tabular (default) or `FOR JSON` (opt-in, high-fidelity).
+- **Params: native per provider — postgres `$1`, `$2` bound server-side by position (§13.16), sqlcmd `$(name)` (not `@name`) via its own `-v`. Go never substitutes a value into SQL.** sqlcmd value-validation as the v1 injection mitigation.
+- **Postgres scripts (§13.16):** several statements run in one transaction, stop at the first error and roll back, and return one result set per statement that produced columns.
 - `--output json|table|text|auto` (default `auto`, resolved by TTY in the CLI layer); parse-once into neutral `Rows`, render-once per format; errors honor the format.
 - NULL fidelity via `[][]*string`. **v1 accepts sqlcmd Path A rendering NULL as literal `NULL`; faithful SQL Server NULL is a v2 patch.**
 - **`--raw` passthrough is out of v1** (deferred to v2). Every query in v1 goes through the normal build → run → parse → render path.
@@ -371,6 +384,9 @@ Refinements captured as the v1 CLI was built. These record how the locked
 design lands in code; they do not alter the locks above.
 
 ### 13.1 psql NULL via a `-P null` sentinel (refines §7.1)
+
+> **Retired by §13.16.** The wire protocol marks NULL itself, so no sentinel
+> is needed.
 
 §7.1 assumed CSV quoting alone distinguishes NULL (unquoted empty field) from
 the empty string (quoted `""`). Go's `encoding/csv` does not expose that
@@ -1516,6 +1532,10 @@ operator having already said so. Destructive and administrative statements meet
 a human on either kind of host, and so does anything the mechanism could not
 classify. Client directives are refused outright on both.
 
+> **Postgres part retired by §13.16.** Postgres parameters are now `$1`, `$2`,
+> which the grammar parses natively, so the scanner-based normaliser described
+> below was removed. The SQL Server half stands.
+
 **Placeholders had to be normalised before classification.** `:'name'` and
 `$(name)` are expanded by psql and sqlcmd, so neither PostgreSQL's grammar nor
 SQL Server's planner can parse one. Classified as written, every parameterised
@@ -1560,3 +1580,121 @@ judgement will drift unless something fails when they do.
   §13.13 already records. The parsing is written to deny whatever it does not
   recognise, so being wrong about the plan format costs availability rather
   than safety.
+
+### 13.16 Postgres over the wire protocol (amends §6, §7.1, §7.3, §8, §13.3)
+
+The postgres adapter no longer shells out to `psql`. It connects with
+`github.com/jackc/pgx/v5` (its `pgconn` layer, pure Go) and runs each statement
+over the extended query protocol. `pg_query_go`, which the classifier already
+links, is a parser only: it has no connection, authentication or protocol code,
+so it could not have taken this role.
+
+#### Why
+
+- **No runtime dependency.** `psql` had to be installed, on `PATH`, and of a
+  version whose flags matched. A host without it could classify a query but not
+  run it.
+- **No output parsing.** `--csv`, the NULL sentinel of §13.1 and the
+  blank-line repair for single-column empty strings all existed to recover
+  structure psql had flattened. The protocol delivers columns, rows and NULL as
+  they are. Values are still read in text format, the server's own rendering,
+  so a date, a numeric or an array prints exactly as psql printed it.
+- **Structured errors.** Schema-error detection reads the SQLSTATE from the
+  error itself (`42703`, `42P01`) rather than matching stderr text.
+- **Real cancellation.** Cancelling a run, by `--timeout` or `Ctrl+C` in the
+  interactive mode, sends a cancel request so the server stops the statement.
+  Killing `psql` only dropped the connection and left the server to notice.
+- **The password stays in-process.** It no longer rides `PGPASSWORD` into a
+  child environment.
+
+#### What changed in the contract
+
+**The adapter interface.** `Build`/`Parse`/`Env`/`IsSchemaError` assumed a
+child process, so they leave the interface. Every adapter now implements
+`Execute(ctx, cred, host, query) ([]Rows, error)`. SQL Server's implementation
+is the old pipeline unchanged, build, executor, parse, behind that method; the
+executor and its §6 locks still hold for it. `PlanInvocation` takes the
+credential and sets the environment itself, so the precheck path never needed
+`Env` either.
+
+The error says how far a run got, which is what the exit code reports:
+
+| Error | Exit | Meaning |
+|-------|------|---------|
+| `*adapter.LocalError` | `1` | nothing was sent (a parameter that cannot be bound), or the reply could not be read |
+| `*adapter.QueryError` | `3` / `4` | the database refused the work (`Schema` selects `3`), or could not be reached |
+| anything else | `2` | the run could not happen: `sqlcmd` would not start, or the deadline expired |
+
+An unreachable postgres server stays at `4`, where psql's own connection
+failure put it, so automation keyed on the codes sees no change.
+
+**Inherited environment.** The §6 rule survives in a new form. Every setting
+the host decides (host, port, database, user, password, `sslmode`,
+`application_name`) is written into the connection string, so an inherited
+`PGHOST` or `PGDATABASE` cannot redirect a query. Settings the host does not
+decide, such as `PGSSLROOTCERT`, are still read from the environment, as psql
+read them. A read-only host replaces any inherited `PGOPTIONS` with
+`-c default_transaction_read_only=on`, as before.
+
+**Parameters (amends §7.3).** Parameters are positional and bound by the
+server: `$1`, `$2` in the SQL, `--param 1=value` on the command line. The value
+never becomes SQL text, so the injection surface §7.3 and §13.12 guarded
+against with the unquoted-`:name` refusal no longer exists, and that refusal
+is removed. Because `$n` is PostgreSQL grammar, classification needs no
+placeholder normalisation for postgres either; §13.15's normaliser now serves
+SQL Server alone.
+
+A statement must declare a type for every position up to the highest it names,
+and the server can infer one only where the position is used. Each statement is
+therefore scanned (with the same span-skipping walk the classifier uses) for the
+positions it references: those are sent with no declared type, so the server
+infers them, and any gap is declared `text` and sent as NULL. A position that is
+referenced but not bound, or a `--param` name that is not a position, is refused
+before a connection is opened.
+
+This is a breaking change for saved postgres queries written with `:'name'`.
+They fail with a message naming the problem rather than running wrongly.
+
+**Scripts.** A submission is split into statements by the lexical pre-pass
+(§13.13), the same split the classifier judged. One statement runs on its own.
+Several run inside one transaction (`BEGIN` … `COMMIT`), in order:
+
+- the first statement to fail stops the run, nothing after it is sent, the
+  transaction is rolled back, and the error names the statement (`statement 2
+  of 3: …`);
+- a deferred constraint can fail the `COMMIT` itself, which is reported the
+  same way;
+- every statement that returns columns contributes one result set, an empty
+  one included; a statement that returns none contributes nothing;
+- `$1` means the same value in every statement that uses it.
+
+A single statement is deliberately not wrapped, so `VACUUM`, `CREATE DATABASE`
+and `CREATE INDEX CONCURRENTLY`, which PostgreSQL refuses inside a transaction
+block, still work on their own. A script containing its own `COMMIT` or
+`ROLLBACK` ends the wrapping transaction early; those statements classify as
+`admin` (§13.12) and meet the operator challenge before any of it runs.
+
+The split is lexical, so an SQL-standard function body (`BEGIN ATOMIC … END`),
+whose semicolons sit outside any quote, is cut at the first of them and fails
+to run. A dollar-quoted body is unaffected.
+
+**Several result sets (amends §8).** `Execute` returns `[]Rows`, and
+`render.RenderAll` is the pivot for a run. One result set renders exactly as
+`Render` would, and so does none. Several render in order: `text` and `table`
+separate them with a blank line, and `json` wraps them in an outer array of
+per-set arrays. The json shape therefore depends on the count, which keeps every
+single-statement consumer unchanged at the cost of a consumer of scripts having
+to expect the nesting. The interactive Results pane shows one set at a time,
+`[` and `]` move between them, and the label row leads with `result n/m`.
+
+SQL Server is unchanged: sqlcmd prints result sets back to back with nothing
+reliable between them, so its output is still read as one.
+
+#### Testing
+
+The unit suites used to put a stub `psql` on `PATH`. They now run against
+`internal/pgfake`, a test-only server speaking enough of the protocol to
+authenticate, answer statements, record what it received (statements, bound
+values, declared types, startup parameters) and honour cancel requests. The
+integration suite runs the postgres cases against a real server with no client
+binary installed.

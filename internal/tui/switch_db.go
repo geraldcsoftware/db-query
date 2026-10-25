@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/dblist"
 	"github.com/geraldcsoftware/db-query/internal/schema"
@@ -92,7 +93,7 @@ func listDatabases(ctx context.Context, r session.Resolved) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	names := session.DatabaseNames(rows)
+	names := session.DatabaseNames(adapter.First(rows))
 	// A cache that cannot be written costs completion its freshness and
 	// nothing else; the names in hand are still good.
 	_ = dblist.Write(dblist.CachePath(r.Host.Name), names)
@@ -108,7 +109,7 @@ func introspectInto(ctx context.Context, r session.Resolved, database string) er
 	if err != nil {
 		return err
 	}
-	return schema.Write(schema.CachePath(r.Host.Host, database), rows)
+	return schema.Write(schema.CachePath(r.Host.Host, database), adapter.First(rows))
 }
 
 // openSwitcher opens the popup on the cached database names and asks for a

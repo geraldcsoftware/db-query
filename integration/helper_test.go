@@ -2,17 +2,21 @@
 
 // Package integration runs the built db-query binary against real
 // databases started by docker-compose.yml (make integration). Two
-// suites live here: TestPostgres* (psql) and TestSQLServer* (sqlcmd).
+// suites live here: TestPostgres* (the wire protocol, no client binary) and
+// TestSQLServer* (sqlcmd).
 package integration
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
@@ -58,6 +62,17 @@ database   = "dbqtest"
 username   = "dbq"
 credential = "env:DBQ_PG_PASSWORD"
 
+# pgrw is pg with the safety gate's readonly default turned off, for the
+# script cases that need a write to reach the server.
+[hosts.pgrw]
+provider   = "postgres"
+host       = "127.0.0.1"
+port       = %s
+database   = "dbqtest"
+username   = "dbq"
+credential = "env:DBQ_PG_PASSWORD"
+readonly   = false
+
 [hosts.mssql-master]
 provider   = "sqlserver"
 host       = "127.0.0.1"
@@ -74,6 +89,7 @@ database   = "dbqtest"
 username   = "sa"
 credential = "env:DBQ_MSSQL_PASSWORD"
 `,
+		envOr("DBQ_PG_PORT", "15432"),
 		envOr("DBQ_PG_PORT", "15432"),
 		envOr("DBQ_MSSQL_PORT", "11433"),
 		envOr("DBQ_MSSQL_PORT", "11433"))
@@ -129,6 +145,25 @@ func runTool(t testing.TB, env []string, args ...string) result {
 		t.Fatalf("running db-query: %v", err)
 	}
 	return result{code: code, stdout: out.String(), stderr: errb.String()}
+}
+
+// seedPG runs one statement straight over the wire protocol, bypassing
+// db-query for the same reason seedMSSQL does: a fixture the gate would refuse
+// (a DELETE meets the operator challenge) still has to be set up and torn down.
+func seedPG(t testing.TB, sql string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := pgconn.Connect(ctx, fmt.Sprintf(
+		"host=127.0.0.1 port=%s dbname=dbqtest user=dbq password=%s sslmode=disable",
+		envOr("DBQ_PG_PORT", "15432"), pgPassword))
+	if err != nil {
+		t.Fatalf("connecting to seed postgres: %v", err)
+	}
+	defer conn.Close(context.Background())
+	if _, err := conn.Exec(ctx, sql).ReadAll(); err != nil {
+		t.Fatalf("seeding postgres failed: %v", err)
+	}
 }
 
 // seedMSSQL runs one batch straight through sqlcmd, connecting the way the

@@ -6,11 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/dblist"
+	"github.com/geraldcsoftware/db-query/internal/pgfake"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 	"github.com/geraldcsoftware/db-query/internal/schema"
 	"github.com/geraldcsoftware/db-query/internal/sqlscan"
@@ -25,16 +28,6 @@ func writeFile(t *testing.T, dir, name, body string, mode os.FileMode) string {
 	return path
 }
 
-// fakePsql puts a stub psql on PATH that records its argv/stdin/env and
-// prints canned CSV, so the full pipeline runs without a server.
-func fakePsql(t *testing.T, script string) string {
-	t.Helper()
-	dir := t.TempDir()
-	writeFile(t, dir, "psql", "#!/bin/sh\n"+script, 0o755)
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return dir
-}
-
 // isolateCache points the schema cache at a fresh temp dir so runs never
 // touch the real cache and the first-run schema build is deterministic.
 func isolateCache(t *testing.T) {
@@ -44,7 +37,7 @@ func isolateCache(t *testing.T) {
 
 // seedSchemaCache isolates the cache and pre-writes the entry for
 // testConfig's resolved host (localhost/testdb), so a query run finds the
-// cache present and skips the silent schema build — the psql stub then only
+// cache present and skips the silent schema build — the fake server then only
 // answers the user query.
 func seedSchemaCache(t *testing.T) {
 	t.Helper()
@@ -55,37 +48,71 @@ func seedSchemaCache(t *testing.T) {
 	}
 }
 
-// splitPsql installs a psql stub that answers the introspection query with a
-// canned catalogue (so the silent schema build succeeds) and runs the given
-// user-query script for everything else. The introspection SQL is
-// recognised by its information_schema reference. Both branches append a
-// marker line to $DBQ_CALLS so a test can assert which invocations ran.
-func splitPsql(t *testing.T, userScript string) {
+// pgServer is the fake the running test started, if any. The tests in this
+// package never run in parallel, so one slot is enough.
+var pgServer *pgfake.Server
+
+// fakePG starts a fake postgres server answering every statement with h, and
+// points testConfig and writableConfig at it, so the full pipeline runs
+// without a real server. The server records what arrived. Config written
+// before the fake starts still points at the default port, so start it first.
+func fakePG(t *testing.T, h pgfake.Handler) *pgfake.Server {
 	t.Helper()
-	needsClassifier(t)
-	fakePsql(t, `
-sql=$(cat)
-case "$sql" in
-  *information_schema*)
-    printf 'introspect\n' >> "$DBQ_CALLS"
-    printf 'table_schema,table_name,column_name,data_type,is_nullable\npublic,people,id,integer,NO\n'
-    exit 0
-    ;;
-esac
-printf 'query\n' >> "$DBQ_CALLS"
-`+userScript)
+	srv := pgfake.Start(t, h)
+	pgServer = srv
+	t.Cleanup(func() { pgServer = nil })
+	t.Setenv("DBQ_TEST_PGPORT", strconv.Itoa(srv.Port))
+	return srv
 }
 
-// callsFile registers a temp calls-marker file for splitPsql and returns a
-// reader for its contents.
+// replyAll answers every statement the same way.
+func replyAll(r pgfake.Reply) pgfake.Handler {
+	return func(pgfake.Query) pgfake.Reply { return r }
+}
+
+// splitPG answers the introspection query with a canned catalogue, so the
+// silent schema build succeeds, and every other statement with user. The
+// introspection SQL is recognised by its information_schema reference.
+func splitPG(t *testing.T, user pgfake.Handler) *pgfake.Server {
+	t.Helper()
+	needsClassifier(t)
+	return fakePG(t, func(q pgfake.Query) pgfake.Reply {
+		if strings.Contains(q.SQL, "information_schema") {
+			return pgfake.Rows([]string{"table_schema", "table_name", "column_name", "data_type", "is_nullable"},
+				[]string{"public", "people", "id", "integer", "NO"})
+		}
+		return user(q)
+	})
+}
+
+// callsFile returns a reader naming each statement the fake has received, one
+// per line: "introspect" for the catalogue query and "query" for anything
+// else, so a test can assert which runs happened.
 func callsFile(t *testing.T) func() string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "calls")
-	t.Setenv("DBQ_CALLS", path)
 	return func() string {
-		b, _ := os.ReadFile(path)
-		return string(b)
+		if pgServer == nil {
+			return ""
+		}
+		var b strings.Builder
+		for _, sql := range pgServer.SQL() {
+			if strings.Contains(sql, "information_schema") {
+				b.WriteString("introspect\n")
+			} else {
+				b.WriteString("query\n")
+			}
+		}
+		return b.String()
 	}
+}
+
+// pgTestPort is the port fakePG chose, or postgres's own default for a test
+// that never connects.
+func pgTestPort() string {
+	if p := os.Getenv("DBQ_TEST_PGPORT"); p != "" {
+		return p
+	}
+	return "5432"
 }
 
 func testConfig(t *testing.T) string {
@@ -94,7 +121,7 @@ func testConfig(t *testing.T) string {
 [hosts.testpg]
 provider   = "postgres"
 host       = "localhost"
-port       = 5432
+port       = `+pgTestPort()+`
 database   = "testdb"
 username   = "app"
 credential = "env:DBQ_TEST_PW"
@@ -110,7 +137,7 @@ func writableConfig(t *testing.T) string {
 [hosts.testpg]
 provider   = "postgres"
 host       = "localhost"
-port       = 5432
+port       = `+pgTestPort()+`
 database   = "testdb"
 username   = "app"
 credential = "env:DBQ_TEST_PW"
@@ -262,10 +289,8 @@ func TestSharedFlagsBeforeCommand(t *testing.T) {
 	if err := schema.Write(schema.CachePath("localhost", "otherdb"), adapter.Rows{Columns: []string{"seeded"}}); err != nil {
 		t.Fatal(err)
 	}
-	capture := t.TempDir()
-	t.Setenv("TMPDIR_CAPTURE", capture)
 	needsClassifier(t)
-	fakePsql(t, `env > "$TMPDIR_CAPTURE/env"; printf 'ok\n1\n'`)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"ok"}, []string{"1"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 
@@ -276,9 +301,8 @@ func TestSharedFlagsBeforeCommand(t *testing.T) {
 	if !strings.Contains(out, "ok") {
 		t.Fatalf("out = %q", out)
 	}
-	env, _ := os.ReadFile(filepath.Join(capture, "env"))
-	if !strings.Contains(string(env), "PGDATABASE=otherdb") {
-		t.Fatalf("a global --database must reach the client; env=%q", env)
+	if db := srv.Startup()["database"]; db != "otherdb" {
+		t.Fatalf("a global --database must reach the server; database=%q", db)
 	}
 	// Shorthands work in the same position, and so does a command flag after
 	// the globals.
@@ -302,7 +326,7 @@ func TestSharedFlagsBeforeCommand(t *testing.T) {
 func TestCommandFlagBeatsGlobal(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'ok\n1\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"ok"}, []string{"1"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 
@@ -323,10 +347,8 @@ func TestEnvironmentDefaults(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	capture := t.TempDir()
-	t.Setenv("TMPDIR_CAPTURE", capture)
 	needsClassifier(t)
-	fakePsql(t, `env > "$TMPDIR_CAPTURE/env"; printf 'ok\n1\n'`)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"ok"}, []string{"1"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	t.Setenv("DB_QUERY_CONFIG", cfg) // so no --config is needed either
@@ -340,9 +362,8 @@ func TestEnvironmentDefaults(t *testing.T) {
 	if !strings.Contains(out, "ok") {
 		t.Fatalf("out = %q", out)
 	}
-	env, _ := os.ReadFile(filepath.Join(capture, "env"))
-	if !strings.Contains(string(env), "PGDATABASE=envdb") {
-		t.Fatalf("DB_QUERY_DATABASE must supply the database; env=%q", env)
+	if db := srv.Startup()["database"]; db != "envdb" {
+		t.Fatalf("DB_QUERY_DATABASE must supply the database; database=%q", db)
 	}
 
 	// A flag beats the environment, before or after the command.
@@ -353,9 +374,8 @@ func TestEnvironmentDefaults(t *testing.T) {
 		if code, _, errb := run(t, args...); code != 0 {
 			t.Fatalf("%v: code=%d err=%q", args, code, errb)
 		}
-		env, _ := os.ReadFile(filepath.Join(capture, "env"))
-		if !strings.Contains(string(env), "PGDATABASE=flagdb") {
-			t.Fatalf("%v: --database must beat DB_QUERY_DATABASE; env=%q", args, env)
+		if db := srv.Startup()["database"]; db != "flagdb" {
+			t.Fatalf("%v: --database must beat DB_QUERY_DATABASE; database=%q", args, db)
 		}
 	}
 	// An unknown host in the environment fails like an unknown host anywhere.
@@ -370,19 +390,13 @@ func TestEnvironmentDefaults(t *testing.T) {
 // their long forms would.
 func TestShorthandFlags(t *testing.T) {
 	seedSchemaCache(t)
-	capture := t.TempDir()
-	t.Setenv("TMPDIR_CAPTURE", capture)
 	needsClassifier(t)
-	fakePsql(t, `
-cat > "$TMPDIR_CAPTURE/stdin"
-printf '%s\n' "$@" > "$TMPDIR_CAPTURE/argv"
-printf 'id\n1\n'
-`)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"id"}, []string{"1"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
-	sqlFile := writeFile(t, t.TempDir(), "q.sql", "SELECT :'who'", 0o600)
+	sqlFile := writeFile(t, t.TempDir(), "q.sql", "SELECT $1", 0o600)
 
-	code, out, errb := run(t, "query", "-H", "testpg", "-c", cfg, "-o", "json", "-t", "10s", "-p", "who=Ada", "--file", sqlFile)
+	code, out, errb := run(t, "query", "-H", "testpg", "-c", cfg, "-o", "json", "-t", "10s", "-p", "1=Ada", "--file", sqlFile)
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb)
 	}
@@ -390,13 +404,12 @@ printf 'id\n1\n'
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
 		t.Fatalf("-o json did not produce JSON: %q", out)
 	}
-	stdin, _ := os.ReadFile(filepath.Join(capture, "stdin"))
-	if string(stdin) != "SELECT :'who'" {
-		t.Fatalf("--file SQL over stdin = %q", stdin)
+	q := srv.Queries()
+	if len(q) != 1 || q[0].SQL != "SELECT $1" {
+		t.Fatalf("--file SQL not sent: %+v", q)
 	}
-	argv, _ := os.ReadFile(filepath.Join(capture, "argv"))
-	if !strings.Contains(string(argv), "who=Ada") {
-		t.Fatalf("-p param missing from client argv: %q", argv)
+	if len(q[0].Params) != 1 || string(q[0].Params[0]) != "Ada" {
+		t.Fatalf("-p param not bound: %q", q[0].Params)
 	}
 }
 
@@ -414,7 +427,7 @@ func TestShorthandSourceAndCategory(t *testing.T) {
 	t.Setenv("DB_QUERY_QUERIES_DIR", t.TempDir())
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'x\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"x"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, _, errb = run(t, "query", "-H", "testpg", "-c", cfg, "-s", "missing", "-C", "reports")
@@ -565,15 +578,8 @@ func TestHostsListingExcludesProfiles(t *testing.T) {
 func TestQueryHappyPath(t *testing.T) {
 	needsClassifier(t)
 	seedSchemaCache(t) // cache present → single invocation, the user query
-	dir := fakePsql(t, `
-cat > "$TMPDIR_CAPTURE/stdin"
-env > "$TMPDIR_CAPTURE/env"
-printf 'id,name\n1,Ada\n'
-`)
-	capture := t.TempDir()
-	t.Setenv("TMPDIR_CAPTURE", capture)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"id", "name"}, []string{"1", "Ada"})))
 	t.Setenv("DBQ_TEST_PW", "sekrit")
-	_ = dir
 
 	cfg := testConfig(t)
 	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg, "SELECT id, name FROM people")
@@ -584,22 +590,22 @@ printf 'id,name\n1,Ada\n'
 		t.Fatalf("out = %q", out)
 	}
 
-	stdin, _ := os.ReadFile(filepath.Join(capture, "stdin"))
-	if string(stdin) != "SELECT id, name FROM people" {
-		t.Fatalf("sql over stdin = %q", stdin)
+	if got := srv.SQL(); len(got) != 1 || got[0] != "SELECT id, name FROM people" {
+		t.Fatalf("sql sent = %q", got)
 	}
-	envDump, _ := os.ReadFile(filepath.Join(capture, "env"))
-	for _, want := range []string{"PGPASSWORD=sekrit", "PGUSER=app", "PGDATABASE=testdb", "PGHOST=localhost"} {
-		if !strings.Contains(string(envDump), want) {
-			t.Errorf("child env missing %q", want)
-		}
+	if srv.Password() != "sekrit" {
+		t.Errorf("password = %q", srv.Password())
+	}
+	start := srv.Startup()
+	if start["user"] != "app" || start["database"] != "testdb" || start["application_name"] != "db-query" {
+		t.Errorf("startup = %v", start)
 	}
 }
 
 func TestQueryJSONOutput(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'id,nick\n1,\001\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"id", "nick"}, []string{"1", pgfake.Null})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg, "--output", "json", "SELECT 1")
@@ -611,14 +617,14 @@ func TestQueryJSONOutput(t *testing.T) {
 		t.Fatalf("not JSON: %q", out)
 	}
 	if rows[0]["nick"] != nil {
-		t.Fatal("sentinel must become JSON null")
+		t.Fatal("NULL must become JSON null")
 	}
 }
 
 func TestQueryMissingCredential(t *testing.T) {
 	isolateCache(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'x\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"x"})))
 	t.Setenv("DBQ_TEST_PW", "x") // register restore, then unset for real
 	os.Unsetenv("DBQ_TEST_PW")
 	cfg := testConfig(t)
@@ -631,7 +637,7 @@ func TestQueryMissingCredential(t *testing.T) {
 func TestQuerySchemaErrorHint(t *testing.T) {
 	seedSchemaCache(t) // cache present → the failing stub is the user query
 	needsClassifier(t)
-	fakePsql(t, `echo 'ERROR:  42703: column "nope" does not exist' >&2; exit 1`)
+	fakePG(t, replyAll(pgfake.Error("42703", `column "nope" does not exist`)))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "SELECT nope FROM people")
@@ -648,7 +654,7 @@ func TestQuerySchemaErrorHint(t *testing.T) {
 func TestQueryOtherSQLError(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `echo 'ERROR:  23505: duplicate key value violates unique constraint' >&2; exit 1`)
+	fakePG(t, replyAll(pgfake.Error("23505", "duplicate key value violates unique constraint")))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	// A writable host: the subject here is the exit code a failing client
 	// produces, which a query stopped by the safety gate would never reach.
@@ -665,7 +671,7 @@ func TestQueryOtherSQLError(t *testing.T) {
 func TestQueryJSONErrorIsStructured(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `echo 'ERROR: boom' >&2; exit 1`)
+	fakePG(t, replyAll(pgfake.Error("XX000", "boom")))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "--output", "json", "SELECT 1")
@@ -681,16 +687,30 @@ func TestQueryJSONErrorIsStructured(t *testing.T) {
 	}
 }
 
-func TestQueryClientNotFound(t *testing.T) {
+// TestQueryTimeout pins exit code 2 for a run that could not finish: the
+// statement outlived --timeout, so nothing about the SQL is known.
+func TestQueryTimeout(t *testing.T) {
+	seedSchemaCache(t)
 	needsClassifier(t)
-	// Empty PATH: psql cannot start → distinct exit code 2. The schema
-	// build is the first invocation and fails to start, which is enough.
-	isolateCache(t)
-	t.Setenv("PATH", t.TempDir())
+	fakePG(t, replyAll(pgfake.Reply{Delay: 10 * time.Second}))
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "--timeout", "200ms", "SELECT 1")
+	if code != 2 || !strings.Contains(errb, "timed out") {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+}
+
+// TestQueryUnreachable keeps a server that cannot be reached at exit code 4,
+// where psql's own connection failure put it.
+func TestQueryUnreachable(t *testing.T) {
+	seedSchemaCache(t)
+	needsClassifier(t)
+	t.Setenv("DBQ_TEST_PGPORT", "1")
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "SELECT 1")
-	if code != 2 || !strings.Contains(errb, "starting") {
+	if code != 4 || !strings.Contains(errb, "failed to connect") {
 		t.Fatalf("code=%d err=%q", code, errb)
 	}
 }
@@ -700,12 +720,7 @@ func TestIntrospectUsesAdapterSQL(t *testing.T) {
 	// Appends rather than truncates: introspect makes two invocations, the
 	// catalog query and the database-list refresh that rides along with it.
 	needsClassifier(t)
-	fakePsql(t, `
-cat >> "$TMPDIR_CAPTURE/stdin"
-printf 'table_name,column_name\npeople,id\n'
-`)
-	capture := t.TempDir()
-	t.Setenv("TMPDIR_CAPTURE", capture)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"table_name", "column_name"}, []string{"people", "id"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, errb := run(t, "introspect", "--host", "testpg", "--config", cfg)
@@ -715,12 +730,12 @@ printf 'table_name,column_name\npeople,id\n'
 	if !strings.Contains(out, "people") {
 		t.Fatalf("out = %q", out)
 	}
-	stdin, _ := os.ReadFile(filepath.Join(capture, "stdin"))
-	if !strings.Contains(string(stdin), "information_schema.columns") {
-		t.Fatalf("introspect must send the adapter's catalog query, sent %q", stdin)
+	sent := strings.Join(srv.SQL(), "\n")
+	if !strings.Contains(sent, "information_schema.columns") {
+		t.Fatalf("introspect must send the adapter's catalog query, sent %q", sent)
 	}
-	if !strings.Contains(string(stdin), "pg_database") {
-		t.Fatalf("introspect must also send the database-list query, sent %q", stdin)
+	if !strings.Contains(sent, "pg_database") {
+		t.Fatalf("introspect must also send the database-list query, sent %q", sent)
 	}
 	// introspect persists the cache as a side effect of printing it.
 	if !schema.Exists(schema.CachePath("localhost", "testdb")) {
@@ -729,55 +744,130 @@ printf 'table_name,column_name\npeople,id\n'
 }
 
 func TestQueryParamPassing(t *testing.T) {
-	seedSchemaCache(t) // skip the build so the captured argv is the user query
+	seedSchemaCache(t) // skip the build so the only statement is the user query
 	needsClassifier(t)
-	fakePsql(t, `
-printf '%s ' "$@" > "$TMPDIR_CAPTURE/argv"
-printf 'ok\n1\n'
-`)
-	capture := t.TempDir()
-	t.Setenv("TMPDIR_CAPTURE", capture)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"ok"}, []string{"1"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg,
-		"--param", "name=Ada", "--param", "min=2", "SELECT :'name', :'min'")
+		"--param", "2=Ada", "--param", "1=2", "SELECT $2, $1")
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb)
 	}
-	argv, _ := os.ReadFile(filepath.Join(capture, "argv"))
-	if !strings.Contains(string(argv), "-v min=2") || !strings.Contains(string(argv), "-v name=Ada") {
-		t.Fatalf("argv = %q", argv)
+	q := srv.Queries()
+	if len(q) != 1 || len(q[0].Params) != 2 || string(q[0].Params[0]) != "2" || string(q[0].Params[1]) != "Ada" {
+		t.Fatalf("params bound = %+v", q)
+	}
+}
+
+// TestQueryParamRefusals pins that a parameter the server could not bind is
+// refused before anything is sent: a named one, written for psql, and a
+// position the SQL uses but nothing binds.
+func TestQueryParamRefusals(t *testing.T) {
+	seedSchemaCache(t)
+	needsClassifier(t)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"ok"}, []string{"1"})))
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	for _, tt := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--param", "who=Ada", "SELECT $1"}, "positional"},
+		{[]string{"--param", "1=Ada", "SELECT $1, $2"}, "$2 is not bound"},
+	} {
+		code, _, errb := run(t, append([]string{"query", "--host", "testpg", "--config", cfg}, tt.args...)...)
+		if code != 1 || !strings.Contains(errb, tt.want) {
+			t.Errorf("%v: code=%d err=%q, want 1 and %q", tt.args, code, errb, tt.want)
+		}
+	}
+	if n := srv.Connections(); n != 0 {
+		t.Fatalf("a refused submission must not connect; connections=%d", n)
+	}
+}
+
+// TestQueryScript pins a submission of several statements end to end: one
+// transaction, every result set printed in order, separated by a blank line.
+func TestQueryScript(t *testing.T) {
+	seedSchemaCache(t)
+	needsClassifier(t)
+	srv := fakePG(t, func(q pgfake.Query) pgfake.Reply {
+		switch q.SQL {
+		case "SELECT 1 AS a":
+			return pgfake.Rows([]string{"a"}, []string{"1"})
+		case "SELECT 2 AS b":
+			return pgfake.Rows([]string{"b"}, []string{"2"})
+		}
+		return pgfake.Reply{}
+	})
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := writableConfig(t)
+	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"SELECT 1 AS a; UPDATE people SET name = name; SELECT 2 AS b")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errb)
+	}
+	if out != "a\n1\n\nb\n2\n" {
+		t.Fatalf("out = %q", out)
+	}
+	want := []string{"BEGIN", "SELECT 1 AS a", "UPDATE people SET name = name", "SELECT 2 AS b", "COMMIT"}
+	if got := srv.SQL(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("statements = %q, want %q", got, want)
+	}
+}
+
+// TestQueryScriptStopsAtFirstError pins that the failing statement ends the
+// run: nothing after it is sent, the transaction is rolled back, no result
+// set is printed, and the error says which statement failed.
+func TestQueryScriptStopsAtFirstError(t *testing.T) {
+	seedSchemaCache(t)
+	needsClassifier(t)
+	srv := fakePG(t, func(q pgfake.Query) pgfake.Reply {
+		if q.SQL == "SELECT nope FROM people" {
+			return pgfake.Error("42703", `column "nope" does not exist`)
+		}
+		return pgfake.Rows([]string{"x"}, []string{"1"})
+	})
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg,
+		"SELECT 1; SELECT nope FROM people; SELECT 3")
+	if code != 3 {
+		t.Fatalf("code=%d, want 3 (schema error)", code)
+	}
+	if out != "" {
+		t.Fatalf("a failed script prints no result sets, out=%q", out)
+	}
+	if !strings.Contains(errb, "statement 2 of 3") {
+		t.Fatalf("err = %q, want the failing statement named", errb)
+	}
+	want := []string{"BEGIN", "SELECT 1", "SELECT nope FROM people", "ROLLBACK"}
+	if got := srv.SQL(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("statements = %q, want %q", got, want)
 	}
 }
 
 // TestQueryFlagsAfterSQL guards the interspersed-args parsing: flags placed
 // after the positional SQL (which Go's flag package would otherwise swallow)
-// must still bind. The SQL and a trailing --param both have to reach psql.
+// must still bind. The SQL and a trailing --param both have to reach the server.
 func TestQueryFlagsAfterSQL(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `
-printf '%s ' "$@" > "$TMPDIR_CAPTURE/argv"
-cat > "$TMPDIR_CAPTURE/stdin"
-printf 'ok\n1\n'
-`)
-	capture := t.TempDir()
-	t.Setenv("TMPDIR_CAPTURE", capture)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"ok"}, []string{"1"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	// Flags on both sides of the SQL, including one that trails it.
 	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg,
-		"SELECT :'who'", "--param", "who=Ada", "--no-headers")
+		"SELECT $1", "--param", "1=Ada", "--no-headers")
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb)
 	}
-	argv, _ := os.ReadFile(filepath.Join(capture, "argv"))
-	if !strings.Contains(string(argv), "-v who=Ada") {
-		t.Fatalf("trailing --param not bound; argv = %q", argv)
+	q := srv.Queries()
+	if len(q) != 1 || q[0].SQL != "SELECT $1" {
+		t.Fatalf("SQL not delivered; sent %+v", q)
 	}
-	stdin, _ := os.ReadFile(filepath.Join(capture, "stdin"))
-	if !strings.Contains(string(stdin), "SELECT :'who'") {
-		t.Fatalf("SQL not delivered; stdin = %q", stdin)
+	if len(q[0].Params) != 1 || string(q[0].Params[0]) != "Ada" {
+		t.Fatalf("trailing --param not bound; params = %q", q[0].Params)
 	}
 }
 
@@ -845,7 +935,7 @@ func TestParamFlagParsing(t *testing.T) {
 func TestQueryBuildsSchemaOnFirstRun(t *testing.T) {
 	isolateCache(t) // cache absent → the build must run before the query
 	calls := callsFile(t)
-	splitPsql(t, `printf 'id\n42\n'`)
+	splitPG(t, replyAll(pgfake.Rows([]string{"id"}, []string{"42"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg, "SELECT id FROM people")
@@ -866,7 +956,7 @@ func TestQueryBuildsSchemaOnFirstRun(t *testing.T) {
 func TestQuerySkipsSchemaWhenCached(t *testing.T) {
 	seedSchemaCache(t) // cache present → no build, just the user query
 	calls := callsFile(t)
-	splitPsql(t, `printf 'id\n42\n'`)
+	splitPG(t, replyAll(pgfake.Rows([]string{"id"}, []string{"42"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg, "SELECT id FROM people")
@@ -884,7 +974,7 @@ func TestQuerySkipsSchemaWhenCached(t *testing.T) {
 func TestQueryRefreshSchemaForcesRebuild(t *testing.T) {
 	seedSchemaCache(t) // cache present, but --refresh-schema overrides
 	calls := callsFile(t)
-	splitPsql(t, `printf 'id\n42\n'`)
+	splitPG(t, replyAll(pgfake.Rows([]string{"id"}, []string{"42"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg,
@@ -904,18 +994,12 @@ func TestQuerySchemaBuildFailureStops(t *testing.T) {
 	calls := callsFile(t)
 	// The introspection query fails; the user branch would otherwise run.
 	needsClassifier(t)
-	fakePsql(t, `
-sql=$(cat)
-case "$sql" in
-  *information_schema*)
-    printf 'introspect\n' >> "$DBQ_CALLS"
-    echo 'ERROR:  57014: canceling statement due to statement timeout' >&2
-    exit 1
-    ;;
-esac
-printf 'query\n' >> "$DBQ_CALLS"
-printf 'id\n42\n'
-`)
+	fakePG(t, func(q pgfake.Query) pgfake.Reply {
+		if strings.Contains(q.SQL, "information_schema") {
+			return pgfake.Error("57014", "canceling statement due to statement timeout")
+		}
+		return pgfake.Rows([]string{"id"}, []string{"42"})
+	})
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, _ := run(t, "query", "--host", "testpg", "--config", cfg, "SELECT id FROM people")
@@ -939,7 +1023,7 @@ func TestIntrospectAlwaysRebuilds(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := callsFile(t)
-	splitPsql(t, `printf 'unused\n'`)
+	splitPG(t, replyAll(pgfake.Rows([]string{"unused"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, errb := run(t, "introspect", "--host", "testpg", "--config", cfg)
@@ -964,7 +1048,7 @@ func TestIntrospectAlwaysRebuilds(t *testing.T) {
 func TestQueryNoHeaders(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'count\n42\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"count"}, []string{"42"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg,
@@ -980,7 +1064,7 @@ func TestQueryNoHeaders(t *testing.T) {
 func TestQueryNoHeadersJSONNoOp(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'id,name\n1,Ada\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"id", "name"}, []string{"1", "Ada"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg,
@@ -1006,25 +1090,19 @@ func TestQueryDatabaseOverride(t *testing.T) {
 		t.Run(flag, func(t *testing.T) {
 			isolateCache(t)
 			// The schema cache is keyed on host+database, so seed the entry for
-			// the OVERRIDDEN database; the psql stub then only answers the query.
+			// the OVERRIDDEN database; the fake then only answers the query.
 			if err := schema.Write(schema.CachePath("localhost", "otherdb"), adapter.Rows{Columns: []string{"seeded"}}); err != nil {
 				t.Fatal(err)
 			}
-			fakePsql(t, `env > "$TMPDIR_CAPTURE/env"; printf 'ok\n1\n'`)
-			capture := t.TempDir()
-			t.Setenv("TMPDIR_CAPTURE", capture)
+			srv := fakePG(t, replyAll(pgfake.Rows([]string{"ok"}, []string{"1"})))
 			t.Setenv("DBQ_TEST_PW", "pw")
 			cfg := testConfig(t) // testpg is configured with database=testdb
 			code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, flag, "otherdb", "SELECT 1")
 			if code != 0 {
 				t.Fatalf("code=%d err=%q", code, errb)
 			}
-			env, _ := os.ReadFile(filepath.Join(capture, "env"))
-			if !strings.Contains(string(env), "PGDATABASE=otherdb") {
-				t.Fatalf("%s must override the configured database; env=%q", flag, env)
-			}
-			if strings.Contains(string(env), "PGDATABASE=testdb") {
-				t.Fatalf("the configured database must not leak when %s is set; env=%q", flag, env)
+			if db := srv.Startup()["database"]; db != "otherdb" {
+				t.Fatalf("%s must override the configured database; database=%q", flag, db)
 			}
 		})
 	}
@@ -1059,12 +1137,12 @@ func TestQuerySaveOnSuccess(t *testing.T) {
 	seedSchemaCache(t)
 	isolateStore(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'id,name\n1,Ada\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"id", "name"}, []string{"1", "Ada"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg,
 		"--save", "people-by-name", "--category", "reports",
-		"--param", "who=Ada", "SELECT id, name FROM people WHERE name = :'who'")
+		"--param", "1=Ada", "SELECT id, name FROM people WHERE name = $1")
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb)
 	}
@@ -1078,7 +1156,7 @@ func TestQuerySaveOnSuccess(t *testing.T) {
 	if sq.Provider != "postgres" {
 		t.Fatalf("saved provider = %q, want postgres", sq.Provider)
 	}
-	if !strings.Contains(sq.SQL, ":'who'") {
+	if !strings.Contains(sq.SQL, "$1") {
 		t.Fatalf("saved SQL must keep the placeholder, got %q", sq.SQL)
 	}
 	if strings.Contains(sq.SQL, "Ada") {
@@ -1092,7 +1170,7 @@ func TestQuerySaveNotOnFailure(t *testing.T) {
 	seedSchemaCache(t)
 	isolateStore(t)
 	needsClassifier(t)
-	fakePsql(t, `echo 'ERROR: boom' >&2; exit 1`)
+	fakePG(t, replyAll(pgfake.Error("XX000", "boom")))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, _, _ := run(t, "query", "--host", "testpg", "--config", cfg,
@@ -1112,7 +1190,7 @@ func TestQuerySaveDuplicateRefusal(t *testing.T) {
 	seedSchemaCache(t)
 	isolateStore(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'id\n1\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"id"}, []string{"1"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	if code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg,
@@ -1151,26 +1229,24 @@ func TestQuerySource(t *testing.T) {
 	seedSchemaCache(t)
 	isolateStore(t)
 	if _, err := savedquery.Save("by-name", "people", "postgres",
-		"SELECT id, name FROM people WHERE name = :'who'", false); err != nil {
+		"SELECT id, name FROM people WHERE name = $1", false); err != nil {
 		t.Fatal(err)
 	}
 	needsClassifier(t)
-	fakePsql(t, `cat > "$TMPDIR_CAPTURE/stdin"; printf 'id,name\n1,Ada\n'`)
-	capture := t.TempDir()
-	t.Setenv("TMPDIR_CAPTURE", capture)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"id", "name"}, []string{"1", "Ada"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, errb := run(t, "query", "--host", "testpg", "--config", cfg,
-		"--source", "by-name", "--category", "people", "--param", "who=Ada")
+		"--source", "by-name", "--category", "people", "--param", "1=Ada")
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb)
 	}
 	if !strings.Contains(out, "Ada") {
 		t.Fatalf("out=%q", out)
 	}
-	stdin, _ := os.ReadFile(filepath.Join(capture, "stdin"))
-	if !strings.Contains(string(stdin), "WHERE name = :'who'") {
-		t.Fatalf("source SQL not sent to the client, stdin=%q", stdin)
+	q := srv.Queries()
+	if len(q) != 1 || !strings.Contains(q[0].SQL, "WHERE name = $1") || string(q[0].Params[0]) != "Ada" {
+		t.Fatalf("source SQL not sent to the server, sent %+v", q)
 	}
 }
 
@@ -1182,9 +1258,8 @@ func TestQuerySourceProviderGuard(t *testing.T) {
 	if _, err := savedquery.Save("mismatch", "default", "sqlserver", "SELECT 1", false); err != nil {
 		t.Fatal(err)
 	}
-	calls := callsFile(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'ran\n' >> "$DBQ_CALLS"; printf 'x\n'`)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"x"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "--source", "mismatch")
@@ -1194,7 +1269,7 @@ func TestQuerySourceProviderGuard(t *testing.T) {
 	if !strings.Contains(errb, "provider") {
 		t.Fatalf("must explain the provider mismatch, err=%q", errb)
 	}
-	if strings.Contains(calls(), "ran") {
+	if srv.Connections() != 0 {
 		t.Fatal("a provider-mismatched saved query must not run")
 	}
 }
@@ -1208,7 +1283,7 @@ func TestQuerySourceMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	needsClassifier(t)
-	fakePsql(t, `printf 'x\n'`)
+	fakePG(t, replyAll(pgfake.Rows([]string{"x"})))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, _, errb := run(t, "query", "--host", "testpg", "--config", cfg, "--source", "absent")
@@ -1329,7 +1404,7 @@ func TestSchemaReadsCacheWithoutClient(t *testing.T) {
 	seedCatalogueCache(t)
 	calls := callsFile(t)
 	needsClassifier(t)
-	fakePsql(t, `printf 'called\n' >> "$DBQ_CALLS"; exit 1`)
+	fakePG(t, replyAll(pgfake.Error("XX000", "called")))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, errb := run(t, "schema", "--host", "testpg", "--config", cfg)
@@ -1425,7 +1500,7 @@ func TestSchemaTablesAndNameExclusive(t *testing.T) {
 func TestSchemaBuildsCacheOnMiss(t *testing.T) {
 	isolateCache(t)
 	calls := callsFile(t)
-	splitPsql(t, `exit 1`) // only the introspection branch may run
+	splitPG(t, replyAll(pgfake.Error("XX000", "unexpected"))) // only the introspection branch may run
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, errb := run(t, "schema", "--host", "testpg", "--config", cfg)
@@ -1446,7 +1521,7 @@ func TestSchemaBuildsCacheOnMiss(t *testing.T) {
 func TestSchemaRefreshForcesRebuild(t *testing.T) {
 	seedSchemaCache(t) // stale cache present: without --refresh-schema it would be printed as-is
 	calls := callsFile(t)
-	splitPsql(t, `exit 1`)
+	splitPG(t, replyAll(pgfake.Error("XX000", "unexpected")))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 	code, out, errb := run(t, "schema", "--host", "testpg", "--config", cfg, "--refresh-schema")
@@ -1524,23 +1599,17 @@ credential = "bws:secret-id"
 	})
 }
 
-// fakePsqlDatabases installs a psql stub answering the catalog list query with
-// two database names, recording stdin so the SQL actually sent can be asserted.
-func fakePsqlDatabases(t *testing.T) string {
+// fakePGDatabases starts a fake answering the catalog list query with two
+// database names; the server records the SQL actually sent.
+func fakePGDatabases(t *testing.T) *pgfake.Server {
 	t.Helper()
-	capture := t.TempDir()
-	t.Setenv("TMPDIR_CAPTURE", capture)
 	needsClassifier(t)
-	fakePsql(t, `
-cat >> "$TMPDIR_CAPTURE/stdin"
-printf 'datname\npostgres\ntestdb\n'
-`)
-	return capture
+	return fakePG(t, replyAll(pgfake.Rows([]string{"datname"}, []string{"postgres"}, []string{"testdb"})))
 }
 
 func TestDatabasesCommand(t *testing.T) {
 	isolateCache(t)
-	fakePsqlDatabases(t)
+	fakePGDatabases(t)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 
@@ -1563,16 +1632,15 @@ func TestDatabasesCommand(t *testing.T) {
 
 func TestDatabasesCommandSendsAdapterSQL(t *testing.T) {
 	isolateCache(t)
-	capture := fakePsqlDatabases(t)
+	srv := fakePGDatabases(t)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 
 	if code, _, errb := run(t, "databases", "--host", "testpg", "--config", cfg); code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb)
 	}
-	stdin, _ := os.ReadFile(filepath.Join(capture, "stdin"))
-	if !strings.Contains(string(stdin), "pg_database") {
-		t.Fatalf("databases must send the adapter's list query, sent %q", stdin)
+	if sent := strings.Join(srv.SQL(), "\n"); !strings.Contains(sent, "pg_database") {
+		t.Fatalf("databases must send the adapter's list query, sent %q", sent)
 	}
 }
 
@@ -1581,7 +1649,7 @@ func TestDatabasesCommandSendsAdapterSQL(t *testing.T) {
 // the completion helper can find it without resolving a credential.
 func TestDatabasesCommandWritesCacheKeyedOnConfigLabel(t *testing.T) {
 	isolateCache(t)
-	fakePsqlDatabases(t)
+	fakePGDatabases(t)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 
@@ -1616,7 +1684,7 @@ func TestDatabasesCommandCanonicalFlagPosition(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateCache(t)
-			fakePsqlDatabases(t)
+			fakePGDatabases(t)
 			t.Setenv("DBQ_TEST_PW", "pw")
 			cfg := testConfig(t)
 			code, out, errb := run(t, append(tc.args, "--config", cfg)...)
@@ -1632,7 +1700,7 @@ func TestDatabasesCommandCanonicalFlagPosition(t *testing.T) {
 
 func TestDatabasesCommandJSONOutput(t *testing.T) {
 	isolateCache(t)
-	fakePsqlDatabases(t)
+	fakePGDatabases(t)
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 
@@ -1655,11 +1723,7 @@ func TestDatabasesCommandJSONOutput(t *testing.T) {
 func TestDatabasesCommandClientFailure(t *testing.T) {
 	isolateCache(t)
 	needsClassifier(t)
-	fakePsql(t, `
-cat > /dev/null
-echo 'FATAL: permission denied' >&2
-exit 1
-`)
+	fakePG(t, replyAll(pgfake.Error("42501", "permission denied")))
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 
@@ -1678,15 +1742,15 @@ exit 1
 func TestIntrospectAlsoRefreshesDatabaseList(t *testing.T) {
 	isolateCache(t)
 	needsClassifier(t)
-	fakePsql(t, `
-sql=$(cat)
-case "$sql" in
-  *information_schema*) printf 'table_name,column_name\npeople,id\n'; exit 0 ;;
-  *pg_database*)        printf 'datname\npostgres\ntestdb\n'; exit 0 ;;
-esac
-echo "unexpected sql: $sql" >&2
-exit 1
-`)
+	fakePG(t, func(q pgfake.Query) pgfake.Reply {
+		switch {
+		case strings.Contains(q.SQL, "information_schema"):
+			return pgfake.Rows([]string{"table_name", "column_name"}, []string{"people", "id"})
+		case strings.Contains(q.SQL, "pg_database"):
+			return pgfake.Rows([]string{"datname"}, []string{"postgres"}, []string{"testdb"})
+		}
+		return pgfake.Error("XX000", "unexpected sql: "+q.SQL)
+	})
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 
@@ -1712,14 +1776,12 @@ exit 1
 func TestIntrospectDatabaseListFailureIsNonFatal(t *testing.T) {
 	isolateCache(t)
 	needsClassifier(t)
-	fakePsql(t, `
-sql=$(cat)
-case "$sql" in
-  *information_schema*) printf 'table_name,column_name\npeople,id\n'; exit 0 ;;
-esac
-echo 'FATAL: permission denied for pg_database' >&2
-exit 1
-`)
+	fakePG(t, func(q pgfake.Query) pgfake.Reply {
+		if strings.Contains(q.SQL, "information_schema") {
+			return pgfake.Rows([]string{"table_name", "column_name"}, []string{"people", "id"})
+		}
+		return pgfake.Error("42501", "permission denied for pg_database")
+	})
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 
@@ -1746,13 +1808,12 @@ exit 1
 func TestQueryDoesNotRefreshDatabaseList(t *testing.T) {
 	seedSchemaCache(t)
 	needsClassifier(t)
-	fakePsql(t, `
-sql=$(cat)
-case "$sql" in
-  *pg_database*) echo 'query must not list databases' >&2; exit 9 ;;
-esac
-printf 'id\n1\n'
-`)
+	fakePG(t, func(q pgfake.Query) pgfake.Reply {
+		if strings.Contains(q.SQL, "pg_database") {
+			return pgfake.Error("XX000", "query must not list databases")
+		}
+		return pgfake.Rows([]string{"id"}, []string{"1"})
+	})
 	t.Setenv("DBQ_TEST_PW", "pw")
 	cfg := testConfig(t)
 

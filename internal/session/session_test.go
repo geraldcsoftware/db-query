@@ -5,12 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/dblist"
+	"github.com/geraldcsoftware/db-query/internal/pgfake"
 )
 
 func writeFile(t *testing.T, dir, name, body string) string {
@@ -24,11 +26,15 @@ func writeFile(t *testing.T, dir, name, body string) string {
 
 func testConfig(t *testing.T) string {
 	t.Helper()
+	port := os.Getenv("DBQ_TEST_PGPORT")
+	if port == "" {
+		port = "5432"
+	}
 	return writeFile(t, t.TempDir(), "config.toml", `
 [hosts.testpg]
 provider   = "postgres"
-host       = "localhost"
-port       = 5432
+host       = "127.0.0.1"
+port       = `+port+`
 database   = "testdb"
 username   = "app"
 credential = "env:DBQ_SESSION_TEST_PW"
@@ -65,15 +71,13 @@ func TestSetupMissingHost(t *testing.T) {
 	}
 }
 
-// fakePsql puts a psql stub on PATH, mirroring internal/cli's test helper of
-// the same shape.
-func fakePsql(t *testing.T, script string) {
+// fakePG starts a fake postgres server and points testConfig at it, mirroring
+// internal/cli's test helper of the same shape.
+func fakePG(t *testing.T, h pgfake.Handler) *pgfake.Server {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "psql"), []byte("#!/bin/sh\n"+script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	srv := pgfake.Start(t, h)
+	t.Setenv("DBQ_TEST_PGPORT", strconv.Itoa(srv.Port))
+	return srv
 }
 
 // TestListDatabasesWritesCache pins the pairing that makes the listing worth
@@ -83,7 +87,9 @@ func fakePsql(t *testing.T, script string) {
 func TestListDatabasesWritesCache(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("DBQ_SESSION_TEST_PW", "pw")
-	fakePsql(t, "cat > /dev/null\nprintf 'datname\\npostgres\\ntestdb\\n'")
+	fakePG(t, func(pgfake.Query) pgfake.Reply {
+		return pgfake.Rows([]string{"datname"}, []string{"postgres"}, []string{"testdb"})
+	})
 	c := CommonFlags{Host: "testpg", Config: testConfig(t), Output: "text", Timeout: 10 * time.Second}
 
 	r, code := Setup(c, io.Discard)

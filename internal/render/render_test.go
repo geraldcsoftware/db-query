@@ -236,3 +236,50 @@ func TestErrorHonorsFormat(t *testing.T) {
 		}
 	})
 }
+
+func TestRenderAllSeveralSets(t *testing.T) {
+	one := "1"
+	two := "2"
+	sets := []adapter.Rows{
+		{Columns: []string{"a"}, Rows: [][]*string{{&one}}},
+		{Columns: []string{"b"}, Rows: [][]*string{{&two}, {nil}}},
+	}
+	tests := []struct{ format, want string }{
+		{"text", "a\n1\n\nb\n2\n\n"},
+		{"json", "[\n  [\n    {\"a\": \"1\"}\n  ],\n  [\n    {\"b\": \"2\"},\n    {\"b\": null}\n  ]\n]\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.format, func(t *testing.T) {
+			var b strings.Builder
+			if err := RenderAll(&b, tt.format, sets, Options{}); err != nil {
+				t.Fatal(err)
+			}
+			if b.String() != tt.want {
+				t.Errorf("got %q, want %q", b.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderAllOneSetMatchesRender(t *testing.T) {
+	v := "x"
+	rows := adapter.Rows{Columns: []string{"c"}, Rows: [][]*string{{&v}}}
+	for _, format := range []string{"text", "json", "table"} {
+		var all, single strings.Builder
+		if err := RenderAll(&all, format, []adapter.Rows{rows}, Options{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := Render(&single, format, rows, Options{}); err != nil {
+			t.Fatal(err)
+		}
+		if all.String() != single.String() {
+			t.Errorf("%s: RenderAll %q, Render %q", format, all.String(), single.String())
+		}
+	}
+	var none, empty strings.Builder
+	_ = RenderAll(&none, "json", nil, Options{})
+	_ = Render(&empty, "json", adapter.Rows{}, Options{})
+	if none.String() != empty.String() {
+		t.Errorf("no sets: got %q, want %q", none.String(), empty.String())
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/dblist"
+	"github.com/geraldcsoftware/db-query/internal/pgfake"
 	"github.com/geraldcsoftware/db-query/internal/schema"
 	"github.com/geraldcsoftware/db-query/internal/session"
 )
@@ -131,19 +133,24 @@ func bootstrapConfig(t *testing.T) string {
 	t.Helper()
 	t.Setenv("DBQ_TUI_TEST_PW", "pw")
 	path := filepath.Join(t.TempDir(), "config.toml")
+	port := strconv.Itoa(testPort())
 	body := `
 [hosts.testpg]
 provider   = "postgres"
 host       = "localhost"
+port       = ` + port + `
 database   = "testdb"
 username   = "app"
 credential = "env:DBQ_TUI_TEST_PW"
+sslmode    = "disable"
 
 [hosts.nodb]
 provider   = "postgres"
 host       = "localhost"
+port       = ` + port + `
 username   = "app"
 credential = "env:DBQ_TUI_TEST_PW"
+sslmode    = "disable"
 `
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -156,7 +163,9 @@ credential = "env:DBQ_TUI_TEST_PW"
 func listingPsql(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	fakeBin(t, "psql", "cat > /dev/null\nprintf 'datname\\nalpha\\ntestdb\\n'")
+	fakePG(t, func(pgfake.Query) pgfake.Reply {
+		return pgfake.Rows([]string{"datname"}, []string{"alpha"}, []string{"testdb"})
+	})
 }
 
 // failingPsql stubs a catalog listing that cannot reach the host, and
@@ -164,7 +173,7 @@ func listingPsql(t *testing.T) {
 func failingPsql(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	fakeBin(t, "psql", "cat > /dev/null\necho 'FATAL: could not connect' >&2\nexit 1")
+	unreachablePG(t)
 }
 
 func bootstrapFlags(cfg string) session.CommonFlags {
@@ -174,8 +183,8 @@ func bootstrapFlags(cfg string) session.CommonFlags {
 // TestBootstrapPicksDatabaseAfterHostPicker is the flow the interactive
 // launch exists for: no --host and no --database, so both are chosen.
 func TestBootstrapPicksDatabaseAfterHostPicker(t *testing.T) {
-	cfg := bootstrapConfig(t)
 	listingPsql(t)
+	cfg := bootstrapConfig(t)
 	seedSchema(t, "localhost", "alpha")
 	shown := stubPickers(t, map[string]string{hostPrompt: "testpg", databasePrompt: "alpha"})
 
@@ -198,8 +207,8 @@ func TestBootstrapPicksDatabaseAfterHostPicker(t *testing.T) {
 // TestBootstrapKeepsExplicitDatabase: --database/DB_QUERY_DATABASE is an
 // answer already given, even when the host itself was picked interactively.
 func TestBootstrapKeepsExplicitDatabase(t *testing.T) {
-	cfg := bootstrapConfig(t)
 	listingPsql(t)
+	cfg := bootstrapConfig(t)
 	shown := stubPickers(t, map[string]string{hostPrompt: "testpg"})
 
 	c := bootstrapFlags(cfg)
@@ -221,8 +230,8 @@ func TestBootstrapKeepsExplicitDatabase(t *testing.T) {
 // a database is the established way to launch straight into the TUI, so it
 // must stay promptless.
 func TestBootstrapKeepsConfiguredDatabase(t *testing.T) {
-	cfg := bootstrapConfig(t)
 	listingPsql(t)
+	cfg := bootstrapConfig(t)
 	shown := stubPickers(t, nil)
 
 	c := bootstrapFlags(cfg)
@@ -244,8 +253,8 @@ func TestBootstrapKeepsConfiguredDatabase(t *testing.T) {
 // all cannot run a query, so it is worth a prompt even though --host was
 // given explicitly.
 func TestBootstrapPicksDatabaseWhenNoneResolved(t *testing.T) {
-	cfg := bootstrapConfig(t)
 	listingPsql(t)
+	cfg := bootstrapConfig(t)
 	seedSchema(t, "localhost", "alpha")
 	shown := stubPickers(t, map[string]string{databasePrompt: "alpha"})
 
@@ -268,8 +277,8 @@ func TestBootstrapPicksDatabaseWhenNoneResolved(t *testing.T) {
 // do", so it must abort startup silently and unlaunchably, exactly as
 // quitting the host picker does.
 func TestBootstrapDatabasePickerQuitAborts(t *testing.T) {
-	cfg := bootstrapConfig(t)
 	listingPsql(t)
+	cfg := bootstrapConfig(t)
 	stubPickers(t, map[string]string{hostPrompt: "testpg", databasePrompt: ""})
 
 	var errb strings.Builder
@@ -288,7 +297,7 @@ func TestBootstrapDatabasePickerQuitAborts(t *testing.T) {
 func resolvedFor(t *testing.T, name string) session.Resolved {
 	t.Helper()
 	r := testResolved(t)
-	r.Host = config.HostConfig{Name: name, Host: "localhost", Database: "testdb"}
+	r.Host = config.HostConfig{Name: name, Host: "localhost", Port: testPort(), Database: "testdb", Extra: map[string]string{"sslmode": "disable"}}
 	return r
 }
 
@@ -325,7 +334,7 @@ func TestDatabaseChoicesFailsWithNothingToOffer(t *testing.T) {
 	if names != nil {
 		t.Fatalf("names = %v, want none", names)
 	}
-	if !strings.Contains(errb.String(), "could not connect") {
+	if !strings.Contains(errb.String(), "failed to connect") {
 		t.Fatalf("stderr = %q, want the listing's own error", errb.String())
 	}
 }

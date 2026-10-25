@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -124,6 +125,47 @@ func (sqlserverAdapter) Parse(r executor.RawResult) (Rows, error) {
 	return rows, nil
 }
 
+// Execute runs q through sqlcmd: Build, then the central executor, then Parse.
+// sqlcmd prints its result sets back to back with nothing reliable between
+// them, so a submission is read as a single result set, as it always has been.
+func (a sqlserverAdapter) Execute(ctx context.Context, cred credential.Credential, host config.HostConfig, q Query) ([]Rows, error) {
+	inv, err := a.Build(host, q)
+	if err != nil {
+		return nil, &LocalError{Msg: err.Error()}
+	}
+	inv.Env = a.Env(cred, host)
+	res, err := executor.Run(ctx, inv)
+	// executor.Run reports a deadline but not an explicit cancel, which kills
+	// the process and so arrives as an ordinary nonzero exit. Checking ctx
+	// first is what keeps a cancel from being reported as a SQL error.
+	if ctx.Err() != nil {
+		return nil, interrupted(inv.Argv[0], ctx.Err())
+	}
+	if err != nil {
+		return nil, err
+	}
+	if res.ExitCode != 0 {
+		// go-sqlcmd prints login/connection errors to stdout even with
+		// -r 1, so fall back to stdout when stderr is empty.
+		detail := strings.TrimSpace(string(res.Stderr))
+		if detail == "" {
+			detail = strings.TrimSpace(string(res.Stdout))
+		}
+		return nil, &QueryError{
+			Msg:    fmt.Sprintf("%s exited %d: %s", inv.Argv[0], res.ExitCode, detail),
+			Schema: a.IsSchemaError(res),
+		}
+	}
+	rows, err := a.Parse(res)
+	if err != nil {
+		return nil, &LocalError{Msg: err.Error()}
+	}
+	if len(rows.Columns) == 0 {
+		return nil, nil
+	}
+	return []Rows{rows}, nil
+}
+
 // Legacy sqlcmd prefixes engine errors with "Msg 207/208"; go-sqlcmd
 // prints only the message text, so match both shapes.
 var mssqlSchemaErr = regexp.MustCompile(`\bMsg 20[78]\b|Invalid column name|Invalid object name`)
@@ -193,7 +235,7 @@ func (sqlserverAdapter) Classify(string) (sqlscan.Verdict, error) {
 // directive -X would have blocked, under test, so the flag would add risk
 // without adding a control. Revisit once -X is confirmed against a real
 // instance.
-func (sqlserverAdapter) PlanInvocation(host config.HostConfig, stmt string) (executor.Invocation, error) {
+func (a sqlserverAdapter) PlanInvocation(cred credential.Credential, host config.HostConfig, stmt string) (executor.Invocation, error) {
 	if strings.TrimSpace(stmt) == "" {
 		return executor.Invocation{}, fmt.Errorf("empty statement")
 	}
@@ -208,7 +250,7 @@ func (sqlserverAdapter) PlanInvocation(host config.HostConfig, stmt string) (exe
 		"-Y", "0",
 	}
 	sql := "SET SHOWPLAN_XML ON;\nGO\n" + stmt + "\nGO\n"
-	return executor.Invocation{Argv: argv, Stdin: strings.NewReader(sql)}, nil
+	return executor.Invocation{Argv: argv, Env: a.Env(cred, host), Stdin: strings.NewReader(sql)}, nil
 }
 
 // mssqlStatementType picks the StatementType attribute out of a showplan

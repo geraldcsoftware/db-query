@@ -74,6 +74,7 @@ func evaluate(r session.Resolved, c commonFlags, p precheckFlags, sql string, pa
 	doc := precheck.Evaluate(precheck.Input{
 		Adapter:    r.Adapter,
 		Host:       r.Host,
+		Cred:       r.Cred,
 		SQL:        sql,
 		Params:     params,
 		Source:     p.source,
@@ -90,7 +91,6 @@ func evaluate(r session.Resolved, c commonFlags, p precheckFlags, sql string, pa
 // that §11's rule holds: the executor runs invocations, nothing else does.
 func plannerFor(r session.Resolved, c commonFlags) precheck.PlanRunner {
 	return func(inv executor.Invocation) (executor.RawResult, error) {
-		inv.Env = r.Adapter.Env(r.Cred, r.Host)
 		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 		defer cancel()
 		return executor.Run(ctx, inv)
