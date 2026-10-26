@@ -71,7 +71,8 @@ func evaluate(r *session.Session, c commonFlags, p precheckFlags, sql string, pa
 		ParamValues: params,
 	}
 	// --timeout bounds the pre-check the way it bounds the run. The planner, for
-	// a provider that has one, uses the session the query then runs on.
+	// a provider that has one, connects through the session; it spends that
+	// connection, so the query itself runs on a fresh one.
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 	doc := precheck.Evaluate(ctx, precheck.Input{

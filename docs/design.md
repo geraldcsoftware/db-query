@@ -2037,8 +2037,10 @@ type Runner interface {
 }
 ```
 
-`session.Session` is the `Runner`, so a planner plans on the session the
-submission then runs on (§13.19). The gate hands over the runner and never
+`session.Session` is the `Runner`, so a planner connects the way the run does
+(§13.19). As first written the planner then left that connection for the run;
+§13.21 makes planning spend it, so the run gets a fresh one. The gate hands
+over the runner and never
 learns which mechanism ran: postgres parses offline and never touches it;
 SQL Server checks the parameter names, splits the submission with the lexical
 pre-pass, plans each statement on the runner's connection and builds the
@@ -2059,4 +2061,69 @@ unreachable. `--timeout` bounds the pre-check through `Evaluate`'s new ctx
 argument, as it bounded the closure. SQL Server's classifier, handed a connection of
 another provider by a miswired runner, refuses to plan on it rather than
 passing.
+
+### 13.21 Corrections after review (amends §13.17, §13.19, §13.20)
+
+A review of the branch raised ten findings. These were real and are fixed.
+
+**Planning is not free of side effects (§13.19, §13.20).** `SHOWPLAN_XML` does
+not execute the statements it plans, which holds for the SETs the review named
+(`NOEXEC`, `ROWCOUNT`, `IMPLICIT_TRANSACTIONS`, `LANGUAGE`, `USE`: none took
+effect, verified against SQL Server 2022). Parse-time settings do take effect,
+as the text is parsed: a planned `SET PARSEONLY ON` left every later query on
+the session returning nothing, and `SET QUOTED_IDENTIFIER OFF` changed
+`@@OPTIONS`, neither with an error. Since §13.19 the run shared that session.
+The planner now marks its connection unusable before planning, unconditionally,
+so the runner opens a fresh one for the run. No cleanup could name every
+parse-time setting, so the session that planned is never the session that
+runs. The SQL Server CLI query is back to two logins (plan, then run); a schema
+build still shares the run's.
+
+**Parameterised batches are scoped (§13.17, §13.19).** TDS binds parameters
+only through `sp_executesql`, so a batch that uses one runs as that call, and a
+`#temporary` table, `SET` or `USE` in it is gone when it returns (verified).
+This is inherent to server-side binding and is documented rather than worked
+around: a batch without parameters keeps its state as before.
+
+**Parameters keep index seeks (§13.17).** An ASCII value is sent as `varchar`,
+any other as `nvarchar`. An `nvarchar` parameter compared with a `varchar`
+column converts the column and can turn a seek into a scan; ASCII is identical
+in every SQL Server code page, and against an `nvarchar` column the `varchar`
+parameter is the side converted. The planner declares the same types.
+
+**Every plan statement is judged (§13.17).** `StatementType` is read whatever
+characters it holds, and a plan with more statement elements than readable
+types is opaque, so a statement can no longer drop out of the worst class by
+not matching.
+
+**An idle session is checked before reuse (§13.19).** A connection the server
+or a firewall dropped while idle is still `Usable`, since nothing has failed on
+it. `Conn` gains `Ping`, and a session idle for over 30 seconds pings before the
+next run and reconnects if the ping fails, rather than failing the user's run.
+The run itself is never retried, since it may already have done something.
+
+**Quitting is bounded (§13.19).** `Close` waits for a run still finishing on
+the session; the interactive mode now gives up after three seconds on exit, as
+the process closing the socket ends the session on the server anyway.
+
+**`GO5` is not a separator.** The repeat count must be set apart by whitespace,
+as sqlcmd's `GO [count]` is, so a line holding an identifier such as `GO5` no
+longer splits a statement. The pre-pass and the batch splitter share the rule.
+
+**A refused savepoint is named as such.** A script inside a caller's failed
+transaction is refused at its `SAVEPOINT` before anything is sent, as before;
+the error now says "starting the script's savepoint" rather than "starting the
+transaction".
+
+These were judged not worth the code:
+
+- *The submission is validated twice* (`Check`, then `Conn.Execute`). Both are
+  a lexical scan costing microseconds against a network round trip, and the
+  second keeps a `Conn` safe for any caller that skips `Check`.
+- *Two round trips per planned statement.* The `SET` must stand alone in its
+  batch, so the pair cannot merge, and the per-statement `SET` is the defence
+  of §13.17. Under sqlcmd each statement cost a whole process and login.
+- *An unbounded `GO` count.* It is sqlcmd's own feature and the same batch each
+  repetition, so the pre-check's verdict covers every repetition; a count
+  that exhausts memory is the caller's request.
 

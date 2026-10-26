@@ -344,10 +344,16 @@ db-query query --host reporting --param who=Grace \
   "SELECT id FROM people WHERE name = @who"
 ```
 
-- Every value is sent as `nvarchar`, sized to the value. SQL Server converts it
+- A value of plain ASCII is sent as `varchar`, any other as `nvarchar`, sized to
+  the value. `varchar` keeps an index seek on a `varchar` column, which an
+  `nvarchar` parameter would turn into a scan. SQL Server converts the value
   where the statement compares it with another type, so `WHERE id = @min`
   against an `int` column works as written. A few places take no implicit
   conversion, such as `TOP` and `OFFSET`: write `TOP (CAST(@n AS int))`.
+- A batch that uses a parameter is run through `sp_executesql`, which scopes
+  what it creates: a `#temporary` table, a `SET` or a `USE` in that batch is
+  gone when it ends. Create the table in a batch of its own, without
+  parameters, and fill it in the next.
 - Names match case-insensitively, as T-SQL variable names do under the default
   collations, and a name may not start with a digit. Pass the name without its
   `@`; `--param @who=Grace` is refused with a pointer to `--param who=Grace`.
@@ -389,7 +395,8 @@ A SQL Server submission runs the way `sqlcmd` ran it, batch by batch:
   three times. Everything between two `GO` lines is sent as one batch, so its
   statements share their variables.
 - All batches run on one connection, so a temporary table or a `SET` made in
-  one batch is still there in the next.
+  one batch is still there in the next, unless that batch uses a parameter
+  (see [Parameters](#parameters)).
 - There is **no implicit transaction**. The first batch to fail stops the run
   and nothing after it is sent, but what earlier batches did stays done. Wrap
   the script in `BEGIN TRANSACTION` … `COMMIT` with `SET XACT_ABORT ON` if it
@@ -622,9 +629,12 @@ a state nothing can vouch for, so the next run opens a fresh connection; any
 open transaction is gone with the old one. A run that the server merely
 refuses, an unknown column say, keeps the session.
 
-On the command line, one invocation is one connection too: the SQL Server
-pre-check, a first-time schema build and the query itself share it, where they
-used to log in separately.
+On the command line, one invocation is one connection too: a first-time schema
+build and the query share it, where they used to log in separately. The one
+exception is the SQL Server pre-check, which plans on a connection of its own
+and discards it, because planning can change parse-time settings of the session
+it runs on (`SET PARSEONLY`, `SET QUOTED_IDENTIFIER`) without any error to
+notice.
 
 ### Switching database
 

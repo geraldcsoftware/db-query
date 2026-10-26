@@ -125,10 +125,21 @@ func TestSQLServerPlan(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want0 := []any{sql.Named("who", "Ada")}
-		want1 := []any{sql.Named("min", "2")}
+		want0 := []any{sql.Named("who", mssql.VarChar("Ada"))}
+		want1 := []any{sql.Named("min", mssql.VarChar("2"))}
 		if !reflect.DeepEqual(got[0].args, want0) || !reflect.DeepEqual(got[1].args, want1) {
 			t.Fatalf("args = %v / %v", got[0].args, got[1].args)
+		}
+	})
+
+	t.Run("ASCII binds as varchar, anything else as nvarchar", func(t *testing.T) {
+		got, err := a.plan(Query{SQL: "SELECT @a, @b", Params: map[string]string{"a": "plain", "b": "café"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []any{sql.Named("a", mssql.VarChar("plain")), sql.Named("b", "café")}
+		if !reflect.DeepEqual(got[0].args, want) {
+			t.Fatalf("args = %#v", got[0].args)
 		}
 	})
 

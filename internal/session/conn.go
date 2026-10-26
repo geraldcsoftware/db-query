@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 )
@@ -17,19 +18,33 @@ import (
 type Session struct {
 	Resolved
 
-	mu   sync.Mutex
-	conn adapter.Conn
+	mu       sync.Mutex
+	conn     adapter.Conn
+	lastUsed time.Time
 }
+
+// idleCheck is how long a connection may sit unused before it is pinged on
+// its next use. A server's or a firewall's idle timeout is minutes at the
+// least, so this costs a round trip only after a pause a user would notice.
+var idleCheck = 30 * time.Second // a var so tests can shorten it
 
 // New wraps r in a Session. Nothing is opened until the first run.
 func New(r Resolved) *Session { return &Session{Resolved: r} }
 
 // With runs f on the session's connection, opening or replacing it first. It
 // makes a Session an adapter.Runner, which is how a classifier that asks the
-// engine's planner reaches the same session the submission then runs on.
+// engine's planner reaches the server.
 func (s *Session) With(ctx context.Context, f func(adapter.Conn) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A connection dropped by the server while idle is still Usable, since
+	// nothing has failed on it yet; pinging it here means the dead connection
+	// is replaced rather than costing the user a failed run. Retrying the run
+	// itself would not be safe: it might already have done something.
+	if s.conn != nil && s.conn.Usable() && time.Since(s.lastUsed) > idleCheck && s.conn.Ping(ctx) != nil {
+		_ = s.conn.Close() // it is dead; how it closes changes nothing
+		s.conn = nil
+	}
 	if s.conn != nil && !s.conn.Usable() {
 		_ = s.conn.Close() // it is being discarded; how it closes changes nothing
 		s.conn = nil
@@ -41,6 +56,7 @@ func (s *Session) With(ctx context.Context, f func(adapter.Conn) error) error {
 		}
 		s.conn = c
 	}
+	defer func() { s.lastUsed = time.Now() }()
 	return f(s.conn)
 }
 

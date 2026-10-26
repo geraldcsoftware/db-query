@@ -139,12 +139,18 @@ type Conn interface {
 	// statement left it, an unknown column say, does not count.
 	Usable() bool
 
+	// Ping checks the session is still alive on the server, sending nothing
+	// of the caller's. A caller uses it before reusing a connection that has
+	// sat idle, since a server or a firewall may have dropped it meanwhile.
+	Ping(ctx context.Context) error
+
 	Close() error
 }
 
 // Runner runs f on a connection, opening one if need be. It is how Classify
 // reaches the server without owning a connection: internal/session's Session
-// is one, so the plan is made on the session the submission then runs on.
+// is one. A classifier that changes the session it plans on marks the
+// connection unusable, so the runner replaces it before anything runs.
 type Runner interface {
 	With(ctx context.Context, f func(Conn) error) error
 }

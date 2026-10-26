@@ -100,6 +100,11 @@ func (a sqlserverAdapter) Check(q Query) error {
 // temporary table or a SET made by one batch is still there for the next, as
 // it was when one sqlcmd process ran them all, and still there for the next
 // run on the same connection.
+//
+// Except in a batch that binds a parameter. That batch is sent through
+// sp_executesql, the only way TDS binds one, and what it creates is scoped to
+// the call: a #temporary table it makes, a SET or a USE it runs, are gone when
+// it returns. A batch without parameters is sent as it is and keeps them.
 func (a sqlserverAdapter) Open(ctx context.Context, cred credential.Credential, host config.HostConfig) (Conn, error) {
 	connector, err := mssql.NewConnector(a.dsn(cred, host))
 	if err != nil {
@@ -128,6 +133,8 @@ type mssqlConn struct {
 }
 
 func (c *mssqlConn) Usable() bool { return !c.broken }
+
+func (c *mssqlConn) Ping(ctx context.Context) error { return c.conn.PingContext(ctx) }
 
 func (c *mssqlConn) Close() error {
 	err := c.conn.Close()
@@ -219,7 +226,14 @@ func isMSSQLParamName(k string) bool {
 }
 
 // mssqlArgs returns the bound parameters one batch or statement references, as
-// the driver takes them. Names match case-insensitively, as variable names do
+// the driver takes them.
+//
+// A value of plain ASCII is sent as varchar, anything else as nvarchar. ASCII
+// is byte for byte the same in every SQL Server code page, so nothing is lost,
+// and it keeps an index seek on a varchar column, which an nvarchar parameter
+// would turn into a scan by converting the column. Against an nvarchar column
+// the varchar parameter is the one converted, by type precedence, so nothing
+// is lost there either. Names match case-insensitively, as variable names do
 // under the default collations, and are sent as the --param spelt them.
 func mssqlArgs(text string, params map[string]string) []any {
 	if len(params) == 0 {
@@ -229,7 +243,11 @@ func mssqlArgs(text string, params map[string]string) []any {
 	for _, ref := range sqlscan.NamedParams(text) {
 		for k, v := range params {
 			if strings.EqualFold(k, ref) {
-				args = append(args, sql.Named(k, v))
+				if isASCII(v) {
+					args = append(args, sql.Named(k, mssql.VarChar(v)))
+				} else {
+					args = append(args, sql.Named(k, v))
+				}
 				break
 			}
 		}
@@ -533,11 +551,16 @@ func (sqlserverAdapter) Classify(ctx context.Context, sql string, params map[str
 }
 
 // plan compiles each statement under SHOWPLAN_XML, which returns a plan
-// without running anything, and classifies it from the plan. It switches the
-// session back to executing before it returns, because the same connection
-// runs the submission next; if that cannot be confirmed, the connection is
-// marked unusable rather than handed back in a state where a run would return
-// plans instead of results.
+// without running anything, and classifies it from the plan.
+//
+// It leaves the connection unusable, always, so whoever owns it opens another
+// before running anything. SHOWPLAN_XML does not execute the statements it
+// plans, but the parse-time settings take effect as the text is parsed:
+// verified against SQL Server 2022, a planned SET PARSEONLY ON leaves every
+// later query on the session returning nothing, and SET QUOTED_IDENTIFIER OFF
+// changes how it parses, neither with an error to notice. No cleanup can name
+// every such setting, so the session that planned is never the session that
+// runs.
 //
 // The statements share one connection, so the SET is made again before each
 // of them. SHOWPLAN_XML still executes a SET SHOWPLAN_XML OFF it is handed,
@@ -554,18 +577,11 @@ func (sqlserverAdapter) Classify(ctx context.Context, sql string, params map[str
 //
 // A statement that does not compile is opaque, which is not an error: the
 // engine answered. An error is a failure to ask, such as a refused login.
-func (c *mssqlConn) plan(ctx context.Context, statements []string, params map[string]string) (_ []sqlscan.Statement, err error) {
+func (c *mssqlConn) plan(ctx context.Context, statements []string, params map[string]string) ([]sqlscan.Statement, error) {
 	if c.broken {
 		return nil, &LocalError{Msg: "the sqlserver connection is no longer usable"}
 	}
-	defer func() {
-		if _, offErr := c.conn.ExecContext(ctx, "SET SHOWPLAN_XML OFF"); offErr != nil {
-			c.broken = true
-			if err == nil {
-				err = mssqlFailure(ctx, offErr, "leaving the plan-only session")
-			}
-		}
-	}()
+	c.broken = true // spent, whatever happens below; see above
 
 	out := make([]sqlscan.Statement, 0, len(statements))
 	for i, stmt := range statements {
@@ -593,9 +609,10 @@ func (c *mssqlConn) plan(ctx context.Context, statements []string, params map[st
 }
 
 // mssqlPlanText puts a DECLARE for each bound parameter a statement references
-// in front of it, typed as the driver types a string argument: nvarchar of the
-// value's length, or nvarchar(max) when that is empty or over 4000 characters.
-// Only the declaration matters to the compiler, so no value is assigned.
+// in front of it, typed as the driver will declare it: varchar of the value's
+// length for ASCII (varchar(max) when empty or over 8000 characters), nvarchar
+// otherwise (nvarchar(max) over 4000 UTF-16 units). Only the declaration
+// matters to the compiler, so no value is assigned.
 func mssqlPlanText(stmt string, params map[string]string) string {
 	args := mssqlArgs(stmt, params)
 	if len(args) == 0 {
@@ -604,14 +621,32 @@ func mssqlPlanText(stmt string, params map[string]string) string {
 	decls := make([]string, len(args))
 	for i, a := range args {
 		n := a.(sql.NamedArg)
-		units := len(utf16.Encode([]rune(n.Value.(string))))
-		typ := "nvarchar(max)"
-		if units > 0 && units <= 4000 {
-			typ = fmt.Sprintf("nvarchar(%d)", units)
+		var typ string
+		switch v := n.Value.(type) {
+		case mssql.VarChar:
+			typ = "varchar(max)"
+			if len(v) > 0 && len(v) <= 8000 {
+				typ = fmt.Sprintf("varchar(%d)", len(v))
+			}
+		case string:
+			typ = "nvarchar(max)"
+			if units := len(utf16.Encode([]rune(v))); units > 0 && units <= 4000 {
+				typ = fmt.Sprintf("nvarchar(%d)", units)
+			}
 		}
 		decls[i] = "@" + n.Name + " " + typ
 	}
 	return "DECLARE " + strings.Join(decls, ", ") + ";\n" + stmt
+}
+
+// isASCII reports whether s is entirely 7-bit ASCII.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // mssqlShowplanColumn is the name SQL Server gives the one column of a
@@ -658,7 +693,13 @@ func readPlan(ctx context.Context, conn *sql.Conn, text string) (string, error) 
 // document. The full plan schema is large and versioned; this one attribute is
 // the documented statement-level verb, so matching it directly is both smaller
 // and less brittle than binding a struct to the schema.
-var mssqlStatementType = regexp.MustCompile(`StatementType="([A-Za-z ]+)"`)
+var mssqlStatementType = regexp.MustCompile(`StatementType="([^"]*)"`)
+
+// mssqlStatementElement matches the opening of every statement element a
+// showplan can hold (StmtSimple, StmtCond, StmtCursor, StmtReceive,
+// StmtUseDb and any later addition), so a statement whose type attribute is
+// missing is counted rather than skipped.
+var mssqlStatementElement = regexp.MustCompile(`<Stmt[A-Za-z]*[\s/>]`)
 
 // mssqlShowplanClass turns a showplan document into one statement's class.
 //
@@ -668,6 +709,13 @@ func mssqlShowplanClass(plan string) (sqlscan.Class, string) {
 	matches := mssqlStatementType.FindAllStringSubmatch(plan, -1)
 	if len(matches) == 0 {
 		return sqlscan.ClassOpaque, "no statement type in the plan"
+	}
+	// Every statement in the plan must be judged. One whose type could not be
+	// read would otherwise be left out of the worst class, which is a statement
+	// passing because it was not understood. The user's SQL inside the plan is
+	// an escaped attribute value, so it cannot add to either count.
+	if n := len(mssqlStatementElement.FindAllString(plan, -1)); n > len(matches) {
+		return sqlscan.ClassOpaque, fmt.Sprintf("%d of %d statements in the plan carry no type", n-len(matches), n)
 	}
 	worst, why := sqlscan.ClassRead, ""
 	for _, m := range matches {

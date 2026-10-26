@@ -3,11 +3,17 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/geraldcsoftware/db-query/internal/adapter"
+	"github.com/geraldcsoftware/db-query/internal/config"
+	"github.com/geraldcsoftware/db-query/internal/credential"
 )
 
 var mssqlOnce sync.Once
@@ -219,6 +225,42 @@ func TestSQLServerPrecheckStaysPlanOnly(t *testing.T) {
 	if check.code != 0 || check.stdout != "n\n0\n" {
 		seedMSSQL(t, "dbqtest", "IF OBJECT_ID('planner_breach') IS NOT NULL DROP TABLE planner_breach")
 		t.Fatalf("the pre-check executed a statement: %+v", check)
+	}
+}
+
+// oneConn is a Runner over a single connection, so a test can look at that
+// connection after a classifier has used it.
+type oneConn struct{ c adapter.Conn }
+
+func (r oneConn) With(_ context.Context, f func(adapter.Conn) error) error { return f(r.c) }
+
+// TestSQLServerPlanningSpendsItsConnection: a parse-time setting in a planned
+// statement takes effect on the session that planned it (SET PARSEONLY ON
+// leaves every later query returning nothing), so that session must never be
+// the one the query then runs on.
+func TestSQLServerPlanningSpendsItsConnection(t *testing.T) {
+	mssqlReady(t)
+	a, err := adapter.For("sqlserver")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, _ := strconv.Atoi(envOr("DBQ_MSSQL_PORT", "11433"))
+	host := config.HostConfig{Name: "mssql", Host: "127.0.0.1", Port: port, Database: "dbqtest",
+		Extra: map[string]string{"trustservercertificate": "true"}}
+	ctx := context.Background()
+	c, err := a.Open(ctx, credential.Credential{Username: "sa", Password: mssqlPassword}, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if !c.Usable() {
+		t.Fatal("a fresh connection is unusable")
+	}
+	if _, err := a.Classify(ctx, "SET PARSEONLY ON", nil, oneConn{c}); err != nil {
+		t.Fatal(err)
+	}
+	if c.Usable() {
+		t.Fatal("the connection that planned is still offered for the run")
 	}
 }
 

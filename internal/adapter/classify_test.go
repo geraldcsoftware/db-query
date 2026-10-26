@@ -76,18 +76,20 @@ func TestSQLServerPlanTextDeclaresBoundParams(t *testing.T) {
 	}{
 		{"no params, untouched", "SELECT 1", nil, "SELECT 1"},
 		{"unreferenced params are not declared", "SELECT 1", map[string]string{"who": "Ada"}, "SELECT 1"},
-		{"declared at the length the driver binds", "SELECT @who",
-			map[string]string{"who": "Grace"}, "DECLARE @who nvarchar(5);\nSELECT @who"},
-		{"an empty value is max, as the driver sends it", "SELECT @who",
-			map[string]string{"who": ""}, "DECLARE @who nvarchar(max);\nSELECT @who"},
-		{"length counts UTF-16 units, not bytes", "SELECT @who",
+		{"ASCII is varchar at its length", "SELECT @who",
+			map[string]string{"who": "Grace"}, "DECLARE @who varchar(5);\nSELECT @who"},
+		{"an empty value is varchar(max), as the driver sends it", "SELECT @who",
+			map[string]string{"who": ""}, "DECLARE @who varchar(max);\nSELECT @who"},
+		{"ASCII over 8000 is varchar(max)", "SELECT @who",
+			map[string]string{"who": strings.Repeat("x", 8001)}, "DECLARE @who varchar(max);\nSELECT @who"},
+		{"non-ASCII is nvarchar, counted in UTF-16 units", "SELECT @who",
 			map[string]string{"who": "héllo"}, "DECLARE @who nvarchar(5);\nSELECT @who"},
-		{"over 4000 is max", "SELECT @who",
-			map[string]string{"who": strings.Repeat("x", 4001)}, "DECLARE @who nvarchar(max);\nSELECT @who"},
+		{"non-ASCII over 4000 is nvarchar(max)", "SELECT @who",
+			map[string]string{"who": strings.Repeat("é", 4001)}, "DECLARE @who nvarchar(max);\nSELECT @who"},
 		{"the --param spelling is declared", "SELECT @WHO",
-			map[string]string{"who": "Ada"}, "DECLARE @who nvarchar(3);\nSELECT @WHO"},
+			map[string]string{"who": "Ada"}, "DECLARE @who varchar(3);\nSELECT @WHO"},
 		{"a local variable is left to the batch", "SELECT @a, @b",
-			map[string]string{"b": "1"}, "DECLARE @b nvarchar(1);\nSELECT @a, @b"},
+			map[string]string{"b": "1"}, "DECLARE @b varchar(1);\nSELECT @a, @b"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -142,6 +144,23 @@ func TestSQLServerShowplanClass(t *testing.T) {
 			"a plan with no statement type is opaque",
 			`<ShowPlanXML/>`,
 			sqlscan.ClassOpaque,
+		},
+		{
+			// A type the allowlist has never seen, whatever characters it
+			// holds, still denies rather than being skipped.
+			"an unusual verb is still judged",
+			`<StmtSimple StatementType="SELECT" /><StmtSimple StatementType="CREATE-THING 2" />`,
+			sqlscan.ClassOpaque,
+		},
+		{
+			"a statement with no type cannot hide behind one that has one",
+			`<StmtSimple StatementType="SELECT" /><StmtCond><Condition/></StmtCond>`,
+			sqlscan.ClassOpaque,
+		},
+		{
+			"user SQL in the plan is escaped and counts for nothing",
+			`<StmtSimple StatementText="SELECT '&lt;Stmt x&gt;'" StatementType="SELECT" />`,
+			sqlscan.ClassRead,
 		},
 		{
 			"an unrecognised verb denies rather than passing",

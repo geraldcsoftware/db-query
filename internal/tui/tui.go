@@ -8,6 +8,7 @@ package tui
 
 import (
 	"io"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -49,8 +50,7 @@ func Run(c session.CommonFlags, version string, stdout, stderr io.Writer) int {
 
 	final, err := p.Run()
 	if fm, ok := final.(model); ok {
-		// Ends the session cleanly, rolling back anything left open in it.
-		_ = fm.conn.Close()
+		closeBounded(fm.conn, 3*time.Second)
 	}
 	if err != nil {
 		io.WriteString(stderr, "db-query: "+err.Error()+"\n")
@@ -75,4 +75,21 @@ func Run(c session.CommonFlags, version string, stdout, stderr io.Writer) int {
 // had nothing to launch.
 func shouldLaunch(r session.Resolved) bool {
 	return r.Adapter != nil
+}
+
+// closeBounded ends the session cleanly, rolling back anything left open in it,
+// but gives up after d. Close waits for a run still finishing on the session,
+// and quitting has already cancelled that run; if the driver is slow to notice,
+// exiting anyway is right, since the process closing the socket ends the
+// session on the server just the same.
+func closeBounded(s *session.Session, d time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		_ = s.Close() // exiting either way; nothing is left to act on an error
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+	}
 }

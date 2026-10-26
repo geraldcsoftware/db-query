@@ -61,6 +61,10 @@ func TestBatches(t *testing.T) {
 		{"GOTO is not a separator", "GOTO done\ndone:\nSELECT 1",
 			[]Batch{{"GOTO done\ndone:\nSELECT 1", 1}}},
 		{"GO mid-line is not a separator", "SELECT 1 GO", []Batch{{"SELECT 1 GO", 1}}},
+		{"GO5 is an identifier, not a separator", "SELECT a,\nGO5\nFROM t", []Batch{{"SELECT a,\nGO5\nFROM t", 1}}},
+		{"a count needs no trailing space", "SELECT 1\nGO 2", []Batch{{"SELECT 1", 2}}},
+		{"two counts are not a separator", "SELECT 1\nGO 2 3", []Batch{{"SELECT 1\nGO 2 3", 1}}},
+		{"a count with CRLF", "SELECT 1\r\nGO 2\r\nSELECT 2", []Batch{{"SELECT 1", 2}, {"SELECT 2", 1}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

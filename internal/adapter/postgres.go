@@ -214,6 +214,8 @@ type pgConn struct {
 
 func (c *pgConn) Usable() bool { return !c.broken && !c.conn.IsClosed() }
 
+func (c *pgConn) Ping(ctx context.Context) error { return c.conn.Ping(ctx) }
+
 func (c *pgConn) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -264,14 +266,19 @@ const pgSavepoint = "db_query_script"
 func (c *pgConn) run(ctx context.Context, stmts []pgStatement) ([]Rows, error) {
 	script := len(stmts) > 1
 	begin, commit, rollback := "BEGIN", "COMMIT", "ROLLBACK"
+	starting, committing := "starting the transaction", "committing the transaction"
 	if script && c.conn.TxStatus() != 'I' {
+		// Inside the caller's transaction. When that transaction has already
+		// failed, the SAVEPOINT is refused and nothing of the script is sent;
+		// the server's message says the transaction is aborted.
+		starting, committing = "starting the script's savepoint", "releasing the script's savepoint"
 		begin = "SAVEPOINT " + pgSavepoint
 		commit = "RELEASE SAVEPOINT " + pgSavepoint
 		rollback = "ROLLBACK TO SAVEPOINT " + pgSavepoint + "; RELEASE SAVEPOINT " + pgSavepoint
 	}
 	if script {
 		if err := c.conn.Exec(ctx, begin).Close(); err != nil {
-			return nil, c.failed(ctx, err, "starting the transaction")
+			return nil, c.failed(ctx, err, starting)
 		}
 	}
 	var sets []Rows
@@ -299,7 +306,7 @@ func (c *pgConn) run(ctx context.Context, stmts []pgStatement) ([]Rows, error) {
 		// A deferred constraint is checked here, so the commit can fail on
 		// its own after every statement succeeded.
 		if err := c.conn.Exec(ctx, commit).Close(); err != nil {
-			return nil, c.failed(ctx, err, "committing the transaction")
+			return nil, c.failed(ctx, err, committing)
 		}
 	}
 	return sets, nil

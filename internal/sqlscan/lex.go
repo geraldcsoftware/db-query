@@ -121,22 +121,31 @@ func isDirectiveMarker(c rune, d Dialect) bool {
 	return false
 }
 
-// isGoLine reports whether a T-SQL batch separator starts at i. sqlcmd accepts
-// `GO` alone on a line, optionally with a repeat count.
+// isGoLine reports whether a T-SQL batch separator starts at i: sqlcmd's
+// `GO [count]`, alone on its line. The count, when there is one, is set apart
+// by whitespace, so a line reading GO5 is an identifier, not a separator.
 func isGoLine(src []rune, i int) bool {
-	j := i
-	if j+1 >= len(src) {
+	if i+1 >= len(src) || !(src[i] == 'G' || src[i] == 'g') || !(src[i+1] == 'O' || src[i+1] == 'o') {
 		return false
 	}
-	if !(src[j] == 'G' || src[j] == 'g') || !(src[j+1] == 'O' || src[j+1] == 'o') {
-		return false
-	}
-	for k := j + 2; k < len(src) && src[k] != '\n'; k++ {
-		if !unicode.IsSpace(src[k]) && !unicode.IsDigit(src[k]) {
-			return false
+	k := i + 2
+	skipSpace := func() {
+		for k < len(src) && src[k] != '\n' && unicode.IsSpace(src[k]) {
+			k++
 		}
 	}
-	return true
+	start := k
+	skipSpace()
+	if k < len(src) && unicode.IsDigit(src[k]) {
+		if k == start {
+			return false // GO5: no space before the count
+		}
+		for k < len(src) && unicode.IsDigit(src[k]) {
+			k++
+		}
+		skipSpace()
+	}
+	return k == len(src) || src[k] == '\n'
 }
 
 // String names a dialect, for the mechanism field of a verdict reached by the
