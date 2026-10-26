@@ -25,7 +25,7 @@ type controlledRunner struct {
 	canceled bool
 }
 
-func (r *controlledRunner) run(ctx context.Context, _ session.Resolved, _ string) ([]adapter.Rows, bool, error) {
+func (r *controlledRunner) run(ctx context.Context, _ *session.Session, _ string) ([]adapter.Rows, bool, error) {
 	r.mu.Lock()
 	r.calls++
 	r.mu.Unlock()

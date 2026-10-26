@@ -1,7 +1,7 @@
-// Package session resolves a host's adapter and credential once, and runs a
-// query through its adapter. It is the seam
+// Package session resolves a host's adapter and credential once, and runs
+// queries against it over one shared connection (Session). It is the seam
 // between internal/cli's command implementations and internal/tui's
-// interactive session — both call Setup and RunOnce so host/credential
+// interactive session — both call Setup, New and RunOnce so host/credential
 // resolution and query execution are defined exactly once. cli imports
 // session and tui; tui imports session only. Neither cli nor session ever
 // imports tui, so there is no import cycle.
@@ -104,10 +104,14 @@ func Setup(c CommonFlags, stderr io.Writer) (Resolved, int) {
 // 0 (result sets valid). It renders any error itself. When hintRefresh is set
 // a schema error also hints at --refresh-schema; the internal schema build
 // passes false, since that hint only makes sense for the user's query.
-func RunOnce(r Resolved, q adapter.Query, c CommonFlags, hintRefresh bool, stderr io.Writer) ([]adapter.Rows, int) {
+//
+// The run uses s's connection, opening it if this is the first, so the
+// commands that run several queries against one host (a schema build and then
+// the query itself) connect once.
+func RunOnce(s *Session, q adapter.Query, c CommonFlags, hintRefresh bool, stderr io.Writer) ([]adapter.Rows, int) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 	defer cancel()
-	sets, err := r.Adapter.Execute(ctx, r.Cred, r.Host, q)
+	sets, err := s.Execute(ctx, q)
 	var local *adapter.LocalError
 	var query *adapter.QueryError
 	switch {
@@ -137,8 +141,8 @@ func RunOnce(r Resolved, q adapter.Query, c CommonFlags, hintRefresh bool, stder
 // the schema cache. It is a silent side effect of the query path: the rows
 // are cached, never rendered. It returns 0 on success or RunOnce's exit
 // code on failure.
-func BuildSchema(r Resolved, cachePath string, c CommonFlags, stderr io.Writer) int {
-	sets, code := RunOnce(r, adapter.Query{SQL: r.Adapter.IntrospectSQL()}, c, false, stderr)
+func BuildSchema(s *Session, cachePath string, c CommonFlags, stderr io.Writer) int {
+	sets, code := RunOnce(s, adapter.Query{SQL: s.Adapter.IntrospectSQL()}, c, false, stderr)
 	if code != 0 {
 		return code
 	}
@@ -160,13 +164,13 @@ func BuildSchema(r Resolved, cachePath string, c CommonFlags, stderr io.Writer) 
 // never resolve one. Errors render to errOut, which a caller treating failure
 // as non-fatal sets to io.Discard so nothing prints as though the command it
 // was attached to had failed.
-func ListDatabases(r Resolved, c CommonFlags, errOut io.Writer) (adapter.Rows, int) {
-	sets, code := RunOnce(r, adapter.Query{SQL: r.Adapter.ListDatabasesSQL()}, c, false, errOut)
+func ListDatabases(s *Session, c CommonFlags, errOut io.Writer) (adapter.Rows, int) {
+	sets, code := RunOnce(s, adapter.Query{SQL: s.Adapter.ListDatabasesSQL()}, c, false, errOut)
 	if code != 0 {
 		return adapter.Rows{}, code
 	}
 	rows := adapter.First(sets)
-	if err := dblist.Write(dblist.CachePath(r.Host.Name), DatabaseNames(rows)); err != nil {
+	if err := dblist.Write(dblist.CachePath(s.Host.Name), DatabaseNames(rows)); err != nil {
 		render.Error(errOut, c.Output, err.Error())
 		return adapter.Rows{}, 1
 	}

@@ -60,7 +60,7 @@ func testResolved(t *testing.T) session.Resolved {
 
 func TestExecuteHappyPath(t *testing.T) {
 	fakePG(t, func(pgfake.Query) pgfake.Reply { return pgfake.Rows([]string{"id"}, []string{"1"}) })
-	sets, schemaErr, err := execute(context.Background(), testResolved(t), "select 1")
+	sets, schemaErr, err := executeOnce(context.Background(), testResolved(t), "select 1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestExecuteHappyPath(t *testing.T) {
 
 func TestExecuteSeveralResultSets(t *testing.T) {
 	fakePG(t, func(q pgfake.Query) pgfake.Reply { return pgfake.Rows([]string{q.SQL}) })
-	sets, _, err := execute(context.Background(), testResolved(t), "select 1; select 2")
+	sets, _, err := executeOnce(context.Background(), testResolved(t), "select 1; select 2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestExecuteSeveralResultSets(t *testing.T) {
 
 func TestExecuteSchemaError(t *testing.T) {
 	fakePG(t, func(pgfake.Query) pgfake.Reply { return pgfake.Error("42703", `column "nope" does not exist`) })
-	_, schemaErr, err := execute(context.Background(), testResolved(t), "select nope from t")
+	_, schemaErr, err := executeOnce(context.Background(), testResolved(t), "select nope from t")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -98,7 +98,7 @@ func TestExecuteCancellation(t *testing.T) {
 	fakePG(t, func(pgfake.Query) pgfake.Reply { return pgfake.Reply{Delay: 5 * time.Second} })
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, _, err := execute(ctx, testResolved(t), "select 1")
+	_, _, err := executeOnce(ctx, testResolved(t), "select 1")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 	}
@@ -108,7 +108,7 @@ func TestExecuteExplicitCancel(t *testing.T) {
 	fakePG(t, func(pgfake.Query) pgfake.Reply { return pgfake.Reply{Delay: 5 * time.Second} })
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(50*time.Millisecond, cancel)
-	_, _, err := execute(ctx, testResolved(t), "select 1")
+	_, _, err := executeOnce(ctx, testResolved(t), "select 1")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}

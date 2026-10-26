@@ -86,23 +86,65 @@ func (sqlserverAdapter) dsn(cred credential.Credential, host config.HostConfig) 
 	return u.String()
 }
 
-// open returns a single connection to host. Every batch of a submission runs
-// on it, so a temporary table or a SET made by one batch is still there for
-// the next, as it was when one sqlcmd process ran them all.
-func (a sqlserverAdapter) open(ctx context.Context, cred credential.Credential, host config.HostConfig) (*sql.DB, *sql.Conn, error) {
+// Check refuses a submission whose parameter names cannot be bound, or that
+// holds a client directive, without connecting.
+func (a sqlserverAdapter) Check(q Query) error {
+	_, err := a.plan(q)
+	return err
+}
+
+// Open connects to host as cred. ctx bounds the connection attempt only; the
+// connection lasts until Close.
+//
+// It is one session, not a pool: every batch run on it shares it, so a
+// temporary table or a SET made by one batch is still there for the next, as
+// it was when one sqlcmd process ran them all, and still there for the next
+// run on the same connection.
+func (a sqlserverAdapter) Open(ctx context.Context, cred credential.Credential, host config.HostConfig) (Conn, error) {
 	connector, err := mssql.NewConnector(a.dsn(cred, host))
 	if err != nil {
 		// The driver's message can quote the connection string, password and
 		// all, so only the fact of the failure is reported.
-		return nil, nil, &LocalError{Msg: "invalid sqlserver connection settings for host " + host.Name}
+		return nil, &LocalError{Msg: "invalid sqlserver connection settings for host " + host.Name}
 	}
 	db := sql.OpenDB(connector)
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		db.Close()
-		return nil, nil, mssqlFailure(ctx, err, "")
+		return nil, mssqlFailure(ctx, err, "")
 	}
-	return db, conn, nil
+	return &mssqlConn{db: db, conn: conn}, nil
+}
+
+// mssqlConn is one SQL Server session. It is not safe for concurrent use;
+// callers serialise runs on it, as internal/session does.
+type mssqlConn struct {
+	db   *sql.DB
+	conn *sql.Conn
+	// broken is set when a run ended in a state this code cannot vouch for:
+	// cancelled mid-batch, a dropped link, or a plan-only session that could
+	// not be switched back. The session is then replaced rather than reused.
+	broken bool
+}
+
+func (c *mssqlConn) Usable() bool { return !c.broken }
+
+func (c *mssqlConn) Close() error {
+	err := c.conn.Close()
+	if dbErr := c.db.Close(); err == nil {
+		err = dbErr
+	}
+	return err
+}
+
+// fail records whether err leaves the session in doubt. An engine error is
+// the server answering, which leaves the session as the batch left it; a
+// cancel, a timeout or a transport failure does not.
+func (c *mssqlConn) fail(ctx context.Context, err error) {
+	var me mssql.Error
+	if ctx.Err() != nil || !errors.As(err, &me) {
+		c.broken = true
+	}
 }
 
 // mssqlBatch is one GO-separated batch of a submission, ready to send: its
@@ -114,8 +156,8 @@ type mssqlBatch struct {
 }
 
 // plan splits a submission into batches and binds each one's parameters. It
-// runs before a connection is opened, so a submission with a mistake in its
-// last batch runs none of them.
+// runs before anything is sent, so a submission with a mistake in its last
+// batch runs none of them.
 //
 // Parameters are named and bound by the server through sp_executesql, so the
 // value of @name never becomes SQL text: there is nothing to quote and nothing
@@ -195,32 +237,26 @@ func mssqlArgs(text string, params map[string]string) []any {
 	return args
 }
 
-// Execute runs a submission over TDS, one GO-separated batch at a time on one
-// connection, each repeated as many times as its GO asked. The first batch to
+// Execute runs a submission over TDS, one GO-separated batch at a time, each
+// repeated as many times as its GO asked. The first batch to
 // fail stops the run and nothing after it is sent. As under sqlcmd there is no
 // implicit transaction: a batch that fails part-way keeps whatever its earlier
 // statements did, unless the batch manages its own transaction. Every result
 // set is kept, one per statement that returned columns.
-func (a sqlserverAdapter) Execute(ctx context.Context, cred credential.Credential, host config.HostConfig, q Query) ([]Rows, error) {
-	batches, err := a.plan(q)
+func (c *mssqlConn) Execute(ctx context.Context, q Query) ([]Rows, error) {
+	if c.broken {
+		return nil, &LocalError{Msg: "the sqlserver connection is no longer usable"}
+	}
+	batches, err := sqlserverAdapter{}.plan(q)
 	if err != nil {
 		return nil, err
 	}
-	if len(batches) == 0 {
-		return nil, nil
-	}
-	db, conn, err := a.open(ctx, cred, host)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-	defer conn.Close()
-
 	var sets []Rows
 	for i, b := range batches {
 		for range b.count {
-			got, err := runBatch(ctx, conn, b)
+			got, err := runBatch(ctx, c.conn, b)
 			if err != nil {
+				c.fail(ctx, err)
 				where := ""
 				if len(batches) > 1 {
 					where = fmt.Sprintf("batch %d of %d", i+1, len(batches))
@@ -465,7 +501,11 @@ func (sqlserverAdapter) Classify(string) (sqlscan.Verdict, error) {
 }
 
 // Plan compiles each statement under SHOWPLAN_XML, which returns a plan
-// without running anything, and classifies it from the plan.
+// without running anything, and classifies it from the plan. It switches the
+// session back to executing before it returns, because the same connection
+// runs the submission next; if that cannot be confirmed, the connection is
+// marked unusable rather than handed back in a state where a run would return
+// plans instead of results.
 //
 // The statements share one connection, so the SET is made again before each
 // of them. SHOWPLAN_XML still executes a SET SHOWPLAN_XML OFF it is handed,
@@ -482,24 +522,30 @@ func (sqlserverAdapter) Classify(string) (sqlscan.Verdict, error) {
 //
 // A statement that does not compile is opaque, which is not an error: the
 // engine answered. An error is a failure to ask, such as a refused login.
-func (a sqlserverAdapter) Plan(ctx context.Context, cred credential.Credential, host config.HostConfig, statements []string, params map[string]string) ([]sqlscan.Statement, error) {
+func (c *mssqlConn) Plan(ctx context.Context, statements []string, params map[string]string) (_ []sqlscan.Statement, err error) {
+	if c.broken {
+		return nil, &LocalError{Msg: "the sqlserver connection is no longer usable"}
+	}
 	if err := checkMSSQLParamNames(params); err != nil {
 		return nil, err
 	}
-	db, conn, err := a.open(ctx, cred, host)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-	defer conn.Close()
+	defer func() {
+		if _, offErr := c.conn.ExecContext(ctx, "SET SHOWPLAN_XML OFF"); offErr != nil {
+			c.broken = true
+			if err == nil {
+				err = mssqlFailure(ctx, offErr, "leaving the plan-only session")
+			}
+		}
+	}()
 
 	out := make([]sqlscan.Statement, 0, len(statements))
 	for i, stmt := range statements {
 		// If this fails, the statement must not be sent: it would execute.
-		if _, err := conn.ExecContext(ctx, "SET SHOWPLAN_XML ON"); err != nil {
+		if _, err := c.conn.ExecContext(ctx, "SET SHOWPLAN_XML ON"); err != nil {
+			c.fail(ctx, err)
 			return nil, mssqlFailure(ctx, err, "requesting a plan-only session")
 		}
-		plan, err := readPlan(ctx, conn, mssqlPlanText(stmt, params))
+		plan, err := readPlan(ctx, c.conn, mssqlPlanText(stmt, params))
 		var class sqlscan.Class
 		var why string
 		var me mssql.Error
@@ -509,6 +555,7 @@ func (a sqlserverAdapter) Plan(ctx context.Context, cred credential.Credential, 
 		case errors.As(err, &me) && ctx.Err() == nil:
 			class, why = sqlscan.ClassOpaque, "did not compile: "+firstLine(mssqlErrorText(me))
 		default:
+			c.fail(ctx, err)
 			return nil, mssqlFailure(ctx, err, "")
 		}
 		out = append(out, sqlscan.Statement{Index: i + 1, Class: class, DecidedBy: why})

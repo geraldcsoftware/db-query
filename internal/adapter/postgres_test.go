@@ -151,7 +151,7 @@ func TestPostgresExecuteSingleStatement(t *testing.T) {
 			[]string{"1", "Ada", ""},
 			[]string{"2", "Grace", pgfake.Null})
 	})
-	sets, err := postgresAdapter{}.Execute(context.Background(), testCred, fakeHost(srv), Query{SQL: "SELECT * FROM people"})
+	sets, err := execOnce(context.Background(), fakeHost(srv), Query{SQL: "SELECT * FROM people"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestPostgresExecuteRecordsColumnKinds(t *testing.T) {
 		r.OIDs = []uint32{23, 20, 1700, 701, 16, 25, 1082, 790}
 		return r
 	})
-	sets, err := postgresAdapter{}.Execute(context.Background(), testCred, fakeHost(srv), Query{SQL: "SELECT 1"})
+	sets, err := execOnce(context.Background(), fakeHost(srv), Query{SQL: "SELECT 1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestPostgresExecuteScriptRunsInOneTransaction(t *testing.T) {
 		}
 		return pgfake.Reply{}
 	})
-	sets, err := postgresAdapter{}.Execute(context.Background(), testCred, fakeHost(srv), Query{
+	sets, err := execOnce(context.Background(), fakeHost(srv), Query{
 		SQL:    "SELECT a FROM t;\nUPDATE t SET x = $1;\nSELECT b FROM t WHERE y = $1",
 		Params: map[string]string{"1": "v"},
 	})
@@ -242,7 +242,7 @@ func TestPostgresExecuteScriptStopsAtFirstError(t *testing.T) {
 		}
 		return pgfake.Rows([]string{"x"}, []string{"1"})
 	})
-	sets, err := postgresAdapter{}.Execute(context.Background(), testCred, fakeHost(srv), Query{
+	sets, err := execOnce(context.Background(), fakeHost(srv), Query{
 		SQL: "SELECT 1; SELECT nope FROM t; SELECT 3",
 	})
 	if sets != nil {
@@ -270,7 +270,7 @@ func TestPostgresExecuteOtherSQLError(t *testing.T) {
 	srv := pgfake.Start(t, func(pgfake.Query) pgfake.Reply {
 		return pgfake.Error("23505", "duplicate key value violates unique constraint")
 	})
-	_, err := postgresAdapter{}.Execute(context.Background(), testCred, fakeHost(srv), Query{SQL: "INSERT INTO t VALUES (1)"})
+	_, err := execOnce(context.Background(), fakeHost(srv), Query{SQL: "INSERT INTO t VALUES (1)"})
 	var qe *QueryError
 	if !errors.As(err, &qe) || qe.Schema {
 		t.Fatalf("err = %#v, want a non-schema QueryError", err)
@@ -284,7 +284,7 @@ func TestPostgresExecuteUnreachable(t *testing.T) {
 	srv := pgfake.Start(t, func(pgfake.Query) pgfake.Reply { return pgfake.Reply{} })
 	host := fakeHost(srv)
 	host.Port = closedPort(t)
-	_, err := postgresAdapter{}.Execute(context.Background(), testCred, host, Query{SQL: "SELECT 1"})
+	_, err := execOnce(context.Background(), host, Query{SQL: "SELECT 1"})
 	var qe *QueryError
 	if !errors.As(err, &qe) {
 		t.Fatalf("err = %v, want a QueryError, as psql's connection failure was", err)
@@ -295,10 +295,116 @@ func TestPostgresExecuteUnreachable(t *testing.T) {
 }
 
 func TestPostgresExecuteNothingToRun(t *testing.T) {
-	// No server at all: an empty submission never connects.
-	sets, err := postgresAdapter{}.Execute(context.Background(), testCred, config.HostConfig{Port: 1}, Query{SQL: " ; -- nothing\n"})
+	srv := pgfake.Start(t, func(pgfake.Query) pgfake.Reply { return pgfake.Reply{} })
+	sets, err := execOnce(context.Background(), fakeHost(srv), Query{SQL: " ; -- nothing\n"})
 	if err != nil || sets != nil {
 		t.Fatalf("sets = %v, err = %v", sets, err)
+	}
+	if got := srv.SQL(); len(got) != 0 {
+		t.Fatalf("an empty submission sent %q", got)
+	}
+}
+
+// execOnce opens a connection, runs q and closes it: one run, as every caller
+// made before connections outlived a run.
+func execOnce(ctx context.Context, host config.HostConfig, q Query) ([]Rows, error) {
+	c, err := postgresAdapter{}.Open(ctx, testCred, host)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	return c.Execute(ctx, q)
+}
+
+func TestPostgresConnRunsShareOneSession(t *testing.T) {
+	srv := pgfake.Start(t, func(pgfake.Query) pgfake.Reply { return pgfake.Rows([]string{"n"}, []string{"1"}) })
+	c, err := postgresAdapter{}.Open(context.Background(), testCred, fakeHost(srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	for range 3 {
+		if _, err := c.Execute(context.Background(), Query{SQL: "SELECT 1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if srv.Connections() != 1 {
+		t.Fatalf("connections = %d, want 1", srv.Connections())
+	}
+	if !c.Usable() {
+		t.Fatal("a session that only ran clean statements must stay usable")
+	}
+}
+
+func TestPostgresConnStaysUsableAfterAServerError(t *testing.T) {
+	srv := pgfake.Start(t, func(q pgfake.Query) pgfake.Reply {
+		return pgfake.Error("42703", `column "nope" does not exist`)
+	})
+	c, err := postgresAdapter{}.Open(context.Background(), testCred, fakeHost(srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Execute(context.Background(), Query{SQL: "SELECT nope"}); err == nil {
+		t.Fatal("want the server's error")
+	}
+	if !c.Usable() {
+		t.Fatal("the server answering with an error leaves the session usable")
+	}
+}
+
+func TestPostgresConnIsUnusableAfterACancel(t *testing.T) {
+	srv := pgfake.Start(t, func(pgfake.Query) pgfake.Reply { return pgfake.Reply{Delay: 10 * time.Second} })
+	c, err := postgresAdapter{}.Open(context.Background(), testCred, fakeHost(srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := c.Execute(ctx, Query{SQL: "SELECT pg_sleep(10)"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v", err)
+	}
+	if c.Usable() {
+		t.Fatal("a session cancelled mid-statement must not be reused")
+	}
+	var le *LocalError
+	if _, err := c.Execute(context.Background(), Query{SQL: "SELECT 1"}); !errors.As(err, &le) {
+		t.Fatalf("a run on an unusable session: err = %v, want a LocalError", err)
+	}
+}
+
+func TestPostgresScriptInsideAnOpenTransactionUsesASavepoint(t *testing.T) {
+	srv := pgfake.Start(t, func(q pgfake.Query) pgfake.Reply {
+		if strings.Contains(q.SQL, "nope") {
+			return pgfake.Error("42703", `column "nope" does not exist`)
+		}
+		return pgfake.Reply{}
+	})
+	c, err := postgresAdapter{}.Open(context.Background(), testCred, fakeHost(srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx := context.Background()
+	if _, err := c.Execute(ctx, Query{SQL: "BEGIN"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Execute(ctx, Query{SQL: "UPDATE t SET a = 1; SELECT nope"}); err == nil {
+		t.Fatal("want the second statement's error")
+	}
+	want := []string{
+		"BEGIN",
+		"SAVEPOINT db_query_script",
+		"UPDATE t SET a = 1",
+		"SELECT nope",
+		"ROLLBACK TO SAVEPOINT db_query_script; RELEASE SAVEPOINT db_query_script",
+	}
+	if got := srv.SQL(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("sent %q\nwant %q", got, want)
+	}
+	if !c.Usable() {
+		t.Fatal("a script rolled back to its savepoint leaves the session usable")
 	}
 }
 
@@ -309,7 +415,7 @@ func TestPostgresExecuteCancellation(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		start := time.Now()
-		_, err := postgresAdapter{}.Execute(ctx, testCred, fakeHost(srv), Query{SQL: "SELECT pg_sleep(10)"})
+		_, err := execOnce(ctx, fakeHost(srv), Query{SQL: "SELECT pg_sleep(10)"})
 		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "timed out") {
 			t.Fatalf("err = %v, want a timeout wrapping context.DeadlineExceeded", err)
 		}
@@ -321,7 +427,7 @@ func TestPostgresExecuteCancellation(t *testing.T) {
 	t.Run("explicit cancel", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		time.AfterFunc(100*time.Millisecond, cancel)
-		_, err := postgresAdapter{}.Execute(ctx, testCred, fakeHost(srv), Query{SQL: "SELECT pg_sleep(10)"})
+		_, err := execOnce(ctx, fakeHost(srv), Query{SQL: "SELECT pg_sleep(10)"})
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("err = %v, want context.Canceled", err)
 		}

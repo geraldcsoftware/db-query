@@ -89,7 +89,7 @@ type introspectDoneMsg struct {
 // session.ListDatabases because a listing that cannot be cancelled would hold
 // the popup open past the point the user gave up on it.
 func listDatabases(ctx context.Context, r session.Resolved) ([]string, error) {
-	rows, _, err := execute(ctx, r, r.Adapter.ListDatabasesSQL())
+	rows, _, err := executeOnce(ctx, r, r.Adapter.ListDatabasesSQL())
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +105,7 @@ func listDatabases(ctx context.Context, r session.Resolved) ([]string, error) {
 // disturb the session the panes are still showing.
 func introspectInto(ctx context.Context, r session.Resolved, database string) error {
 	r.Host.Database = database
-	rows, _, err := execute(ctx, r, r.Adapter.IntrospectSQL())
+	rows, _, err := executeOnce(ctx, r, r.Adapter.IntrospectSQL())
 	if err != nil {
 		return err
 	}
@@ -240,6 +240,11 @@ func (m model) applyDatabase(database string) (tea.Model, tea.Cmd) {
 	m.runGen++
 
 	m.session.Host.Database = database
+	// The old database's connection is let go and the new one opens on the
+	// first run, so a temporary table or open transaction from one database
+	// never follows the user into another.
+	old := m.conn
+	m.conn = session.New(m.session)
 	m.schema = newSchemaPane(m.session.Host)
 	m.schema.setSize(contentRows(m.rects[paneSchema]))
 	// Completion follows the Schema pane, or it would go on offering the
@@ -252,7 +257,7 @@ func (m model) applyDatabase(database string) (tea.Model, tea.Cmd) {
 	m = m.closeSwitcher()
 	m.statusMsg = "switched to " + database
 	m.statusGen++
-	return m, clearStatusAfter(m.statusGen)
+	return m, tea.Batch(clearStatusAfter(m.statusGen), closeSession(old))
 }
 
 // view renders the popup's box. Every state draws the same frame under the same

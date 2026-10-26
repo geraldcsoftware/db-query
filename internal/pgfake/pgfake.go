@@ -272,11 +272,18 @@ func (s *Server) serve(c net.Conn) {
 			q := Query{SQL: m.String, Simple: true}
 			s.record(q)
 			tag := strings.ToUpper(strings.TrimSpace(m.String))
-			switch tag {
-			case "BEGIN":
+			switch {
+			case tag == "BEGIN":
 				tx = 'T'
-			case "COMMIT", "ROLLBACK":
+			case tag == "COMMIT", tag == "ROLLBACK":
 				tx = 'I'
+			case strings.HasPrefix(tag, "ROLLBACK TO SAVEPOINT"):
+				// The real server leaves a failed transaction on rolling back
+				// to a savepoint; the fake only needs to say so.
+				s.handler(q)
+				if tx == 'E' {
+					tx = 'T'
+				}
 			default:
 				r := s.handler(q)
 				if r.Code != "" {
@@ -315,6 +322,14 @@ func (s *Server) serve(c net.Conn) {
 			if pending != nil && !failed {
 				q := *pending
 				s.record(q)
+				// A transaction a caller opens as an ordinary statement is
+				// tracked too, so a later run sees the session inside it.
+				switch strings.ToUpper(strings.TrimSpace(q.SQL)) {
+				case "BEGIN":
+					tx = 'T'
+				case "COMMIT", "ROLLBACK":
+					tx = 'I'
+				}
 				r := s.handler(q)
 				if r.Delay > 0 {
 					select {

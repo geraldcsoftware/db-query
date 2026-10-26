@@ -22,9 +22,9 @@ func answerRunText(t *testing.T, m model, msg queryTextMsg) model {
 }
 
 // failingRunner fails the test if a run is ever dispatched to it.
-func failingRunner(t *testing.T) func(context.Context, session.Resolved, string) ([]adapter.Rows, bool, error) {
+func failingRunner(t *testing.T) func(context.Context, *session.Session, string) ([]adapter.Rows, bool, error) {
 	t.Helper()
-	return func(_ context.Context, _ session.Resolved, sql string) ([]adapter.Rows, bool, error) {
+	return func(_ context.Context, _ *session.Session, sql string) ([]adapter.Rows, bool, error) {
 		t.Errorf("a run was dispatched with %q, and none should have been", sql)
 		return nil, false, nil
 	}
@@ -32,8 +32,8 @@ func failingRunner(t *testing.T) func(context.Context, session.Resolved, string)
 
 // neverFinishingRunner stands in for a run in flight: dispatched, and still
 // running when the test looks at the model.
-func neverFinishingRunner() func(context.Context, session.Resolved, string) ([]adapter.Rows, bool, error) {
-	return func(ctx context.Context, _ session.Resolved, _ string) ([]adapter.Rows, bool, error) {
+func neverFinishingRunner() func(context.Context, *session.Session, string) ([]adapter.Rows, bool, error) {
+	return func(ctx context.Context, _ *session.Session, _ string) ([]adapter.Rows, bool, error) {
 		<-ctx.Done()
 		return nil, false, ctx.Err()
 	}

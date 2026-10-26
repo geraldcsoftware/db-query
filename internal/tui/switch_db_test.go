@@ -135,7 +135,7 @@ func TestSwitchingDiscardsAnInFlightRunsResult(t *testing.T) {
 	m.switcher.marks = schemaMarks(m.session.Host, m.switcher.names)
 
 	// A run dispatched against the current database, captured as it would be.
-	m.runner = func(context.Context, session.Resolved, string) ([]adapter.Rows, bool, error) {
+	m.runner = func(context.Context, *session.Session, string) ([]adapter.Rows, bool, error) {
 		return nil, false, nil
 	}
 	cmd := m.startRun("select 1", "")
@@ -154,6 +154,45 @@ func TestSwitchingDiscardsAnInFlightRunsResult(t *testing.T) {
 	final, _ := after.Update(stale)
 	if strings.Contains(ansi.Strip(final.(model).results.view()), "leaked") {
 		t.Fatal("a result from the old database was rendered after the switch")
+	}
+}
+
+// TestRunsShareTheSessionUntilASwitch pins the connection's lifetime: every run
+// in one database goes through one session, and switching hands the next run a
+// new session for the new database, so nothing left open in one database (a
+// temporary table, a transaction) follows the user into the next.
+func TestRunsShareTheSessionUntilASwitch(t *testing.T) {
+	m := switcherModel(t, "alpha", "beta")
+	seedSchema(t, m.session.Host.Host, "beta")
+	m.switcher.marks = schemaMarks(m.session.Host, m.switcher.names)
+
+	var seen []*session.Session
+	m.runner = func(_ context.Context, s *session.Session, _ string) ([]adapter.Rows, bool, error) {
+		seen = append(seen, s)
+		return nil, false, nil
+	}
+	run := func(m model) model {
+		msg := m.startRun("select 1", "")()
+		next, _ := m.Update(msg)
+		return next.(model)
+	}
+	m = run(run(m))
+
+	m.switcher.cursorTo("beta")
+	m, _ = pressCode(m, tea.KeyEnter)
+	m = run(m)
+
+	if len(seen) != 3 {
+		t.Fatalf("runs = %d, want 3", len(seen))
+	}
+	if seen[0] != seen[1] {
+		t.Fatal("two runs in one database used different sessions")
+	}
+	if seen[2] == seen[0] {
+		t.Fatal("the switch kept the old database's session")
+	}
+	if seen[2].Host.Database != "beta" {
+		t.Fatalf("the new session points at %q, want beta", seen[2].Host.Database)
 	}
 }
 

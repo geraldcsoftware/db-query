@@ -606,6 +606,26 @@ holds an embedded Neovim, which is what it holds wherever one can run. `F10` is
 the way out that works everywhere either way. See
 [The Query editor](#the-query-editor).
 
+### One session per database
+
+Every run in the Query pane goes through one connection, opened on the first
+run and kept for as long as you stay on that database, as in `psql` or SSMS. A
+temporary table, a `SET`, or a transaction you `BEGIN` is still there for the
+next run. A PostgreSQL script run while a transaction is open is wrapped in a
+savepoint rather than a transaction of its own, so a failing script undoes its
+own statements and leaves yours as they were. Leaving the database (`F2`) or
+quitting closes the connection, which rolls back anything still open, so
+`COMMIT` what you mean to keep.
+
+A run that is cancelled or loses its connection part-way leaves the session in
+a state nothing can vouch for, so the next run opens a fresh connection; any
+open transaction is gone with the old one. A run that the server merely
+refuses, an unknown column say, keeps the session.
+
+On the command line, one invocation is one connection too: the SQL Server
+pre-check, a first-time schema build and the query itself share it, where they
+used to log in separately.
+
 ### Switching database
 
 `F2` opens a picker over the panes, listing the databases on the current host:

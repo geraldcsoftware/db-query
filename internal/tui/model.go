@@ -61,7 +61,12 @@ type model struct {
 	// runner performs a single query run; it defaults to execute and is
 	// swapped out in tests so run dispatch can be tested without invoking a
 	// real database.
-	runner func(ctx context.Context, r session.Resolved, sql string) ([]adapter.Rows, bool, error)
+	runner func(ctx context.Context, s *session.Session, sql string) ([]adapter.Rows, bool, error)
+
+	// conn is the session every run in the Query pane goes through, so a
+	// temporary table, a SET or a transaction one run leaves is there for the
+	// next, as in any interactive client. It is replaced on a database switch.
+	conn *session.Session
 
 	// cancel stops the currently in-flight run, if any. It is set by
 	// startRun and invoked by cancelRunning; nil whenever running is false.
@@ -112,7 +117,7 @@ type model struct {
 }
 
 func newModel(r session.Resolved, c session.CommonFlags, version string, stdout io.Writer, editor queryEditor) model {
-	m := model{session: r, flags: c, version: version, stdout: stdout, focus: paneSchema, query: editor, schema: newSchemaPane(r.Host), saved: newSavedPane(), runner: execute, results: resultsPane{}}
+	m := model{session: r, conn: session.New(r), flags: c, version: version, stdout: stdout, focus: paneSchema, query: editor, schema: newSchemaPane(r.Host), saved: newSavedPane(), runner: execute, results: resultsPane{}}
 	// Lay out against viewSize's fallback dimensions so rects and the
 	// textarea are already consistent with the first frame, which may render
 	// before the initial tea.WindowSizeMsg arrives.

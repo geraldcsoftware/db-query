@@ -47,7 +47,9 @@ func schemaMarks(host config.HostConfig, names []string) map[string]string {
 func introspect(r session.Resolved, database string, c session.CommonFlags) error {
 	r.Host.Database = database
 	var out bytes.Buffer
-	code := session.BuildSchema(r, schema.CachePath(r.Host.Host, database), c, &out)
+	s := session.New(r)
+	defer s.Close()
+	code := session.BuildSchema(s, schema.CachePath(r.Host.Host, database), c, &out)
 	if code == 0 {
 		return nil
 	}

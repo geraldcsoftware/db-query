@@ -1943,3 +1943,73 @@ that decodes numbers as doubles rounds beyond 2^53; that is the consumer's
 choice, and a string would have taken the choice away from every consumer
 that does not.
 
+### 13.19 Connections outlive a run (amends §7, §13.10, §13.13, §13.17)
+
+`Adapter.Execute(ctx, cred, host, query)` connected, ran and disconnected,
+which is the shape a child process imposes: each run was a fresh client. With
+both providers in-process, that shape cost a login per call (a SQL Server CLI
+query logged in twice, for the planner and the run, and three times when it
+also built the schema cache; measured against SQL Server 2022 as two before
+and one after) and made the interactive mode forget its session between runs.
+
+**The interface.** The adapter opens a connection and the connection runs:
+
+```go
+// Adapter
+Open(ctx context.Context, cred credential.Credential, host config.HostConfig) (Conn, error)
+Check(q Query) error // refuses what could not be sent as given, without connecting
+
+type Conn interface {
+    Execute(ctx context.Context, q Query) ([]Rows, error)
+    Plan(ctx context.Context, statements []string, params map[string]string) ([]sqlscan.Statement, error)
+    Usable() bool
+    Close() error
+}
+```
+
+`Open`'s ctx bounds the connection attempt only. A `Conn` is one session and is
+not safe for concurrent use. `Usable` turns false once a run ends in a state
+the adapter cannot vouch for: a cancel or deadline mid-statement, a transport
+failure, a postgres script whose rollback did not go through, or a SQL Server
+session whose plan-only mode could not be switched off. A server error, which
+leaves the session as the statement left it, does not count. A `Conn` refuses
+further runs once unusable rather than trusting the caller to check.
+
+**`session.Session`** wraps a `Resolved` with one lazily opened connection. It
+serialises runs, replaces an unusable connection on the next run, and is
+closed by its owner. It runs the adapter's `Check` before opening anything, so
+a submission refused for a parameter that cannot be bound or a client
+directive still never connects, as it did when `Execute` validated before
+dialling. `RunOnce`, `BuildSchema` and `ListDatabases` take a
+`*Session`, and every CLI command creates one after `Setup` and closes it on
+the way out, so a command connects at most once and a command that never
+reaches the server never connects. `session.Once` runs one query on a
+connection of its own, for runs that must not queue behind, or disturb, a
+session in use.
+
+**The interactive mode** holds one `Session` per selected database. Query-pane
+runs share it, so temporary tables, `SET`s and transactions persist between
+runs, as in any interactive client. A database switch replaces it, closing the
+old one off the event loop (its `Close` waits for a cancelled run to finish),
+so nothing open in one database follows the user into another; quitting
+closes it too. The database listing and the switcher's introspection use
+`session.Once`, since the listing can run while a query holds the session and
+the introspection targets another database.
+
+**Postgres scripts inside an open transaction.** A session can now be inside a
+transaction a previous run opened. A script wrapped in `BEGIN` … `COMMIT` there
+would commit the caller's transaction early, and a failure would roll it back
+whole. When the session is not idle, a script is therefore wrapped in a
+savepoint (`SAVEPOINT db_query_script`, released on success, rolled back to and
+released on failure), which undoes the script alone. A session in a failed
+transaction is left for the server to refuse, as `psql` would.
+
+**SQL Server planning on the shared connection (amends §13.17).** The planner
+now runs on the connection that then executes, so it switches `SHOWPLAN_XML`
+off before returning. If that cannot be confirmed the connection is marked
+unusable, so a run can never be handed a session that would return plans
+instead of results; the per-statement `SET SHOWPLAN_XML ON` of §13.17 stands.
+
+**Not changed.** Values are still buffered whole, and the pre-check is still
+reached through `ErrNeedsPlan` and a `PlanRunner`; §13.20 folds the latter in.
+

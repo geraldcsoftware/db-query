@@ -92,7 +92,7 @@ func TestSQLServerDSN(t *testing.T) {
 
 func TestSQLServerOpenDoesNotLeakTheDSN(t *testing.T) {
 	cred := credential.Credential{Username: "sa", Password: "Sekr1t-pw"}
-	_, _, err := sqlserverAdapter{}.open(context.Background(), cred, config.HostConfig{
+	_, err := sqlserverAdapter{}.Open(context.Background(), cred, config.HostConfig{
 		Name: "bad", Host: "sql01", Extra: map[string]string{"encrypt": "sometimes"},
 	})
 	var le *LocalError

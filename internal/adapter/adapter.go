@@ -73,21 +73,24 @@ func First(sets []Rows) Rows {
 	return sets[0]
 }
 
-// Adapter is one provider's way of running a submission.
+// Adapter is one provider's way of reaching a server and judging what is sent
+// to it. Everything that needs the server goes through a Conn.
 type Adapter interface {
 	Name() string
 
-	// Execute runs q against host as cred and returns one Rows for each
-	// statement that produced a result set, in submission order. A statement
-	// that returns no columns (an INSERT, a SET) contributes nothing, so a
-	// submission of only such statements returns none.
-	//
-	// The error says how far the run got, which is what the exit code
-	// reports: *LocalError when nothing was sent or the reply could not be
-	// read, *QueryError when the server or its client refused the work, and
-	// anything else when the run could not happen at all. A cancelled or
-	// expired ctx surfaces as an error wrapping ctx.Err().
-	Execute(ctx context.Context, cred credential.Credential, host config.HostConfig, q Query) ([]Rows, error)
+	// Open connects to host as cred. ctx bounds the connection attempt only;
+	// the connection lasts until its Close. A failure is a *QueryError when the
+	// server could not be reached or refused the login, a *LocalError when the
+	// host's settings could not even be turned into a connection, and an error
+	// wrapping ctx.Err() when the attempt was cancelled or timed out.
+	Open(ctx context.Context, cred credential.Credential, host config.HostConfig) (Conn, error)
+
+	// Check refuses, with a *LocalError, a submission that could not be sent
+	// as given: a parameter that cannot be bound, a client directive. It needs
+	// no connection, so a caller runs it before opening one and a refused
+	// submission never reaches the server. Conn.Execute applies the same
+	// checks; this only moves them ahead of the connection.
+	Check(q Query) error
 
 	IntrospectSQL() string          // lists user tables + columns
 	ListDatabasesSQL() string       // lists connectable database names
@@ -96,23 +99,50 @@ type Adapter interface {
 	// Classify reports what a submission would do (docs/design.md §13.13).
 	// An adapter that can decide from the text alone returns a verdict. One
 	// that needs the engine returns sqlscan.ErrNeedsPlan, and the caller then
-	// calls Plan.
+	// calls Conn.Plan.
 	//
 	// Callers switch on that error, never on a provider name, so a third
 	// provider chooses its own mechanism without touching any call site.
 	Classify(sql string) (sqlscan.Verdict, error)
 
-	// Plan classifies each statement through the engine's planner, compiling
-	// it without running it, with params bound as Execute would bind them. It
-	// returns one Statement per statement, in order. An error means the
-	// planner could not be asked at all, which is not the same as a statement
-	// it refused to compile: that one comes back opaque. Unused by an adapter
-	// whose Classify succeeds.
-	Plan(ctx context.Context, cred credential.Credential, host config.HostConfig, statements []string, params map[string]string) ([]sqlscan.Statement, error)
-
 	// Dialect selects the quoting and batching rules the lexical pre-pass
 	// applies before either mechanism runs.
 	Dialect() sqlscan.Dialect
+}
+
+// Conn is one open session on a server. Runs on it share the session, so a
+// temporary table, a SET or a transaction one run leaves open is there for the
+// next. It is not safe for concurrent use: one run at a time.
+type Conn interface {
+	// Execute runs q and returns one Rows for each statement that produced a
+	// result set, in submission order. A statement that returns no columns
+	// (an INSERT, a SET) contributes nothing, so a submission of only such
+	// statements returns none.
+	//
+	// The error says how far the run got, which is what the exit code
+	// reports: *LocalError when nothing was sent or the reply could not be
+	// read, *QueryError when the server refused the work, and anything else
+	// when the run could not happen at all. A cancelled or expired ctx
+	// surfaces as an error wrapping ctx.Err().
+	Execute(ctx context.Context, q Query) ([]Rows, error)
+
+	// Plan classifies each statement through the engine's planner, compiling
+	// it without running it, with params bound as Execute would bind them. It
+	// returns one Statement per statement, in order, and leaves the session
+	// ready to execute again. An error means the planner could not be asked
+	// at all, which is not the same as a statement it refused to compile:
+	// that one comes back opaque. Unused by an adapter whose Classify
+	// succeeds.
+	Plan(ctx context.Context, statements []string, params map[string]string) ([]sqlscan.Statement, error)
+
+	// Usable reports whether the session can take another run. It turns false
+	// once a run ends in a state the adapter cannot vouch for, such as a
+	// cancel mid-statement or a dropped link, and the caller then closes it
+	// and opens another. A server error that leaves the session as the
+	// statement left it, an unknown column say, does not count.
+	Usable() bool
+
+	Close() error
 }
 
 // LocalError is a failure on this side of the connection: the submission

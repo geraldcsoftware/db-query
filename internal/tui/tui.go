@@ -48,6 +48,10 @@ func Run(c session.CommonFlags, version string, stdout, stderr io.Writer) int {
 	editor.start(p.Send)
 
 	final, err := p.Run()
+	if fm, ok := final.(model); ok {
+		// Ends the session cleanly, rolling back anything left open in it.
+		_ = fm.conn.Close()
+	}
 	if err != nil {
 		io.WriteString(stderr, "db-query: "+err.Error()+"\n")
 		return 1

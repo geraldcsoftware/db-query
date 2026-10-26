@@ -58,7 +58,7 @@ func sourceOf(positional []string, file, savedName string) precheck.Source {
 }
 
 // evaluate builds the dry-run document for a resolved invocation.
-func evaluate(r session.Resolved, c commonFlags, p precheckFlags, sql string, params map[string]string) (precheck.Document, precheck.Tuple, []byte, error) {
+func evaluate(r *session.Session, c commonFlags, p precheckFlags, sql string, params map[string]string) (precheck.Document, precheck.Tuple, []byte, error) {
 	key, err := precheck.LoadKey()
 	if err != nil {
 		return precheck.Document{}, precheck.Tuple{}, nil, err
@@ -84,13 +84,14 @@ func evaluate(r session.Resolved, c commonFlags, p precheckFlags, sql string, pa
 	return doc, tuple, key, nil
 }
 
-// plannerFor lets the providers that classify through the engine reach it, as
-// this invocation's credential and under its --timeout.
-func plannerFor(r session.Resolved, c commonFlags) precheck.PlanRunner {
+// plannerFor lets the providers that classify through the engine reach it,
+// under this invocation's --timeout and on the connection the query will then
+// run on.
+func plannerFor(s *session.Session, c commonFlags) precheck.PlanRunner {
 	return func(statements []string, params map[string]string) ([]sqlscan.Statement, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 		defer cancel()
-		return r.Adapter.Plan(ctx, r.Cred, r.Host, statements, params)
+		return s.Plan(ctx, statements, params)
 	}
 }
 
