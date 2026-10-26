@@ -2,7 +2,9 @@ package precheck
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -69,7 +71,7 @@ func evalPostgres(t *testing.T, sql string, params map[string]string) Document {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Evaluate(Input{
+	return Evaluate(context.Background(), Input{
 		Adapter: a,
 		Host:    config.HostConfig{Name: "h", Provider: "postgres", Database: "d", ReadOnly: true},
 		SQL:     sql,
@@ -116,13 +118,13 @@ func TestPlannerProviderWithoutAConnectionIsIncompleteNotClean(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := Evaluate(Input{
+	doc := Evaluate(context.Background(), Input{
 		Adapter: a,
 		Host:    config.HostConfig{Name: "h", Provider: "sqlserver", Database: "d", ReadOnly: true},
 		SQL:     "SELECT 1",
 		Source:  Source{Kind: "arg"},
 		Key:     testKey,
-		RunPlan: nil, // no connection
+		Runner:  nil, // no connection
 	})
 	if doc.Status != StatusIncomplete {
 		t.Errorf("status: got %q, want %q", doc.Status, StatusIncomplete)
@@ -132,55 +134,85 @@ func TestPlannerProviderWithoutAConnectionIsIncompleteNotClean(t *testing.T) {
 	}
 }
 
-func evalPlanned(t *testing.T, sql string, params map[string]string, run PlanRunner) Document {
-	t.Helper()
-	a, err := adapter.For("sqlserver")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return Evaluate(Input{
-		Adapter: a,
+// fakeClassifier is an adapter whose Classify answers as told and records
+// what it was handed, so the gate can be tested apart from any mechanism.
+type fakeClassifier struct {
+	adapter.Adapter // the rest is never reached; a call through it panics
+	verdict         sqlscan.Verdict
+	err             error
+
+	sql    string
+	params map[string]string
+	runner adapter.Runner
+}
+
+func (f *fakeClassifier) Classify(_ context.Context, sql string, params map[string]string, r adapter.Runner) (sqlscan.Verdict, error) {
+	f.sql, f.params, f.runner = sql, params, r
+	return f.verdict, f.err
+}
+
+func (f *fakeClassifier) Dialect() sqlscan.Dialect { return sqlscan.DialectTSQL }
+
+type fakeRunner struct{}
+
+func (fakeRunner) With(context.Context, func(adapter.Conn) error) error { return nil }
+
+func evalFake(f *fakeClassifier, sql string, params map[string]string, r adapter.Runner) Document {
+	return Evaluate(context.Background(), Input{
+		Adapter: f,
 		Host:    config.HostConfig{Name: "h", Provider: "sqlserver", Database: "d", ReadOnly: true},
 		SQL:     sql,
 		Params:  params,
 		Source:  Source{Kind: "arg"},
 		Key:     testKey,
-		RunPlan: run,
+		Runner:  r,
 	})
 }
 
-func TestPlannerIsHandedEachStatementAndTheParams(t *testing.T) {
-	var gotStmts []string
-	var gotParams map[string]string
-	doc := evalPlanned(t, "SELECT @who;\nGO\nSELECT 2", map[string]string{"who": "Ada"},
-		func(stmts []string, params map[string]string) ([]sqlscan.Statement, error) {
-			gotStmts, gotParams = stmts, params
-			out := make([]sqlscan.Statement, len(stmts))
-			for i := range stmts {
-				out[i] = sqlscan.Statement{Index: i + 1, Class: sqlscan.ClassRead, DecidedBy: "SELECT"}
-			}
-			return out, nil
-		})
-	// The placeholder reaches the planner as written: it is the engine's own
-	// syntax, bound there, not text to be rewritten here.
-	if len(gotStmts) != 2 || gotStmts[0] != "SELECT @who" || gotStmts[1] != "SELECT 2" {
-		t.Errorf("statements: got %q", gotStmts)
+func TestClassifierIsHandedTheSubmissionAsWritten(t *testing.T) {
+	f := &fakeClassifier{verdict: sqlscan.Verdict{
+		Class: sqlscan.ClassRead, ClassName: "read", Mechanism: sqlscan.MechanismPlanner,
+	}}
+	r := fakeRunner{}
+	doc := evalFake(f, "SELECT @who;\nGO\nSELECT 2", map[string]string{"who": "Ada"}, r)
+	// The placeholder reaches the classifier as written: it is the engine's
+	// own syntax, bound there, not text to be rewritten here.
+	if f.sql != "SELECT @who;\nGO\nSELECT 2" || f.params["who"] != "Ada" {
+		t.Errorf("classifier got sql %q params %v", f.sql, f.params)
 	}
-	if gotParams["who"] != "Ada" {
-		t.Errorf("params: got %v", gotParams)
+	if f.runner != r {
+		t.Error("the caller's runner was not passed through")
 	}
 	if doc.Decision.Action != sqlscan.ActionAllow {
 		t.Errorf("action: got %q, want allow", doc.Decision.Action)
 	}
 }
 
-func TestPlannerThatSkipsAStatementFailsClosed(t *testing.T) {
-	doc := evalPlanned(t, "SELECT 1; DELETE FROM t", nil,
-		func(stmts []string, _ map[string]string) ([]sqlscan.Statement, error) {
-			return []sqlscan.Statement{{Index: 1, Class: sqlscan.ClassRead, DecidedBy: "SELECT"}}, nil
-		})
+func TestAClassifierThatCannotDecideMakesTheDocumentIncomplete(t *testing.T) {
+	f := &fakeClassifier{
+		verdict: sqlscan.Verdict{Mechanism: sqlscan.MechanismPlanner},
+		err:     errors.New("login failed"),
+	}
+	doc := evalFake(f, "SELECT 1", nil, fakeRunner{})
 	if doc.Status != StatusIncomplete || doc.Decision.Action == sqlscan.ActionAllow || doc.PrecheckToken != nil {
-		t.Errorf("a statement nobody classified passed: status %q, action %q", doc.Status, doc.Decision.Action)
+		t.Errorf("an undecided submission passed: status %q, action %q", doc.Status, doc.Decision.Action)
+	}
+	if doc.Classification.Mechanism != sqlscan.MechanismPlanner {
+		t.Errorf("mechanism: got %q, want the classifier's own", doc.Classification.Mechanism)
+	}
+	if !strings.Contains(doc.Decision.Reason, "login failed") {
+		t.Errorf("reason %q does not say why", doc.Decision.Reason)
+	}
+}
+
+func TestADirectiveIsRefusedBeforeTheClassifierRuns(t *testing.T) {
+	f := &fakeClassifier{verdict: sqlscan.Verdict{Class: sqlscan.ClassRead, ClassName: "read"}}
+	doc := evalFake(f, ":r evil.sql\nSELECT 1", nil, fakeRunner{})
+	if doc.Decision.ReasonCode != sqlscan.ReasonClientDirective {
+		t.Errorf("reason code: got %q", doc.Decision.ReasonCode)
+	}
+	if f.sql != "" {
+		t.Error("the classifier ran on a submission the pre-pass refuses")
 	}
 }
 

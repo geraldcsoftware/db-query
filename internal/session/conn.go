@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
-	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
 // Session is a resolved host together with the one connection every run
@@ -25,8 +24,10 @@ type Session struct {
 // New wraps r in a Session. Nothing is opened until the first run.
 func New(r Resolved) *Session { return &Session{Resolved: r} }
 
-// with runs f on the session's connection, opening or replacing it first.
-func (s *Session) with(ctx context.Context, f func(adapter.Conn) error) error {
+// With runs f on the session's connection, opening or replacing it first. It
+// makes a Session an adapter.Runner, which is how a classifier that asks the
+// engine's planner reaches the same session the submission then runs on.
+func (s *Session) With(ctx context.Context, f func(adapter.Conn) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conn != nil && !s.conn.Usable() {
@@ -51,28 +52,12 @@ func (s *Session) Execute(ctx context.Context, q adapter.Query) ([]adapter.Rows,
 		return nil, err
 	}
 	var sets []adapter.Rows
-	err := s.with(ctx, func(c adapter.Conn) error {
+	err := s.With(ctx, func(c adapter.Conn) error {
 		var err error
 		sets, err = c.Execute(ctx, q)
 		return err
 	})
 	return sets, err
-}
-
-// Plan asks the session's planner to classify statements.
-func (s *Session) Plan(ctx context.Context, statements []string, params map[string]string) ([]sqlscan.Statement, error) {
-	// The statements are already split, so only the parameters are left to
-	// check before connecting.
-	if err := s.Adapter.Check(adapter.Query{Params: params}); err != nil {
-		return nil, err
-	}
-	var out []sqlscan.Statement
-	err := s.with(ctx, func(c adapter.Conn) error {
-		var err error
-		out, err = c.Plan(ctx, statements, params)
-		return err
-	})
-	return out, err
 }
 
 // Close closes the connection, if one was opened. A Session can be used again

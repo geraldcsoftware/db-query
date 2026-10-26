@@ -220,13 +220,6 @@ func (c *pgConn) Close() error {
 	return c.conn.Close(ctx)
 }
 
-// Plan is unreachable for postgres, whose Classify always succeeds. It returns
-// an error rather than panicking so that a future caller wiring it by mistake
-// fails closed and visibly.
-func (c *pgConn) Plan(context.Context, []string, map[string]string) ([]sqlscan.Statement, error) {
-	return nil, fmt.Errorf("postgres classifies offline; no planner probe exists")
-}
-
 // Execute runs a submission. A single statement runs on its own. Several run
 // as one unit, in order, and the first to fail stops the run: nothing after it
 // is sent and the unit is rolled back, so a script either applies whole or not
@@ -430,9 +423,10 @@ func quotePostgresIdent(name string) string {
 }
 
 // Classify decides offline, against PostgreSQL's own grammar. It never
-// connects, so a postgres pre-check holds when the database is unreachable and
-// costs no round trip.
-func (postgresAdapter) Classify(sql string) (sqlscan.Verdict, error) {
+// touches the runner, so a postgres pre-check holds when the database is
+// unreachable and costs no round trip. Parameters are $1, $2, which the
+// grammar parses as they stand.
+func (postgresAdapter) Classify(_ context.Context, sql string, _ map[string]string, _ Runner) (sqlscan.Verdict, error) {
 	return sqlscan.ClassifyPostgres(sql), nil
 }
 

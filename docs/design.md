@@ -1293,10 +1293,10 @@ error rate.
 
 #### The interface
 
-> **Amended by §13.17.** `PlanInvocation` and `ParsePlan` were a build/parse
-> pair for a child process. They are replaced by one method,
-> `Plan(ctx, cred, host, statements, params) ([]Statement, error)`, which the
-> caller invokes through a `PlanRunner` closure it builds with the deadline.
+> **Amended by §13.17 and §13.20.** `PlanInvocation` and `ParsePlan` were a
+> build/parse pair for a child process. Since §13.20 the whole exchange below,
+> `ErrNeedsPlan` included, is one call:
+> `Classify(ctx, sql, params, runner) (Verdict, error)`.
 
 Classification joins the adapter for the same reason everything else
 provider-specific does, and it keeps §11's separation intact: **adapters build
@@ -2010,6 +2010,53 @@ off before returning. If that cannot be confirmed the connection is marked
 unusable, so a run can never be handed a session that would return plans
 instead of results; the per-statement `SET SHOWPLAN_XML ON` of §13.17 stands.
 
-**Not changed.** Values are still buffered whole, and the pre-check is still
-reached through `ErrNeedsPlan` and a `PlanRunner`; §13.20 folds the latter in.
+**Not changed.** Values are still buffered whole. The pre-check was still
+reached through `ErrNeedsPlan` and a `PlanRunner` at this point; §13.20 folds
+both into `Classify`.
+
+### 13.20 One classify call (amends §13.13, §13.14, §13.17, §13.19)
+
+The pre-check reached a verdict in three steps: `Adapter.Classify(sql)`
+returned a verdict or the sentinel `sqlscan.ErrNeedsPlan`; on the sentinel the
+gate split the submission itself, called a `PlanRunner` closure the CLI had
+built, and assembled the planner's verdict. The split existed so that only the
+executor ran anything (§11). With no executor that rule had nothing left to
+protect, and the cost stayed: the gate knew there were two mechanisms, a
+second classify path lived outside the adapter, and `Conn` carried a `Plan`
+method only one provider implemented.
+
+**The interface.** Classification is one adapter method:
+
+```go
+// Adapter
+Classify(ctx context.Context, sql string, params map[string]string, r Runner) (sqlscan.Verdict, error)
+
+// Runner runs f on a connection, opening one if need be.
+type Runner interface {
+    With(ctx context.Context, f func(Conn) error) error
+}
+```
+
+`session.Session` is the `Runner`, so a planner plans on the session the
+submission then runs on (§13.19). The gate hands over the runner and never
+learns which mechanism ran: postgres parses offline and never touches it;
+SQL Server checks the parameter names, splits the submission with the lexical
+pre-pass, plans each statement on the runner's connection and builds the
+verdict. A nil runner means no connection may be made, and a planner then
+returns an error, which the gate reports as an incomplete document, as before.
+On error, the verdict carries the mechanism that could not decide, which is
+what the incomplete document's classification names.
+
+**What went.** `sqlscan.ErrNeedsPlan`, `precheck.PlanRunner`, the gate's
+`classifyByPlan`, the CLI's `plannerFor`, and `Conn.Plan`, which became an
+unexported method of the SQL Server connection. The gate's check that a planner
+answered for every statement went with `PlanRunner`: the planner is no longer
+injectable, and it answers once per statement it is given by construction.
+
+**What stayed.** The lexical pre-pass still runs first in the gate, so a client
+directive is refused before any mechanism runs and with the database
+unreachable. `--timeout` bounds the pre-check through `Evaluate`'s new ctx
+argument, as it bounded the closure. SQL Server's classifier, handed a connection of
+another provider by a miswired runner, refuses to plan on it rather than
+passing.
 

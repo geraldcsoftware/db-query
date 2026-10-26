@@ -494,13 +494,45 @@ func quoteSQLServerIdent(name string) string {
 
 // Classify defers to the engine. No importable T-SQL parser exists as a Go
 // module, so SQL Server reaches a verdict the way §13.13 specifies: the
-// planner compiles each statement without executing it, and the plan says what
-// the statement would have done.
-func (sqlserverAdapter) Classify(string) (sqlscan.Verdict, error) {
-	return sqlscan.Verdict{}, sqlscan.ErrNeedsPlan
+// submission is split into statements by the lexical pre-pass, the planner
+// compiles each one without executing it on r's connection, and the plan says
+// what the statement would have done. A plan is reported per statement, which
+// is why the submission is split rather than planned whole.
+//
+// Parameter names are checked before r is touched, so a submission refused
+// for one never connects.
+func (sqlserverAdapter) Classify(ctx context.Context, sql string, params map[string]string, r Runner) (sqlscan.Verdict, error) {
+	none := sqlscan.Verdict{Mechanism: sqlscan.MechanismPlanner}
+	if r == nil {
+		return none, fmt.Errorf("this provider classifies through the engine, and no connection is available")
+	}
+	if err := checkMSSQLParamNames(params); err != nil {
+		return none, err
+	}
+	statements, _ := sqlscan.Scan(sql, sqlscan.DialectTSQL)
+	if len(statements) == 0 {
+		return none, fmt.Errorf("no statements found")
+	}
+	v := sqlscan.Verdict{Mechanism: sqlscan.MechanismPlanner, Version: "sqlserver engine planner"}
+	err := r.With(ctx, func(c Conn) error {
+		mc, ok := c.(*mssqlConn)
+		if !ok {
+			// A runner handing over another provider's connection is a wiring
+			// mistake; planning on it would mean nothing, so nothing passes.
+			return fmt.Errorf("sqlserver cannot plan on a %T", c)
+		}
+		var err error
+		v.Statements, err = mc.plan(ctx, statements, params)
+		return err
+	})
+	if err != nil {
+		return none, err
+	}
+	v.Reduce()
+	return v, nil
 }
 
-// Plan compiles each statement under SHOWPLAN_XML, which returns a plan
+// plan compiles each statement under SHOWPLAN_XML, which returns a plan
 // without running anything, and classifies it from the plan. It switches the
 // session back to executing before it returns, because the same connection
 // runs the submission next; if that cannot be confirmed, the connection is
@@ -522,12 +554,9 @@ func (sqlserverAdapter) Classify(string) (sqlscan.Verdict, error) {
 //
 // A statement that does not compile is opaque, which is not an error: the
 // engine answered. An error is a failure to ask, such as a refused login.
-func (c *mssqlConn) Plan(ctx context.Context, statements []string, params map[string]string) (_ []sqlscan.Statement, err error) {
+func (c *mssqlConn) plan(ctx context.Context, statements []string, params map[string]string) (_ []sqlscan.Statement, err error) {
 	if c.broken {
 		return nil, &LocalError{Msg: "the sqlserver connection is no longer usable"}
-	}
-	if err := checkMSSQLParamNames(params); err != nil {
-		return nil, err
 	}
 	defer func() {
 		if _, offErr := c.conn.ExecContext(ctx, "SET SHOWPLAN_XML OFF"); offErr != nil {

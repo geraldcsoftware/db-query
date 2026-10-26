@@ -70,7 +70,11 @@ func evaluate(r *session.Session, c commonFlags, p precheckFlags, sql string, pa
 		SQL:         sql,
 		ParamValues: params,
 	}
-	doc := precheck.Evaluate(precheck.Input{
+	// --timeout bounds the pre-check the way it bounds the run. The planner, for
+	// a provider that has one, uses the session the query then runs on.
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+	doc := precheck.Evaluate(ctx, precheck.Input{
 		Adapter:    r.Adapter,
 		Host:       r.Host,
 		SQL:        sql,
@@ -78,21 +82,10 @@ func evaluate(r *session.Session, c commonFlags, p precheckFlags, sql string, pa
 		Source:     p.source,
 		Tool:       precheck.Tool{Version: buildInfo.Version, Commit: buildInfo.Commit},
 		Key:        key,
-		RunPlan:    plannerFor(r, c),
+		Runner:     r,
 		IncludeSQL: p.showSQL,
 	})
 	return doc, tuple, key, nil
-}
-
-// plannerFor lets the providers that classify through the engine reach it,
-// under this invocation's --timeout and on the connection the query will then
-// run on.
-func plannerFor(s *session.Session, c commonFlags) precheck.PlanRunner {
-	return func(statements []string, params map[string]string) ([]sqlscan.Statement, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
-		defer cancel()
-		return s.Plan(ctx, statements, params)
-	}
 }
 
 // emitDocument writes the dry-run document and returns the process exit code.

@@ -96,14 +96,20 @@ type Adapter interface {
 	ListDatabasesSQL() string       // lists connectable database names
 	PreviewSQL(table string) string // "first 100 rows" of one table, provider-native
 
-	// Classify reports what a submission would do (docs/design.md §13.13).
-	// An adapter that can decide from the text alone returns a verdict. One
-	// that needs the engine returns sqlscan.ErrNeedsPlan, and the caller then
-	// calls Conn.Plan.
+	// Classify reports what a submission would do (docs/design.md §13.13),
+	// with params bound as Execute would bind them. It never runs the
+	// submission.
 	//
-	// Callers switch on that error, never on a provider name, so a third
-	// provider chooses its own mechanism without touching any call site.
-	Classify(sql string) (sqlscan.Verdict, error)
+	// How it decides is the adapter's own business, which is what keeps a
+	// caller from ever asking which provider it holds. One that decides from
+	// the text alone never touches r. One that asks the engine's planner runs
+	// on r's connection, compiling without executing, and leaves the session
+	// ready to execute; a nil r means no connection may be made, and it
+	// returns an error rather than a verdict.
+	//
+	// On error the verdict carries only the mechanism that could not decide,
+	// so a caller can report which.
+	Classify(ctx context.Context, sql string, params map[string]string, r Runner) (sqlscan.Verdict, error)
 
 	// Dialect selects the quoting and batching rules the lexical pre-pass
 	// applies before either mechanism runs.
@@ -126,15 +132,6 @@ type Conn interface {
 	// surfaces as an error wrapping ctx.Err().
 	Execute(ctx context.Context, q Query) ([]Rows, error)
 
-	// Plan classifies each statement through the engine's planner, compiling
-	// it without running it, with params bound as Execute would bind them. It
-	// returns one Statement per statement, in order, and leaves the session
-	// ready to execute again. An error means the planner could not be asked
-	// at all, which is not the same as a statement it refused to compile:
-	// that one comes back opaque. Unused by an adapter whose Classify
-	// succeeds.
-	Plan(ctx context.Context, statements []string, params map[string]string) ([]sqlscan.Statement, error)
-
 	// Usable reports whether the session can take another run. It turns false
 	// once a run ends in a state the adapter cannot vouch for, such as a
 	// cancel mid-statement or a dropped link, and the caller then closes it
@@ -143,6 +140,13 @@ type Conn interface {
 	Usable() bool
 
 	Close() error
+}
+
+// Runner runs f on a connection, opening one if need be. It is how Classify
+// reaches the server without owning a connection: internal/session's Session
+// is one, so the plan is made on the session the submission then runs on.
+type Runner interface {
+	With(ctx context.Context, f func(Conn) error) error
 }
 
 // LocalError is a failure on this side of the connection: the submission

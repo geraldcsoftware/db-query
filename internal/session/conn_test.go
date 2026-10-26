@@ -111,9 +111,9 @@ func TestSessionRefusesBeforeConnecting(t *testing.T) {
 	if _, err := s.Execute(context.Background(), adapter.Query{SQL: "SELECT $1"}); !errors.As(err, &le) {
 		t.Fatalf("err = %v, want a LocalError", err)
 	}
-	if _, err := s.Plan(context.Background(), []string{"SELECT 1"}, map[string]string{"who": "x"}); !errors.As(err, &le) {
-		t.Fatalf("err = %v, want a LocalError", err)
-	}
+	// A classifier that decides from the text never makes the session
+	// connect either, whatever it decides.
+	_, _ = s.Adapter.Classify(context.Background(), "SELECT 1", nil, s)
 	if srv.Connections() != 0 {
 		t.Fatalf("a refused submission connected: connections = %d", srv.Connections())
 	}

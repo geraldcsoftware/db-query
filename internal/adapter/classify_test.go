@@ -1,39 +1,70 @@
 package adapter
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
-// The whole point of the ErrNeedsPlan contract is that a caller never asks
-// which provider it is holding.
+// countingRunner records whether a classifier reached for a connection, and
+// hands over whatever conn it was given.
+type countingRunner struct {
+	calls int
+	conn  Conn
+}
+
+func (r *countingRunner) With(_ context.Context, f func(Conn) error) error {
+	r.calls++
+	return f(r.conn)
+}
+
+// The point of one Classify call is that a caller never asks which provider it
+// is holding: each adapter picks its mechanism and reports which it used.
 func TestClassifyMechanismIsChosenByTheAdapter(t *testing.T) {
-	tests := []struct {
-		provider      string
-		wantNeedsPlan bool
-		wantDialect   sqlscan.Dialect
-	}{
-		{"postgres", false, sqlscan.DialectPostgres},
-		{"sqlserver", true, sqlscan.DialectTSQL},
-	}
-	for _, tt := range tests {
-		t.Run(tt.provider, func(t *testing.T) {
-			a, err := For(tt.provider)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = a.Classify("SELECT 1")
-			gotNeedsPlan := err == sqlscan.ErrNeedsPlan
-			if gotNeedsPlan != tt.wantNeedsPlan {
-				t.Errorf("ErrNeedsPlan: got %v, want %v (err=%v)", gotNeedsPlan, tt.wantNeedsPlan, err)
-			}
-			if a.Dialect() != tt.wantDialect {
-				t.Errorf("dialect: got %v, want %v", a.Dialect(), tt.wantDialect)
-			}
-		})
-	}
+	ctx := context.Background()
+
+	t.Run("postgres decides offline and never connects", func(t *testing.T) {
+		if !sqlscan.ParserAvailable() {
+			t.Skip("built without cgo: the postgres classifier refuses every submission by design")
+		}
+		r := &countingRunner{}
+		v, err := postgresAdapter{}.Classify(ctx, "SELECT $1", map[string]string{"1": "x"}, r)
+		if err != nil || v.Mechanism != sqlscan.MechanismParser || v.Class != sqlscan.ClassRead {
+			t.Fatalf("verdict = %+v, err = %v", v, err)
+		}
+		if r.calls != 0 {
+			t.Fatal("the parser mechanism reached for a connection")
+		}
+		if (postgresAdapter{}).Dialect() != sqlscan.DialectPostgres {
+			t.Fatal("dialect")
+		}
+	})
+	t.Run("sqlserver without a connection cannot decide", func(t *testing.T) {
+		v, err := sqlserverAdapter{}.Classify(ctx, "SELECT 1", nil, nil)
+		if err == nil || v.Mechanism != sqlscan.MechanismPlanner {
+			t.Fatalf("verdict = %+v, err = %v; want an error naming the planner", v, err)
+		}
+		if (sqlserverAdapter{}).Dialect() != sqlscan.DialectTSQL {
+			t.Fatal("dialect")
+		}
+	})
+	t.Run("sqlserver refuses a bad param name before connecting", func(t *testing.T) {
+		r := &countingRunner{}
+		if _, err := (sqlserverAdapter{}).Classify(ctx, "SELECT @who", map[string]string{"@who": "x"}, r); err == nil {
+			t.Fatal("want the name refused")
+		}
+		if r.calls != 0 {
+			t.Fatal("a refused submission reached for a connection")
+		}
+	})
+	t.Run("sqlserver will not plan on another provider's connection", func(t *testing.T) {
+		r := &countingRunner{conn: &pgConn{}}
+		if _, err := (sqlserverAdapter{}).Classify(ctx, "SELECT 1", nil, r); err == nil {
+			t.Fatal("planning on a postgres connection must fail closed")
+		}
+	})
 }
 
 func TestSQLServerPlanTextDeclaresBoundParams(t *testing.T) {
