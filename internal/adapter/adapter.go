@@ -29,9 +29,38 @@ type Query struct {
 // Rows is the neutral rowset every adapter parses into and every
 // renderer renders from. A nil *string is SQL NULL; &"" is the empty
 // string.
+//
+// Every value is carried as the text the provider renders it as, so text and
+// table output print exactly what the server wrote. Kinds says, column by
+// column, what that text stands for, for the formats that have types of their
+// own: json prints a number as a number. A column without a kind, including
+// every column of a Rows built without Kinds, is text. Kinds is not persisted
+// with a Rows (the schema cache stores the catalogue, which is all text), so a
+// cache file keeps the shape it always had.
 type Rows struct {
 	Columns []string
+	Kinds   []Kind `json:"-"`
 	Rows    [][]*string
+}
+
+// Kind is what a column's values are, as far as a typed output format can
+// tell them apart. It is deliberately coarse: anything that is not plainly a
+// number or a boolean is text, dates and times included, so a value is never
+// reinterpreted on its way out.
+type Kind uint8
+
+const (
+	KindText Kind = iota
+	KindNumber
+	KindBool
+)
+
+// Kind reports the kind of column i, text when none was recorded.
+func (r Rows) Kind(i int) Kind {
+	if i < len(r.Kinds) {
+		return r.Kinds[i]
+	}
+	return KindText
 }
 
 // First returns the first result set of a run, or an empty Rows when the run

@@ -176,7 +176,9 @@ func (textRenderer) Render(w io.Writer, rows adapter.Rows, opts Options) error {
 }
 
 // jsonRenderer prints an array of objects keyed by column name, keys in
-// column order. nil *string renders as JSON null, &"" as "".
+// column order. nil *string renders as JSON null, &"" as "". A number column
+// prints as a JSON number and a boolean column as true or false; a value its
+// column's kind cannot represent, such as a NaN, stays a string.
 type jsonRenderer struct{}
 
 func (jsonRenderer) Render(w io.Writer, rows adapter.Rows, _ Options) error {
@@ -198,7 +200,7 @@ func (jsonRenderer) Render(w io.Writer, rows adapter.Rows, _ Options) error {
 			b.Write(key)
 			b.WriteString(": ")
 			if ci < len(row) && row[ci] != nil {
-				val, err := json.Marshal(*row[ci])
+				val, err := jsonValue(*row[ci], rows.Kind(ci))
 				if err != nil {
 					return err
 				}
@@ -215,6 +217,42 @@ func (jsonRenderer) Render(w io.Writer, rows adapter.Rows, _ Options) error {
 	b.WriteString("]\n")
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// jsonValue encodes one non-NULL value by its column's kind.
+//
+// A number is written as the server's own text, not reparsed into a float, so
+// a numeric(38,10) or a bigint reaches the document digit for digit. JSON puts
+// no limit on a number's size or precision; a consumer that reads numbers as
+// float64 rounds what is beyond 2^53, which is that consumer's choice to make.
+func jsonValue(v string, k adapter.Kind) ([]byte, error) {
+	switch k {
+	case adapter.KindNumber:
+		if isJSONNumber(v) {
+			return []byte(v), nil
+		}
+	case adapter.KindBool:
+		switch v {
+		case "t", "true", "1":
+			return []byte("true"), nil
+		case "f", "false", "0":
+			return []byte("false"), nil
+		}
+	}
+	return json.Marshal(v)
+}
+
+// isJSONNumber reports whether v is, character for character, a JSON number.
+// NaN, Infinity, a leading + or surrounding space are not.
+func isJSONNumber(v string) bool {
+	if v == "" || !(v[0] == '-' || (v[0] >= '0' && v[0] <= '9')) {
+		return false
+	}
+	if strings.TrimSpace(v) != v {
+		return false
+	}
+	var n json.Number
+	return json.Unmarshal([]byte(v), &n) == nil
 }
 
 // Error emits a failure honoring the output format: in json mode a

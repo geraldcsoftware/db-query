@@ -248,9 +248,10 @@ func runBatch(ctx context.Context, conn *sql.Conn, b mssqlBatch) ([]Rows, error)
 			return nil, err
 		}
 		if len(types) > 0 {
-			set := Rows{Columns: make([]string, len(types)), Rows: [][]*string{}}
+			set := Rows{Columns: make([]string, len(types)), Kinds: make([]Kind, len(types)), Rows: [][]*string{}}
 			for i, t := range types {
 				set.Columns[i] = t.Name()
+				set.Kinds[i] = mssqlKind(t.DatabaseTypeName())
 			}
 			vals := make([]any, len(types))
 			ptrs := make([]any, len(types))
@@ -279,6 +280,20 @@ func runBatch(ctx context.Context, conn *sql.Conn, b mssqlBatch) ([]Rows, error)
 		return nil, err
 	}
 	return sets, nil
+}
+
+// mssqlKind maps a column's type to its Kind. A sql_variant column can hold
+// anything row by row, so it stays text.
+func mssqlKind(typeName string) Kind {
+	switch typeName {
+	case "TINYINT", "SMALLINT", "INT", "BIGINT", "REAL", "FLOAT",
+		"DECIMAL", "MONEY", "SMALLMONEY":
+		return KindNumber
+	case "BIT":
+		return KindBool
+	default:
+		return KindText
+	}
 }
 
 // columnType is the part of *sql.ColumnType that rendering needs, so the

@@ -40,6 +40,10 @@ type Reply struct {
 	Columns []string
 	Rows    [][]*string
 
+	// OIDs, when set, declares each column's type; a column without one is
+	// text (OID 25).
+	OIDs []uint32
+
 	// Code and Message, when Code is set, make the statement fail with that
 	// SQLSTATE. Detail and Hint ride along when set.
 	Code, Message, Detail, Hint string
@@ -366,7 +370,11 @@ func sendResult(be *pgproto3.Backend, r Reply) {
 	}
 	fields := make([]pgproto3.FieldDescription, len(r.Columns))
 	for i, c := range r.Columns {
-		fields[i] = pgproto3.FieldDescription{Name: []byte(c), DataTypeOID: 25, DataTypeSize: -1, TypeModifier: -1}
+		oid := uint32(25)
+		if i < len(r.OIDs) && r.OIDs[i] != 0 {
+			oid = r.OIDs[i]
+		}
+		fields[i] = pgproto3.FieldDescription{Name: []byte(c), DataTypeOID: oid, DataTypeSize: -1, TypeModifier: -1}
 	}
 	be.Send(&pgproto3.RowDescription{Fields: fields})
 	for _, row := range r.Rows {

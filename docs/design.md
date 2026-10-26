@@ -316,6 +316,9 @@ Locked rules:
 
 ## 8. Output formatting & rendering pipeline
 
+> **Amended by §13.18.** `json` now prints numeric and boolean columns as JSON
+> numbers and booleans; `Rows` carries a per-column `Kinds` for it.
+
 **[LOCKED] `--output json|table|text|auto`, default `auto`.** Format branch lives at **one pivot point**, not per adapter — avoid the `providers × formats` matrix.
 
 ```
@@ -1896,3 +1899,47 @@ hostile parameter values, several result sets, a failing batch, value
 rendering, a 9000-character value, and a pre-check that must stay plan-only;
 its fixtures are seeded through the driver. That retires §13.15's caveat that
 the SQL Server planner path was untested against a real instance.
+
+### 13.18 Typed values in json output (amends §8)
+
+Every value used to reach `json` as a string, because the subprocess clients
+handed back text and the column types were gone by the time it was parsed.
+Both drivers report each column's type, so `json` now prints a number as a
+number and a boolean as `true` or `false`.
+
+**The shape.** `adapter.Rows` gains `Kinds []Kind`, one per column: `KindText`,
+`KindNumber` or `KindBool`. Values stay `[][]*string`, the provider's own text,
+so `text` and `table` output are byte for byte what they were and only the
+`json` renderer reads the kinds. A `Rows` built without kinds, as the CLI's own
+listings (`hosts`, `list`, `config`) are, is all text. Kinds are not written to
+the schema cache, whose catalogue is all text, so a cache file keeps its shape.
+
+**The mapping is deliberately coarse.** Only types whose text is plainly a JSON
+number or a boolean qualify:
+
+| Provider | Number | Boolean |
+|---|---|---|
+| postgres (by type OID) | `int2`, `int4`, `int8`, `oid`, `float4`, `float8`, `numeric` | `bool` |
+| sqlserver (by type name) | `TINYINT`, `SMALLINT`, `INT`, `BIGINT`, `REAL`, `FLOAT`, `DECIMAL`, `MONEY`, `SMALLMONEY` | `BIT` |
+
+Postgres `money` prints with a currency symbol and a domain carries its own
+OID, so both stay text; a SQL Server `sql_variant` can change type row by row,
+so it stays text too. Dates, times, UUIDs and binary stay strings: there is no
+JSON type for them, and reformatting them would be a second rendering that
+could disagree with the first.
+
+**Numbers are written as the server's digits.** The renderer does not parse a
+number into a float and print it back, which would round a `bigint` above
+2^53 and a long `numeric`. It writes the text as it came, after checking that
+it is, character for character, a JSON number. Anything that is not (`NaN`,
+`Infinity`, which postgres floats and numerics can hold) is written as a
+string rather than as invalid JSON. A boolean is mapped from `t`/`f` or
+`1`/`0`.
+
+**Compatibility.** This changes the json contract: a consumer that read every
+value as a string now sees numbers and booleans (`jq -r` prints both the same
+either way, so shell pipelines are mostly unaffected). A consumer
+that decodes numbers as doubles rounds beyond 2^53; that is the consumer's
+choice, and a string would have taken the choice away from every consumer
+that does not.
+

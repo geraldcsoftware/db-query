@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
@@ -254,9 +255,10 @@ func runStatement(ctx context.Context, conn *pgconn.PgConn, st pgStatement) (*Ro
 	fields := rr.FieldDescriptions()
 	var rows *Rows
 	if len(fields) > 0 {
-		rows = &Rows{Columns: make([]string, len(fields))}
+		rows = &Rows{Columns: make([]string, len(fields)), Kinds: make([]Kind, len(fields))}
 		for i, f := range fields {
 			rows.Columns[i] = f.Name
+			rows.Kinds[i] = pgKind(f.DataTypeOID)
 		}
 	}
 	for rr.NextRow() {
@@ -276,6 +278,21 @@ func runStatement(ctx context.Context, conn *pgconn.PgConn, st pgStatement) (*Ro
 		return nil, err
 	}
 	return rows, nil
+}
+
+// pgKind maps a column's type to its Kind. Only the built-in numeric and
+// boolean types qualify; money prints with a currency symbol and a domain
+// carries its own OID, so both stay text.
+func pgKind(oid uint32) Kind {
+	switch oid {
+	case pgtype.Int2OID, pgtype.Int4OID, pgtype.Int8OID, pgtype.OIDOID,
+		pgtype.Float4OID, pgtype.Float8OID, pgtype.NumericOID:
+		return KindNumber
+	case pgtype.BoolOID:
+		return KindBool
+	default:
+		return KindText
+	}
 }
 
 // pgFailure words a failed statement. A server error keeps its severity,

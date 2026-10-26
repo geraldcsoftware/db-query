@@ -240,6 +240,21 @@ func TestSQLServerText(t *testing.T) {
 	}
 }
 
+func TestSQLServerKind(t *testing.T) {
+	for name, want := range map[string]Kind{
+		"TINYINT": KindNumber, "SMALLINT": KindNumber, "INT": KindNumber, "BIGINT": KindNumber,
+		"REAL": KindNumber, "FLOAT": KindNumber, "DECIMAL": KindNumber,
+		"MONEY": KindNumber, "SMALLMONEY": KindNumber,
+		"BIT":      KindBool,
+		"NVARCHAR": KindText, "DATETIME2": KindText, "UNIQUEIDENTIFIER": KindText,
+		"VARBINARY": KindText, "SQL_VARIANT": KindText, "XML": KindText,
+	} {
+		if got := mssqlKind(name); got != want {
+			t.Errorf("mssqlKind(%s) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestSQLServerFailure(t *testing.T) {
 	ctx := context.Background()
 

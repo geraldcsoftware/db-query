@@ -178,6 +178,27 @@ func TestPostgresExecuteSingleStatement(t *testing.T) {
 	}
 }
 
+func TestPostgresExecuteRecordsColumnKinds(t *testing.T) {
+	srv := pgfake.Start(t, func(q pgfake.Query) pgfake.Reply {
+		r := pgfake.Rows([]string{"i", "big", "n", "f", "b", "t", "d", "m"},
+			[]string{"1", "2", "3.5", "4.25", "t", "x", "2026-10-26", "$1.00"})
+		r.OIDs = []uint32{23, 20, 1700, 701, 16, 25, 1082, 790}
+		return r
+	})
+	sets, err := postgresAdapter{}.Execute(context.Background(), testCred, fakeHost(srv), Query{SQL: "SELECT 1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Kind{KindNumber, KindNumber, KindNumber, KindNumber, KindBool, KindText, KindText, KindText}
+	if !reflect.DeepEqual(sets[0].Kinds, want) {
+		t.Fatalf("kinds = %v, want %v", sets[0].Kinds, want)
+	}
+	// The value itself is untouched: the server's own text.
+	if *sets[0].Rows[0][4] != "t" {
+		t.Fatalf("bool text = %q", *sets[0].Rows[0][4])
+	}
+}
+
 func TestPostgresExecuteScriptRunsInOneTransaction(t *testing.T) {
 	srv := pgfake.Start(t, func(q pgfake.Query) pgfake.Reply {
 		switch {

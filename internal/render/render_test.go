@@ -151,6 +151,48 @@ func TestJSONRenderer(t *testing.T) {
 	}
 }
 
+func TestJSONRendererTypedColumns(t *testing.T) {
+	rows := adapter.Rows{
+		Columns: []string{"n", "big", "price", "f", "ok", "pg_ok", "name", "nan", "flag"},
+		Kinds: []adapter.Kind{
+			adapter.KindNumber, adapter.KindNumber, adapter.KindNumber, adapter.KindNumber,
+			adapter.KindBool, adapter.KindBool, adapter.KindText, adapter.KindNumber,
+		}, // one short: the last column has no kind and is text
+		Rows: [][]*string{
+			{ptr("42"), ptr("123456789012345678901234567890"), ptr("1.50"), ptr("1e+21"),
+				ptr("1"), ptr("f"), ptr("007"), ptr("NaN"), ptr("1")},
+			{nil, ptr("-0"), ptr("0.0000"), ptr("-2.5"), ptr("0"), ptr("t"), ptr("x"), ptr("Infinity"), nil},
+		},
+	}
+	var b strings.Builder
+	if err := (jsonRenderer{}).Render(&b, rows, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	want := `[
+  {"n": 42, "big": 123456789012345678901234567890, "price": 1.50, "f": 1e+21, "ok": true, "pg_ok": false, "name": "007", "nan": "NaN", "flag": "1"},
+  {"n": null, "big": -0, "price": 0.0000, "f": -2.5, "ok": false, "pg_ok": true, "name": "x", "nan": "Infinity", "flag": null}
+]
+`
+	if b.String() != want {
+		t.Fatalf("got\n%s\nwant\n%s", b.String(), want)
+	}
+	if !json.Valid([]byte(b.String())) {
+		t.Fatal("output is not valid JSON")
+	}
+}
+
+func TestIsJSONNumber(t *testing.T) {
+	for v, want := range map[string]bool{
+		"0": true, "-1": true, "3.14": true, "1E5": true, "1e-5": true, "-0.0": true,
+		"": false, "+1": false, "01": false, ".5": false, "1.": false, " 1": false,
+		"1 ": false, "NaN": false, "Infinity": false, "-Infinity": false, "0x1F": false, "1_000": false,
+	} {
+		if got := isJSONNumber(v); got != want {
+			t.Errorf("isJSONNumber(%q) = %v, want %v", v, got, want)
+		}
+	}
+}
+
 func TestJSONRendererEmpty(t *testing.T) {
 	r, _ := For("json")
 	var b strings.Builder

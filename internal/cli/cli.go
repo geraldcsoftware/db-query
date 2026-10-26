@@ -773,7 +773,7 @@ func filterTable(rows adapter.Rows, name string) (adapter.Rows, bool, error) {
 	if !qualified {
 		wantSchema, wantTable = "", name
 	}
-	out := adapter.Rows{Columns: rows.Columns}
+	out := adapter.Rows{Columns: rows.Columns, Kinds: rows.Kinds}
 	for _, row := range rows.Rows {
 		if !strings.EqualFold(cell(row, tableIdx), wantTable) {
 			continue

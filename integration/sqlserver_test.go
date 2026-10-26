@@ -173,30 +173,28 @@ func TestSQLServerValues(t *testing.T) {
 		CAST('2026-10-26T09:05:07.1234567' AS datetime2) AS dt2,
 		CAST('2026-10-26T09:05:07.123' AS datetime) AS dt,
 		CAST('2026-10-26' AS date) AS dd,
+		CAST(9007199254740993 AS bigint) AS big,
+		CAST(1.5 AS float) AS f,
+		CAST(3 AS money) AS m,
 		REPLICATE(CAST('x' AS nvarchar(max)), 9000) AS long_text`)
 	if res.code != 0 {
 		t.Fatalf("code=%d stderr=%s", res.code, res.stderr)
 	}
-	var rows []map[string]*string
+	// Numbers and booleans are json's own types, with the server's digits
+	// kept exactly; everything else is text.
+	if want := `"d": 1.50, "g": "6F9619FF-8B86-D011-B42D-00C04FC964FF", "b": "0x0AFF", "bt": true, ` +
+		`"dt2": "2026-10-26 09:05:07.1234567", "dt": "2026-10-26 09:05:07.123", "dd": "2026-10-26"`; !strings.Contains(res.stdout, want) {
+		t.Errorf("stdout = %.400s\nwant it to contain %s", res.stdout, want)
+	}
+	if want := `"big": 9007199254740993, "f": 1.5, "m": 3.0000`; !strings.Contains(res.stdout, want) {
+		t.Errorf("stdout = %.600s\nwant it to contain %s", res.stdout, want)
+	}
+	var rows []map[string]any
 	if err := json.Unmarshal([]byte(res.stdout), &rows); err != nil || len(rows) != 1 {
-		t.Fatalf("not one JSON row: %v\n%s", err, res.stdout)
-	}
-	want := map[string]string{
-		"d":   "1.50",
-		"g":   "6F9619FF-8B86-D011-B42D-00C04FC964FF",
-		"b":   "0x0AFF",
-		"bt":  "1",
-		"dt2": "2026-10-26 09:05:07.1234567",
-		"dt":  "2026-10-26 09:05:07.123",
-		"dd":  "2026-10-26",
-	}
-	for k, v := range want {
-		if rows[0][k] == nil || *rows[0][k] != v {
-			t.Errorf("%s = %v, want %q", k, rows[0][k], v)
-		}
+		t.Fatalf("not one JSON row: %v\n%.400s", err, res.stdout)
 	}
 	// sqlcmd truncated variable-length values at 8000 characters.
-	if rows[0]["long_text"] == nil || len(*rows[0]["long_text"]) != 9000 {
+	if s, _ := rows[0]["long_text"].(string); len(s) != 9000 {
 		t.Errorf("long_text was truncated")
 	}
 }

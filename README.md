@@ -117,6 +117,19 @@ the host in effect is whatever `DB_QUERY_HOST` says until you override it.
   whole shell. Every command that prints rows — `query`, `list`, `schema`,
   `introspect`, `hosts` — honours the setting. In `json` mode errors are
   emitted as structured JSON on stderr.
+- In `json`, numeric columns are JSON numbers and boolean columns are `true`
+  or `false`; everything else, dates and times included, is a string, and
+  NULL is `null`. A number keeps the server's digits exactly, so a `bigint`
+  or a `numeric(38,10)` is not rounded, but a consumer that reads numbers as
+  doubles (JavaScript, `jq` before 1.7) rounds beyond 2^53. A value the type
+  cannot hold as JSON, such as a float `NaN`, stays a string. `text` and
+  `table` output are unchanged: they print the server's own text (`t`/`f` for
+  a postgres boolean, `1`/`0` for a SQL Server `bit`).
+
+  | Provider | JSON number | JSON boolean |
+  |---|---|---|
+  | PostgreSQL | `smallint`, `integer`, `bigint`, `oid`, `real`, `double precision`, `numeric` | `boolean` |
+  | SQL Server | `tinyint`, `smallint`, `int`, `bigint`, `real`, `float`, `decimal`/`numeric`, `money`, `smallmoney` | `bit` |
 - `--max-col-width <n>` (`query`, `schema`; default 50, `0` = unlimited) caps a
   **table** cell at `n` display cells, truncating with `…`. Only `table` output
   is affected; `text` and `json` always carry values whole.
