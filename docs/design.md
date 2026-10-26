@@ -15,6 +15,11 @@
 2. Injects them the way each **provider** expects (`PGUSER`/`PGPASSWORD` for Postgres; the SQL Server equivalents for `sqlcmd`) via an **environment overlay**, never argv.
 3. Runs a query — ad-hoc SQL or a **named, saved query** — and returns output in a selectable format (`--output json|table|text|auto`, default `auto`).
 
+> **Amended by §13.16 and §13.17.** Both providers now connect in-process, so
+> credentials go to the driver rather than into an environment overlay, and the
+> executor at the bottom of the diagram below is retired. The credential seam
+> and the output pipeline are unchanged.
+
 The load-bearing idea is a **neutral credential record** between two independent seams, plus a **provider-blind central executor** at the bottom and a **parse-once / render-once** output pipeline at the top:
 
 ```
@@ -164,8 +169,11 @@ Load-time failures — unknown profile, inherit cycle, empty `inherit`, non-stri
 
 ## 6. Execution layer (central executor)
 
-> **Amended by §13.16.** Postgres no longer runs through the executor: it speaks
-> the wire protocol in-process. The executor below now serves SQL Server only.
+> **Retired by §13.16 and §13.17.** Neither provider runs a client binary any
+> more: postgres speaks its wire protocol through pgx and SQL Server speaks TDS
+> through go-mssqldb, both in-process. The executor described below has been
+> removed. It is kept as the record of the original design; §13.17 says which
+> of its locks survive and in what form.
 
 **[LOCKED]** One `Run` at the bottom; every adapter funnels through it. Adapters *build* an `Invocation`; the executor *runs* it and returns raw bytes. Two responsibilities, two places. The executor is **provider-blind**.
 
@@ -230,6 +238,10 @@ func mergeEnv(base []string, overlay map[string]string) []string {
 
 ## 7. Provider adapters
 
+> **Superseded by §13.16 and §13.17.** The interface below assumed a child
+> process. Adapters now implement `Execute` and, for the planner mechanism,
+> `Plan`; see §13.17 for the current shape.
+
 Round trip: **adapter builds → executor runs → adapter interprets/parses.** Everything provider-specific — SQL delivery, cred env vars, error meaning, output shape — stays quarantined in the adapter on both sides. Adding a third client is one new adapter, zero executor changes.
 
 ```go
@@ -256,6 +268,8 @@ type Adapter interface {
 
 ### 7.2 SQL Server adapter (`sqlcmd`)
 
+> **Superseded by §13.17.** Kept as the record of the original design.
+
 > Behavior is version- and implementation-dependent (legacy ODBC `mssql-tools` vs. `go-sqlcmd`). Verify flag semantics against the actual binary — some items below shift between builds.
 
 **[LOCKED] Path A — coaxed tabular (universal default; works for arbitrary SQL):**
@@ -281,8 +295,10 @@ type Adapter interface {
 
 ### 7.3 Parameter binding — [LOCKED]
 
-> **Amended by §13.16** for Postgres: parameters are now the server's own
-> positional `$1`, `$2`, bound by the protocol. The sqlcmd rules below stand.
+> **Amended by §13.16 and §13.17.** Both providers now bind parameters
+> server-side: postgres by position (`$1`, `$2`), SQL Server by name (`@name`,
+> through `sp_executesql`). The sqlcmd rules below no longer apply; the first
+> rule, that Go never substitutes a value into SQL text, holds for both.
 
 Saved queries are provider-bound (already locked), so **params are written in native provider syntax; there is no neutral placeholder and no rewrite layer.**
 
@@ -325,11 +341,15 @@ var renderers = map[string]Renderer{
 **[LOCKED] Consequences:**
 
 - **Always parse into neutral `Rows`.** The earlier "clean-text passthrough" shortcut does not survive `--output json`: once you parse for JSON, parsing is the always-path. Cost relocates into reliable structured parsing per client (§7).
-- **NULL fidelity is `[][]*string`.** `null` vs `""` is real once JSON exists; nil pointer = NULL, `&""` = empty. psql CSV gives this cheaply. **v1: sqlcmd Path A does not distinguish** NULL from `"NULL"` (accepted; §7.2) — the row type still holds, Path A just never emits a nil. v2 restores fidelity via Path B.
+- **NULL fidelity is `[][]*string`.** `null` vs `""` is real once JSON exists; nil pointer = NULL, `&""` = empty. Both protocols deliver NULL as such (§13.16, §13.17), so every adapter emits a nil for NULL. The v1 sqlcmd caveat, NULL printed as the literal `NULL`, is gone with sqlcmd.
 - **Errors honor `--output`.** In `json` mode a failure emits **structured JSON** (`{"error": "..."}`) to stderr, not a bare string mid-stream, so `--output json | jq` never breaks on the error path. The format flag governs the whole output contract, not just the happy path.
 - **Default `auto` when the flag is omitted.** `auto` resolves to `table` when stdout is a terminal and `text` otherwise. This **supersedes** the original v1 rule (*default `text`; no TTY auto-detection — an explicit default is more predictable than magic*). The concern behind that rule was **invisible** behaviour; `auto` is a named value that appears in `--help`, can be passed explicitly, and is overridable by flag or `DB_QUERY_OUTPUT`. Resolution happens once in the CLI layer, before the render pivot, so renderers stay pure functions of `(Rows, Options)`. See §13.8.
 
 ## 9. Security considerations
+
+> **Amended by §13.17.** No password reaches a child process or its
+> environment any more, and the `sqlcmd` `$(...)` injection surface is gone:
+> SQL Server values are bound server-side.
 
 - **Passwords via env overlay, never argv** (argv is world-readable via `ps`). For `sqlcmd`, prefer the env-var form over `-P`; if a path must use `-P`, note the exposure.
 - **Lazy, per-invocation resolution.** Resolve only the one host in play; never bulk-resolve the config. Unused hosts' vault paths are never hit; secrets don't linger resolved.
@@ -352,16 +372,14 @@ Genuinely unresolved — not yet locked:
 - Two-seam architecture: URI-scheme resolvers → neutral `Credential` → provider adapters.
 - Host-config precedence over resolver `extra`; `extra` fills gaps only.
 - BWS: two secret refs, not structured-JSON-in-one-secret.
-- Central provider-blind executor; adapters build/parse, executor runs.
-- Fail-to-start (Go error) vs. ran-nonzero (data) distinction via `exec.ExitError`.
-- SQL on stdin; params via `-v`; creds via env overlay; never argv.
-- Explicit env dedup-merge; adapters set provider vars explicitly to block inherited leakage.
+- No client binaries: postgres runs over its wire protocol (pgx, §13.16), SQL Server over TDS (go-mssqldb, §13.17). The central executor is retired.
+- Every setting the host decides is passed to the driver explicitly, so an inherited environment variable cannot redirect a query; credentials never reach argv, a child environment or a log.
 - Buffer output; run under a context deadline.
-- Postgres runs over the wire protocol (pgx), no client binary (§13.16); sqlcmd parses via coaxed-tabular (default) or `FOR JSON` (opt-in, high-fidelity).
-- **Params: native per provider — postgres `$1`, `$2` bound server-side by position (§13.16), sqlcmd `$(name)` (not `@name`) via its own `-v`. Go never substitutes a value into SQL.** sqlcmd value-validation as the v1 injection mitigation.
+- **Params: native per provider, bound server-side — postgres `$1`, `$2` by position (§13.16), SQL Server `@name` by name through `sp_executesql` (§13.17). Go never substitutes a value into SQL.**
 - **Postgres scripts (§13.16):** several statements run in one transaction, stop at the first error and roll back, and return one result set per statement that produced columns.
+- **SQL Server scripts (§13.17):** GO-separated batches run in order on one connection with no implicit transaction, stop at the first error, and return one result set per statement that produced columns.
 - `--output json|table|text|auto` (default `auto`, resolved by TTY in the CLI layer); parse-once into neutral `Rows`, render-once per format; errors honor the format.
-- NULL fidelity via `[][]*string`. **v1 accepts sqlcmd Path A rendering NULL as literal `NULL`; faithful SQL Server NULL is a v2 patch.**
+- NULL fidelity via `[][]*string`, faithful on both providers.
 - **`--raw` passthrough is out of v1** (deferred to v2). Every query in v1 goes through the normal build → run → parse → render path.
 - **Destructive-statement safety (§13.12):** `readonly = true` by default, grants as the control, `opaque` classified as `destructive`, precheck tokens minted only for clean SQL, no automation exemption.
 - **Classifier mechanism (§13.13):** postgres classifies offline with PostgreSQL's own grammar, SQL Server through the engine planner; callers switch on a capability error, not a provider name.
@@ -430,6 +448,11 @@ File location and naming (`internal/schema`):
   `null` versus `""`. Schema metadata only — never credentials.
 
 ### 13.3 Exit codes 3 and 4 (extends §6)
+
+> **Amended by §13.16 and §13.17.** No client binary is started any more, so
+> exit `2` now means the run timed out or was cancelled. Schema errors are read
+> from the error itself: SQLSTATE `42703`/`42P01` on postgres, error number
+> `207`/`208` on SQL Server.
 
 The fail-to-start vs. ran-nonzero distinction locked in §6 is surfaced to the
 process exit code, and a ran-nonzero result is split by whether it is a schema
@@ -1172,6 +1195,11 @@ thing that would be found and used.
 
 #### Client directives and parameter binding
 
+> **Amended by §13.16 and §13.17.** No client runs any more, so `-X` and the
+> value validation below are gone with sqlcmd. Directives are still refused by
+> the lexical pre-pass, and parameter values no longer need validating because
+> both providers bind them server-side.
+
 db-query builds its own invocation, pins its own output format and delivers SQL
 on stdin, so it never needs psql backslash commands or sqlcmd colon commands.
 Both are rejected lexically: any statement whose first non-whitespace character
@@ -1187,6 +1215,9 @@ Unquoted `:name` interpolation is refused in favour of `:'name'` when a
 parameter is bound, so a value cannot terminate a statement.
 
 #### Where the gate lives
+
+> **Amended by §13.16.** `Build` no longer exists; the gate runs before
+> `Adapter.Execute` on both paths.
 
 `session.RunOnce` and `tui.execute` are independent paths and both call
 `Adapter.Build` before `executor.Run`. `Build` is therefore the only choke point
@@ -1258,6 +1289,11 @@ ordered-set aggregates. Under §13.12's fail-closed rule that is not a usable
 error rate.
 
 #### The interface
+
+> **Amended by §13.17.** `PlanInvocation` and `ParsePlan` were a build/parse
+> pair for a child process. They are replaced by one method,
+> `Plan(ctx, cred, host, statements, params) ([]Statement, error)`, which the
+> caller invokes through a `PlanRunner` closure it builds with the deadline.
 
 Classification joins the adapter for the same reason everything else
 provider-specific does, and it keeps §11's separation intact: **adapters build
@@ -1532,9 +1568,10 @@ operator having already said so. Destructive and administrative statements meet
 a human on either kind of host, and so does anything the mechanism could not
 classify. Client directives are refused outright on both.
 
-> **Postgres part retired by §13.16.** Postgres parameters are now `$1`, `$2`,
-> which the grammar parses natively, so the scanner-based normaliser described
-> below was removed. The SQL Server half stands.
+> **Retired by §13.16 and §13.17.** Postgres parameters are now `$1`, `$2`,
+> which the grammar parses natively, and SQL Server parameters are `@name`,
+> declared to the planner ahead of each statement. Neither needs normalising,
+> and the normaliser described below has been removed.
 
 **Placeholders had to be normalised before classification.** `:'name'` and
 `$(name)` are expanded by psql and sqlcmd, so neither PostgreSQL's grammar nor
@@ -1612,10 +1649,10 @@ so it could not have taken this role.
 **The adapter interface.** `Build`/`Parse`/`Env`/`IsSchemaError` assumed a
 child process, so they leave the interface. Every adapter now implements
 `Execute(ctx, cred, host, query) ([]Rows, error)`. SQL Server's implementation
-is the old pipeline unchanged, build, executor, parse, behind that method; the
-executor and its §6 locks still hold for it. `PlanInvocation` takes the
-credential and sets the environment itself, so the precheck path never needed
-`Env` either.
+was at first the old pipeline unchanged, build, executor, parse, behind that
+method, until §13.17 moved it to the driver too. `PlanInvocation` (since
+replaced by `Plan`, §13.17) took the credential and set the environment itself,
+so the precheck path never needed `Env` either.
 
 The error says how far a run got, which is what the exit code reports:
 
@@ -1623,7 +1660,7 @@ The error says how far a run got, which is what the exit code reports:
 |-------|------|---------|
 | `*adapter.LocalError` | `1` | nothing was sent (a parameter that cannot be bound), or the reply could not be read |
 | `*adapter.QueryError` | `3` / `4` | the database refused the work (`Schema` selects `3`), or could not be reached |
-| anything else | `2` | the run could not happen: `sqlcmd` would not start, or the deadline expired |
+| anything else | `2` | the run could not happen: the deadline expired, or the run was cancelled |
 
 An unreachable postgres server stays at `4`, where psql's own connection
 failure put it, so automation keyed on the codes sees no change.
@@ -1687,8 +1724,9 @@ single-statement consumer unchanged at the cost of a consumer of scripts having
 to expect the nesting. The interactive Results pane shows one set at a time,
 `[` and `]` move between them, and the label row leads with `result n/m`.
 
-SQL Server is unchanged: sqlcmd prints result sets back to back with nothing
-reliable between them, so its output is still read as one.
+SQL Server at first read its output as one result set, because sqlcmd printed
+them back to back with nothing reliable between them. Since §13.17 it returns
+every set too.
 
 #### Testing
 
@@ -1698,3 +1736,163 @@ authenticate, answer statements, record what it received (statements, bound
 values, declared types, startup parameters) and honour cancel requests. The
 integration suite runs the postgres cases against a real server with no client
 binary installed.
+
+### 13.17 SQL Server over TDS (amends §6, §7, §7.2, §7.3, §9, §13.3, §13.12, §13.13, §13.15)
+
+The sqlserver adapter no longer shells out to `sqlcmd`. It connects with
+`github.com/microsoft/go-mssqldb`, Microsoft's maintained pure-Go driver and the
+one go-sqlcmd itself is built on, and speaks TDS in-process through
+`database/sql`. With postgres already moved (§13.16), no provider runs a client
+binary, so the central executor (`internal/executor`) is removed.
+
+#### Why
+
+- **No runtime dependency.** `sqlcmd` had to be installed, and the legacy ODBC
+  build and go-sqlcmd disagreed on flags (`-y 0` suppressed the header on one).
+- **Parameters bound by the server.** `$(name)` was a textual macro, which is
+  why §7.3 had to refuse quotes, `;`, `--` and `$(` in values. Values now travel
+  separately from the statement, so any value is accepted and none can change
+  the statement.
+- **Faithful values.** NULL is a nil, a value over 8000 characters is no longer
+  truncated by `-y 8000`, a value containing the 0x1F separator can no longer
+  mis-split a row, and every result set of a submission is returned.
+- **Structured errors.** Schema-error detection reads the engine error number
+  (`207`, `208`) rather than matching text, and errors print as SQL Server's own
+  tools print them: `Msg 208, Level 16, State 1, Line 1: Invalid object name
+  'ghosts'.`
+- **Real cancellation.** A cancelled context sends a TDS attention, so the
+  server stops the batch rather than noticing a dead client later.
+- **The password stays in-process.** It no longer rides `SQLCMDPASSWORD` into a
+  child environment.
+
+#### What changed in the contract
+
+**The adapter interface.** `PlanInvocation(cred, host, stmt) (Invocation,
+error)` and `ParsePlan(RawResult) (Class, string, error)` existed so the
+executor could run the probe. They are replaced by:
+
+```go
+// Plan classifies each statement through the engine's planner, compiling it
+// without running it, with params bound as Execute would bind them. An error
+// means the planner could not be asked at all, which is not the same as a
+// statement it refused to compile: that one comes back opaque.
+Plan(ctx context.Context, cred credential.Credential, host config.HostConfig,
+    statements []string, params map[string]string) ([]sqlscan.Statement, error)
+```
+
+`precheck.PlanRunner` becomes `func(statements, params) ([]Statement, error)`.
+The CLI still builds it as a closure, so the deadline and the decision to
+connect at all stay with the caller, and a nil runner still yields an
+incomplete document rather than a clean one. The gate fails closed on a planner
+that answers for fewer statements than it was given. `precheck.Input` loses
+`Cred`, which only the probe used.
+
+**Connection settings.** Every setting the host decides is written into the
+connection URL: server, port or named instance, database, user, password,
+`app name = db-query`, and encryption. The driver reads no `SQLCMD*` variable,
+so the inherited-environment rule of §6 holds by construction.
+
+Encryption is **on, with the certificate verified**, unless the host says
+otherwise. This matches Microsoft's ODBC Driver 18 and its `sqlcmd`, and is
+stricter than the driver's own default, which encrypts only the login and
+trusts any certificate. Host keys:
+
+| Key | Values | Default |
+|-----|--------|---------|
+| `encrypt` | `true`, `strict` (TDS 8), `false` (login only), `disable` | `true` |
+| `trustservercertificate` | `true` skips certificate verification | unset (verify) |
+| `hostnameincertificate` | the name to verify the certificate against | the host |
+| `instance` | a named instance, located through SQL Browser; overrides `port` | none |
+
+A certificate failure is reported with a pointer to `trustservercertificate`.
+Authentication is SQL login only, as it was; Windows and Entra ID logins, which
+the driver supports, are not wired.
+
+**Parameters (amends §7.3).** Parameters are named and bound by the server:
+`@name` in the SQL, `--param name=value` on the command line. Each batch is
+scanned (with the span-skipping walk the classifier uses, so literals, comments
+and bracketed identifiers are skipped and `@@ROWCOUNT` is not a reference) for
+the names it references, and only those that were given a value are sent. An
+unbound reference is left alone, since `@name` is also how T-SQL spells a local
+variable; a bound value that nothing references is ignored, as on postgres.
+Names match case-insensitively, as variable names do under the default
+collations, and two `--param` names differing only in case are refused as
+ambiguous. A name that is not a regular identifier is refused before a
+connection is opened, with a pointer to the right spelling when it carries a
+leading `@`.
+
+Every value is sent as `nvarchar` sized to the value (`nvarchar(max)` when
+empty or over 4000 UTF-16 units), which is how the driver binds a Go string.
+SQL Server converts it where the statement compares it with another type;
+`TOP` and `OFFSET` do not convert, and need an explicit `CAST`.
+
+This is a breaking change for saved SQL Server queries written with `$(name)`.
+Nothing substitutes `$(name)` any more: inside quotes it is an ordinary string,
+outside them a syntax error.
+
+**Scripts.** A submission is split at `GO` lines (`sqlscan.Batches`, which
+keeps everything else verbatim, so a batch's statements and their shared
+variables reach the server together). `GO n` repeats the batch `n` times, as
+sqlcmd did. Batches run in order on one connection, so a temporary table or a
+`SET` survives into the next batch. There is deliberately no implicit
+transaction, matching sqlcmd: the first batch to fail stops the run and the
+error names it (`batch 2 of 3: …`), but earlier batches stay applied. Unlike
+postgres, T-SQL has statements that refuse to run inside a transaction
+(`ALTER DATABASE`, `BACKUP`), and an engine error does not always abort a
+transaction unless `XACT_ABORT` is on, so wrapping would not deliver the
+all-or-nothing guarantee it suggests. A script that needs it states it with
+`SET XACT_ABORT ON` and its own `BEGIN TRANSACTION`.
+
+**Values.** Rows stay `[][]*string`, rendered to match what sqlcmd printed so
+output keeps its shape: `bit` as `1`/`0`, `decimal` and `money` as the server
+wrote them, binary as `0x` and upper-case hex, `uniqueidentifier` in its
+canonical form, and dates and times at the column's declared scale
+(`datetime2(7)` as `2026-10-26 09:05:07.1234567`, `datetime` with
+milliseconds).
+
+**Classification (amends §13.13, §13.15).** The planner still classifies one
+statement at a time under `SET SHOWPLAN_XML ON`, now on one connection for the
+whole submission, and the `SET` is made again before every statement. That is
+load-bearing: `SHOWPLAN_XML` executes a `SET SHOWPLAN_XML OFF` it is handed, so
+with the `SET` made once, `SET SHOWPLAN_XML OFF; SELECT * INTO t2 FROM t` ran
+its `SELECT INTO` during the pre-check (reproduced against SQL Server 2022
+before the fix, and now an integration test). The `SET` must stand alone in its
+batch, so a statement can switch plan-only off only for what follows it, and
+what follows it is always preceded by a fresh `SET`. If the `SET` fails, the
+probe stops, and a result set that is not a showplan document makes the
+statement opaque. The engine returns no plan for a parameterised
+`sp_executesql` call under `SHOWPLAN_XML` (verified against SQL Server 2022),
+so each statement is planned as text with its bound parameters declared in
+front of it, at the type the driver will send:
+
+```sql
+DECLARE @who nvarchar(5);
+SELECT id FROM people WHERE name = @who
+```
+
+The `DECLARE` contributes no statement of its own to the plan, and the
+statement compiles exactly as it will run, including a `TOP (@n)` that fails
+both ways. The `$(name)` normaliser of §13.15 is removed with it.
+
+A login, network or TLS failure is now an error and makes the document
+`incomplete`, rather than reading as a statement that "did not compile". The
+refusal for an incomplete pre-check no longer suggests `readonly = false`, which
+could not have helped.
+
+Two limits are unchanged and stated so they are known. Planning is per
+statement, so a statement that reads a local variable declared by an earlier
+statement in the same batch does not compile and is refused as `opaque`; the
+remedy is to bind the value with `--param`. And the planner mechanism still
+needs a connection, so a SQL Server dry run cannot work against an unreachable
+host.
+
+#### Testing
+
+The unit suites cover the connection URL (through the driver's own parser),
+batch splitting, parameter scanning, declaration typing, value rendering and
+error formatting without a server. The integration suite runs the SQL Server
+cases against a real 2022 container with no `sqlcmd` installed, including
+hostile parameter values, several result sets, a failing batch, value
+rendering, a 9000-character value, and a pre-check that must stay plan-only;
+its fixtures are seeded through the driver. That retires §13.15's caveat that
+the SQL Server planner path was untested against a real instance.

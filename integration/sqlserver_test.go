@@ -18,7 +18,7 @@ func mssqlReady(t testing.TB) {
 	mssqlOnce.Do(func() {
 		waitReady(t, "mssql-master", 180*time.Second)
 
-		// The fixture is loaded with sqlcmd rather than with db-query, which
+		// The fixture is loaded through the driver rather than with db-query, which
 		// refuses to build it: CREATE and DROP classify as destructive and
 		// CREATE DATABASE as admin, and sqlscan.Class.Permitted allows only
 		// reads on a read-only host and only reads and writes on a writable
@@ -85,43 +85,143 @@ func TestSQLServerCredentialFromEnv(t *testing.T) {
 	})
 }
 
-func TestSQLServerVariableResolution(t *testing.T) {
+func TestSQLServerParams(t *testing.T) {
 	mssqlReady(t)
-	t.Run("param binds via sqlcmd -v scripting variable", func(t *testing.T) {
+	t.Run("named param binds server-side", func(t *testing.T) {
 		res := runTool(t, nil, "query", "--host", "mssql",
 			"--param", "who=Grace",
-			"SELECT id FROM people WHERE name = '$(who)'")
-		if res.code != 0 {
-			t.Fatalf("code=%d stderr=%s", res.code, res.stderr)
-		}
-		if !strings.Contains(res.stdout, "2") {
-			t.Fatalf("stdout = %q", res.stdout)
-		}
-	})
-	t.Run("numeric param", func(t *testing.T) {
-		res := runTool(t, nil, "query", "--host", "mssql",
-			"--param", "min=2",
-			"SELECT count(*) AS n FROM people WHERE id >= $(min)")
-		if res.code != 0 || !strings.Contains(res.stdout, "2") {
+			"SELECT id FROM people WHERE name = @who")
+		if res.code != 0 || res.stdout != "id\n2\n" {
 			t.Fatalf("code=%d stdout=%q stderr=%s", res.code, res.stdout, res.stderr)
 		}
 	})
-	t.Run("unsafe param value is rejected before reaching sqlcmd", func(t *testing.T) {
+	t.Run("a value compared with an int column converts", func(t *testing.T) {
+		res := runTool(t, nil, "query", "--host", "mssql",
+			"--param", "min=2",
+			"SELECT count(*) AS n FROM people WHERE id >= @min")
+		if res.code != 0 || res.stdout != "n\n2\n" {
+			t.Fatalf("code=%d stdout=%q stderr=%s", res.code, res.stdout, res.stderr)
+		}
+	})
+	t.Run("a hostile value is data, not SQL", func(t *testing.T) {
 		res := runTool(t, nil, "query", "--host", "mssql",
 			"--param", "who=x'; DROP TABLE people; --",
-			"SELECT id FROM people WHERE name = '$(who)'")
-		if res.code == 0 {
-			t.Fatal("unsafe value must be rejected")
+			"SELECT id FROM people WHERE name = @who")
+		if res.code != 0 || res.stdout != "id\n" {
+			t.Fatalf("code=%d stdout=%q stderr=%s", res.code, res.stdout, res.stderr)
 		}
-		if !strings.Contains(res.stderr, "unsafe") {
-			t.Fatalf("stderr = %s", res.stderr)
-		}
-		// Rejection must happen client-side: the table is untouched.
 		check := runTool(t, nil, "query", "--host", "mssql", "SELECT count(*) AS n FROM people")
-		if check.code != 0 || !strings.Contains(check.stdout, "3") {
+		if check.code != 0 || check.stdout != "n\n3\n" {
 			t.Fatalf("people table damaged? %+v", check)
 		}
 	})
+	t.Run("a batch's own variable is not a param", func(t *testing.T) {
+		res := runTool(t, nil, "query", "--host", "mssql",
+			"--param", "who=Ada",
+			"DECLARE @n int = 1; SELECT name FROM people WHERE id = @n AND name = @who")
+		// Planned statement by statement, the SELECT does not compile without
+		// the DECLARE before it, so the pre-check refuses it: exit 5.
+		if res.code != 5 {
+			t.Fatalf("code=%d stdout=%q stderr=%s", res.code, res.stdout, res.stderr)
+		}
+	})
+	t.Run("the old $(name) spelling is a plain literal now", func(t *testing.T) {
+		res := runTool(t, nil, "query", "--host", "mssql",
+			"--param", "who=Grace",
+			"SELECT id FROM people WHERE name = '$(who)'")
+		// Nothing substitutes it any more, so the query runs and matches
+		// nothing. Saved queries written for sqlcmd need rewriting.
+		if res.code != 0 || res.stdout != "id\n" {
+			t.Fatalf("code=%d stdout=%q stderr=%s", res.code, res.stdout, res.stderr)
+		}
+	})
+	t.Run("an @-prefixed --param name is pointed at the right spelling", func(t *testing.T) {
+		res := runTool(t, nil, "query", "--host", "mssql",
+			"--param", "@who=Grace",
+			"SELECT id FROM people WHERE name = @who")
+		if res.code == 0 || !strings.Contains(res.stderr, "--param who=value") {
+			t.Fatalf("code=%d stderr=%s", res.code, res.stderr)
+		}
+	})
+}
+
+func TestSQLServerScripts(t *testing.T) {
+	mssqlReady(t)
+	t.Run("every result set is returned", func(t *testing.T) {
+		res := runTool(t, nil, "query", "--host", "mssql",
+			"SELECT 1 AS a; SELECT 2 AS b")
+		if res.code != 0 || res.stdout != "a\n1\n\nb\n2\n" {
+			t.Fatalf("code=%d stdout=%q stderr=%s", res.code, res.stdout, res.stderr)
+		}
+	})
+	t.Run("a failing batch is named", func(t *testing.T) {
+		res := runTool(t, nil, "query", "--host", "mssql",
+			"SELECT 1 AS a\nGO\nSELECT 1/0 AS boom")
+		if res.code == 0 || !strings.Contains(res.stderr, "batch 2 of 2") || !strings.Contains(res.stderr, "Msg 8134") {
+			t.Fatalf("code=%d stderr=%s", res.code, res.stderr)
+		}
+	})
+}
+
+func TestSQLServerValues(t *testing.T) {
+	mssqlReady(t)
+	res := runTool(t, nil, "query", "--host", "mssql", "--output", "json", `SELECT
+		CAST(1.50 AS decimal(10,2)) AS d,
+		CAST('6F9619FF-8B86-D011-B42D-00C04FC964FF' AS uniqueidentifier) AS g,
+		0x0AFF AS b,
+		CAST(1 AS bit) AS bt,
+		CAST('2026-10-26T09:05:07.1234567' AS datetime2) AS dt2,
+		CAST('2026-10-26T09:05:07.123' AS datetime) AS dt,
+		CAST('2026-10-26' AS date) AS dd,
+		REPLICATE(CAST('x' AS nvarchar(max)), 9000) AS long_text`)
+	if res.code != 0 {
+		t.Fatalf("code=%d stderr=%s", res.code, res.stderr)
+	}
+	var rows []map[string]*string
+	if err := json.Unmarshal([]byte(res.stdout), &rows); err != nil || len(rows) != 1 {
+		t.Fatalf("not one JSON row: %v\n%s", err, res.stdout)
+	}
+	want := map[string]string{
+		"d":   "1.50",
+		"g":   "6F9619FF-8B86-D011-B42D-00C04FC964FF",
+		"b":   "0x0AFF",
+		"bt":  "1",
+		"dt2": "2026-10-26 09:05:07.1234567",
+		"dt":  "2026-10-26 09:05:07.123",
+		"dd":  "2026-10-26",
+	}
+	for k, v := range want {
+		if rows[0][k] == nil || *rows[0][k] != v {
+			t.Errorf("%s = %v, want %q", k, rows[0][k], v)
+		}
+	}
+	// sqlcmd truncated variable-length values at 8000 characters.
+	if rows[0]["long_text"] == nil || len(*rows[0]["long_text"]) != 9000 {
+		t.Errorf("long_text was truncated")
+	}
+}
+
+// TestSQLServerPrecheckStaysPlanOnly guards the planner's one hard promise:
+// it compiles and never runs. SHOWPLAN_XML executes a SET SHOWPLAN_XML OFF it
+// is handed, so a planner that set plan-only once per connection would have
+// run every statement after one, during a check meant to run nothing.
+func TestSQLServerPrecheckStaysPlanOnly(t *testing.T) {
+	mssqlReady(t)
+	seedMSSQL(t, "dbqtest", "IF OBJECT_ID('planner_breach') IS NOT NULL DROP TABLE planner_breach")
+	res := runTool(t, nil, "query", "--host", "mssql", "--dry-run",
+		"SET SHOWPLAN_XML OFF; SELECT * INTO planner_breach FROM people")
+	if res.code != 0 {
+		t.Fatalf("code=%d stderr=%s", res.code, res.stderr)
+	}
+	if !strings.Contains(res.stdout, `"SELECT INTO"`) {
+		t.Errorf("the SELECT INTO was not planned: %s", res.stdout)
+	}
+	check := runTool(t, nil, "query", "--host", "mssql",
+		"SELECT count(*) AS n FROM sys.tables WHERE name = 'planner_breach'")
+	if check.code != 0 || check.stdout != "n\n0\n" {
+		seedMSSQL(t, "dbqtest", "IF OBJECT_ID('planner_breach') IS NOT NULL DROP TABLE planner_breach")
+		t.Fatalf("the pre-check executed a statement: %+v", check)
+	}
 }
 
 func TestSQLServerOutputFormats(t *testing.T) {
@@ -139,16 +239,18 @@ func TestSQLServerOutputFormats(t *testing.T) {
 		if len(rows) != 3 {
 			t.Fatalf("rows = %d", len(rows))
 		}
-		// v1 accepted limitation: Path A prints NULL as the literal
-		// string "NULL" — never a JSON null.
-		if rows[0]["nickname"] == nil || *rows[0]["nickname"] != "NULL" {
-			t.Fatalf("nickname = %v (v1 Path A renders NULL literally)", rows[0]["nickname"])
+		// NULL is a JSON null, and an empty string stays an empty string.
+		if rows[0]["nickname"] != nil {
+			t.Fatalf("nickname = %q, want null", *rows[0]["nickname"])
+		}
+		if rows[1]["nickname"] == nil || *rows[1]["nickname"] != "" {
+			t.Fatalf("nickname = %v, want the empty string", rows[1]["nickname"])
 		}
 		if *rows[2]["nickname"] != "EWD" {
 			t.Fatalf("nickname = %v", rows[2]["nickname"])
 		}
 	})
-	t.Run("comma-containing value survives the 0x1F separator", func(t *testing.T) {
+	t.Run("comma-containing value survives", func(t *testing.T) {
 		res := runTool(t, nil, "query", "--host", "mssql", "--output", "json",
 			"SELECT note FROM people WHERE id = 3")
 		if res.code != 0 {

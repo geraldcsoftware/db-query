@@ -1,5 +1,5 @@
 // Package session resolves a host's adapter and credential once, and runs a
-// query through the shared adapter/executor pipeline. It is the seam
+// query through its adapter. It is the seam
 // between internal/cli's command implementations and internal/tui's
 // interactive session — both call Setup and RunOnce so host/credential
 // resolution and query execution are defined exactly once. cli imports
@@ -99,8 +99,8 @@ func Setup(c CommonFlags, stderr io.Writer) (Resolved, int) {
 
 // RunOnce runs a query against a resolved host and returns its result sets,
 // applying the exit-code contract: 1 (the submission could not be sent, or
-// the reply could not be read), 2 (the run could not happen: a client that
-// would not start, a timeout), 3 (schema error), 4 (other SQL error),
+// the reply could not be read), 2 (the run could not happen: it timed out or
+// was cancelled), 3 (schema error), 4 (other SQL error),
 // 0 (result sets valid). It renders any error itself. When hintRefresh is set
 // a schema error also hints at --refresh-schema; the internal schema build
 // passes false, since that hint only makes sense for the user's query.

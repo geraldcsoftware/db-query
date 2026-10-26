@@ -6,23 +6,21 @@ import (
 
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/config"
-	"github.com/geraldcsoftware/db-query/internal/credential"
-	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
-// PlanRunner executes a planner probe. It is supplied by the caller rather
-// than reached for by this package, which keeps §11's rule intact: the
-// executor runs invocations, and neither the adapter nor this gate does.
-// A nil PlanRunner means no connection is available, which for a
-// planner-mechanism provider yields an incomplete document, never a clean one.
-type PlanRunner func(inv executor.Invocation) (executor.RawResult, error)
+// PlanRunner asks the engine's planner to classify statements, with params
+// bound as a real run would bind them. It is supplied by the caller rather
+// than reached for by this package, so the caller decides whether a connection
+// may be made and under what deadline. A nil PlanRunner means no connection is
+// available, which for a planner-mechanism provider yields an incomplete
+// document, never a clean one.
+type PlanRunner func(statements []string, params map[string]string) ([]sqlscan.Statement, error)
 
 // Input is everything a verdict depends on.
 type Input struct {
 	Adapter    adapter.Adapter
 	Host       config.HostConfig
-	Cred       credential.Credential // for a planner probe's connection only
 	SQL        string
 	Params     map[string]string
 	Source     Source
@@ -87,13 +85,10 @@ func Evaluate(in Input) Document {
 		return doc
 	}
 
-	// Placeholders are expanded by the client, so neither a grammar nor a
-	// planner can parse one. Classification sees them replaced by inert
-	// literals; the digest above binds the original text, and the adapter
-	// validates the values themselves.
-	classifiable := sqlscan.NormalisePlaceholders(in.SQL, in.Params, in.Adapter.Dialect())
-
-	verdict, err := in.Adapter.Classify(classifiable)
+	// Both providers bind parameters server-side, so a placeholder is part of
+	// the grammar the classifier reads and the submission is classified as it
+	// stands.
+	verdict, err := in.Adapter.Classify(in.SQL)
 	if err == sqlscan.ErrNeedsPlan {
 		verdict, err = classifyByPlan(in)
 		if err != nil {
@@ -131,32 +126,26 @@ func Evaluate(in Input) Document {
 	return doc
 }
 
-// classifyByPlan drives the probe pair one statement at a time, which is why
-// the pre-pass splits the submission: a planner takes one statement.
+// classifyByPlan hands the planner the statements the pre-pass split the
+// submission into, because a plan is reported per statement.
 func classifyByPlan(in Input) (sqlscan.Verdict, error) {
 	if in.RunPlan == nil {
 		return sqlscan.Verdict{}, fmt.Errorf("this provider classifies through the engine, and no connection is available")
 	}
-	statements, _ := sqlscan.Scan(sqlscan.NormalisePlaceholders(in.SQL, in.Params, in.Adapter.Dialect()), in.Adapter.Dialect())
+	statements, _ := sqlscan.Scan(in.SQL, in.Adapter.Dialect())
 	if len(statements) == 0 {
 		return sqlscan.Verdict{}, fmt.Errorf("no statements found")
 	}
-	v := sqlscan.Verdict{Mechanism: sqlscan.MechanismPlanner, Version: in.Host.Provider + " engine planner"}
-	for i, stmt := range statements {
-		inv, err := in.Adapter.PlanInvocation(in.Cred, in.Host, stmt)
-		if err != nil {
-			return sqlscan.Verdict{}, err
-		}
-		res, err := in.RunPlan(inv)
-		if err != nil {
-			return sqlscan.Verdict{}, err
-		}
-		class, why, err := in.Adapter.ParsePlan(res)
-		if err != nil {
-			return sqlscan.Verdict{}, err
-		}
-		v.Statements = append(v.Statements, sqlscan.Statement{Index: i + 1, Class: class, DecidedBy: why})
+	planned, err := in.RunPlan(statements, in.Params)
+	if err != nil {
+		return sqlscan.Verdict{}, err
 	}
+	// Fail closed on a planner that answers for fewer statements than it was
+	// given: a statement nobody classified must not pass by omission.
+	if len(planned) != len(statements) {
+		return sqlscan.Verdict{}, fmt.Errorf("the planner classified %d of %d statements", len(planned), len(statements))
+	}
+	v := sqlscan.Verdict{Mechanism: sqlscan.MechanismPlanner, Version: in.Host.Provider + " engine planner", Statements: planned}
 	v.Reduce()
 	return v, nil
 }

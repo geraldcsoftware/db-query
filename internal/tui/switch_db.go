@@ -114,7 +114,7 @@ func introspectInto(ctx context.Context, r session.Resolved, database string) er
 
 // openSwitcher opens the popup on the cached database names and asks for a
 // fresh listing behind it. Opening on the cache is what makes F2 feel
-// instant: the listing is a subprocess against a possibly-distant host, and
+// instant: the listing is a round trip to a possibly-distant host, and
 // waiting for it before drawing anything would make the key feel broken.
 func (m model) openSwitcher() (tea.Model, tea.Cmd) {
 	names, _ := dblist.Read(dblist.CachePath(m.session.Host.Name)) // absent cache is an empty list, not an error
@@ -208,8 +208,8 @@ func (m model) startIntrospect() (tea.Model, tea.Cmd) {
 }
 
 // cancelIntrospect asks the running introspection to stop. The state change
-// waits for the introspectDoneMsg that follows, since the child process takes
-// a moment to die and reporting it finished before it has is a lie the next
+// waits for the introspectDoneMsg that follows, since the run takes a moment
+// to stop and reporting it finished before it has is a lie the next
 // keystroke could catch out.
 func (m model) cancelIntrospect() (tea.Model, tea.Cmd) {
 	if m.introspectCancel != nil {

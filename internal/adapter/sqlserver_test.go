@@ -1,248 +1,283 @@
 package adapter
 
 import (
-	"io"
+	"context"
+	"database/sql"
+	"errors"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	mssql "github.com/microsoft/go-mssqldb"
+	"github.com/microsoft/go-mssqldb/msdsn"
 
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
-	"github.com/geraldcsoftware/db-query/internal/executor"
 )
 
-func TestSqlserverEnv(t *testing.T) {
+func TestSQLServerDSN(t *testing.T) {
 	a := sqlserverAdapter{}
-	cred := credential.Credential{Username: "sa", Password: "pw"}
+	cred := credential.Credential{Username: "svc reports", Password: "p@ss:w/rd?&"}
 
-	t.Run("all provider vars set explicitly", func(t *testing.T) {
-		env := a.Env(cred, config.HostConfig{Host: "sql01", Database: "reports"})
-		want := map[string]string{
-			"SQLCMDSERVER": "sql01", "SQLCMDUSER": "sa",
-			"SQLCMDPASSWORD": "pw", "SQLCMDDBNAME": "reports",
+	parse := func(t *testing.T, h config.HostConfig) msdsn.Config {
+		t.Helper()
+		cfg, err := msdsn.Parse(a.dsn(cred, h))
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(env, want) {
-			t.Fatalf("env = %v, want %v", env, want)
+		return cfg
+	}
+
+	t.Run("credential survives URL escaping", func(t *testing.T) {
+		cfg := parse(t, config.HostConfig{Host: "sql01", Database: "reports"})
+		if cfg.User != cred.Username || cfg.Password != cred.Password {
+			t.Fatalf("user = %q, password mangled", cfg.User)
+		}
+		if cfg.Database != "reports" || cfg.Host != "sql01" || cfg.Port != 1433 {
+			t.Fatalf("cfg = %s:%d/%s", cfg.Host, cfg.Port, cfg.Database)
+		}
+		if cfg.AppName != "db-query" {
+			t.Fatalf("app name = %q", cfg.AppName)
 		}
 	})
-	t.Run("port becomes tcp server string", func(t *testing.T) {
-		env := a.Env(cred, config.HostConfig{Host: "sql01", Port: 11433})
-		if env["SQLCMDSERVER"] != "tcp:sql01,11433" {
-			t.Fatalf("server = %q", env["SQLCMDSERVER"])
+	t.Run("localhost and an explicit port", func(t *testing.T) {
+		cfg := parse(t, config.HostConfig{Port: 11433})
+		if cfg.Host != "localhost" || cfg.Port != 11433 {
+			t.Fatalf("cfg = %s:%d", cfg.Host, cfg.Port)
 		}
 	})
 	t.Run("instance wins over port", func(t *testing.T) {
-		env := a.Env(cred, config.HostConfig{
-			Host: "sql01", Extra: map[string]string{"instance": "SQLEXPRESS"},
+		cfg := parse(t, config.HostConfig{
+			Host: "sql01", Port: 11433, Extra: map[string]string{"instance": "SQLEXPRESS"},
 		})
-		if env["SQLCMDSERVER"] != `sql01\SQLEXPRESS` {
-			t.Fatalf("server = %q", env["SQLCMDSERVER"])
+		if cfg.Instance != "SQLEXPRESS" || cfg.Port != 0 {
+			t.Fatalf("instance = %q port = %d", cfg.Instance, cfg.Port)
+		}
+	})
+	t.Run("encryption is required and the certificate verified by default", func(t *testing.T) {
+		cfg := parse(t, config.HostConfig{Host: "sql01"})
+		if cfg.Encryption != msdsn.EncryptionRequired {
+			t.Fatalf("encryption = %v, want required", cfg.Encryption)
+		}
+		if cfg.TrustServerCertificate || cfg.TLSConfig == nil || cfg.TLSConfig.InsecureSkipVerify {
+			t.Fatal("the server certificate must be verified unless the host opts out")
+		}
+	})
+	t.Run("a host can opt out of verification or encryption", func(t *testing.T) {
+		cfg := parse(t, config.HostConfig{Host: "sql01", Extra: map[string]string{"trustservercertificate": "true"}})
+		if !cfg.TrustServerCertificate {
+			t.Fatal("trustservercertificate not passed through")
+		}
+		cfg = parse(t, config.HostConfig{Host: "sql01", Extra: map[string]string{"encrypt": "disable"}})
+		if cfg.Encryption != msdsn.EncryptionDisabled {
+			t.Fatalf("encryption = %v, want disabled", cfg.Encryption)
+		}
+		cfg = parse(t, config.HostConfig{Host: "sql01", Extra: map[string]string{"encrypt": "strict"}})
+		if cfg.Encryption != msdsn.EncryptionStrict {
+			t.Fatalf("encryption = %v, want strict", cfg.Encryption)
+		}
+	})
+	t.Run("no database means the login's default", func(t *testing.T) {
+		u, err := url.Parse(a.dsn(cred, config.HostConfig{Host: "sql01"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if u.Query().Has("database") {
+			t.Fatalf("database set without being configured: %s", u.RawQuery)
 		}
 	})
 }
 
-func TestSqlserverBuild(t *testing.T) {
+func TestSQLServerOpenDoesNotLeakTheDSN(t *testing.T) {
+	cred := credential.Credential{Username: "sa", Password: "Sekr1t-pw"}
+	_, _, err := sqlserverAdapter{}.open(context.Background(), cred, config.HostConfig{
+		Name: "bad", Host: "sql01", Extra: map[string]string{"encrypt": "sometimes"},
+	})
+	var le *LocalError
+	if !errors.As(err, &le) {
+		t.Fatalf("err = %v, want a LocalError", err)
+	}
+	if strings.Contains(err.Error(), cred.Password) {
+		t.Fatalf("error leaks the password: %v", err)
+	}
+}
+
+func TestSQLServerPlan(t *testing.T) {
 	a := sqlserverAdapter{}
 
-	t.Run("path A coaxing flags present", func(t *testing.T) {
-		inv, err := a.Build(config.HostConfig{}, Query{SQL: "SELECT 1"})
+	t.Run("splits at GO and keeps a batch together", func(t *testing.T) {
+		got, err := a.plan(Query{SQL: "DECLARE @x int = 1; SELECT @x\nGO 2\nSELECT 2"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		argv := strings.Join(inv.Argv, " ")
-		for _, needed := range []string{"-b", "-r 1", "-s \x1f", "-W", "-y 8000", "-Y 0"} {
-			if !strings.Contains(argv, needed) {
-				t.Fatalf("argv %q missing %q", argv, needed)
-			}
-		}
-		sql, _ := io.ReadAll(inv.Stdin)
-		if !strings.HasPrefix(string(sql), "SET NOCOUNT ON;") {
-			t.Fatalf("stdin = %q, want NOCOUNT prefix", sql)
-		}
-		if !strings.Contains(string(sql), "SELECT 1") {
-			t.Fatalf("stdin = %q", sql)
+		if len(got) != 2 || got[0].sql != "DECLARE @x int = 1; SELECT @x" || got[0].count != 2 || got[1].count != 1 {
+			t.Fatalf("batches = %+v", got)
 		}
 	})
 
-	t.Run("params bind via -v", func(t *testing.T) {
-		inv, err := a.Build(config.HostConfig{}, Query{
-			SQL: "SELECT * FROM t WHERE id = $(id)", Params: map[string]string{"id": "42"},
+	t.Run("binds only the params a batch references", func(t *testing.T) {
+		got, err := a.plan(Query{
+			SQL:    "SELECT @who\nGO\nSELECT @Min, @local",
+			Params: map[string]string{"who": "Ada", "min": "2"},
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(strings.Join(inv.Argv, " "), "-v id=42") {
-			t.Fatalf("argv = %v", inv.Argv)
+		want0 := []any{sql.Named("who", "Ada")}
+		want1 := []any{sql.Named("min", "2")}
+		if !reflect.DeepEqual(got[0].args, want0) || !reflect.DeepEqual(got[1].args, want1) {
+			t.Fatalf("args = %v / %v", got[0].args, got[1].args)
 		}
 	})
 
-	t.Run("unsafe param values rejected before execution", func(t *testing.T) {
-		bad := []string{"x'y", `x"y`, "1;DROP TABLE t", "a--b", "$(oops)", "line\nbreak"}
-		for _, v := range bad {
-			_, err := a.Build(config.HostConfig{}, Query{
-				SQL: "SELECT $(p)", Params: map[string]string{"p": v},
-			})
-			if err == nil {
-				t.Errorf("value %q must be rejected", v)
-			} else if strings.Contains(err.Error(), v) {
-				t.Errorf("error must not echo the value %q", v)
+	t.Run("hostile values are bound, not refused", func(t *testing.T) {
+		for _, v := range []string{"x'y", `x"y`, "1;DROP TABLE t", "a--b", "$(oops)", "line\nbreak"} {
+			got, err := a.plan(Query{SQL: "SELECT @p", Params: map[string]string{"p": v}})
+			if err != nil {
+				t.Fatalf("value %q refused: %v", v, err)
+			}
+			if got[0].sql != "SELECT @p" {
+				t.Fatalf("value reached the SQL text: %q", got[0].sql)
 			}
 		}
 	})
 
-	t.Run("benign values pass", func(t *testing.T) {
-		for _, v := range []string{"42", "svc_reports", "2024-01-01", "some words"} {
-			if _, err := a.Build(config.HostConfig{}, Query{
-				SQL: "SELECT $(p)", Params: map[string]string{"p": v},
-			}); err != nil {
-				t.Errorf("value %q wrongly rejected: %v", v, err)
+	t.Run("bad names are refused without echoing the value", func(t *testing.T) {
+		for _, k := range []string{"1", "@who", "a-b", "a b", "", "9lives"} {
+			_, err := a.plan(Query{SQL: "SELECT 1", Params: map[string]string{k: "SECRET"}})
+			var le *LocalError
+			if !errors.As(err, &le) {
+				t.Fatalf("name %q: err = %v, want a LocalError", k, err)
+			}
+			if strings.Contains(err.Error(), "SECRET") {
+				t.Fatalf("error echoes the value: %v", err)
 			}
 		}
 	})
-}
 
-func TestSqlserverParse(t *testing.T) {
-	a := sqlserverAdapter{}
-	sep := "\x1f"
-
-	t.Run("headers, dash rule skipped, data parsed", func(t *testing.T) {
-		out := strings.Join([]string{
-			"id" + sep + "name" + sep + "nickname",
-			"--" + sep + "----" + sep + "--------",
-			"1" + sep + "Ada" + sep + "NULL",
-			"2" + sep + "Grace" + sep + "Gigi",
-		}, "\n") + "\n"
-		rows, err := a.Parse(executor.RawResult{Stdout: []byte(out)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(rows.Columns, []string{"id", "name", "nickname"}) {
-			t.Fatalf("columns = %v", rows.Columns)
-		}
-		if len(rows.Rows) != 2 {
-			t.Fatalf("rows = %d", len(rows.Rows))
-		}
-		// v1 accepts: Path A NULL is the literal string "NULL", never nil.
-		if rows.Rows[0][2] == nil || *rows.Rows[0][2] != "NULL" {
-			t.Fatalf("cell = %v", rows.Rows[0][2])
+	t.Run("an @ prefix is pointed at the right spelling", func(t *testing.T) {
+		_, err := a.plan(Query{SQL: "SELECT @who", Params: map[string]string{"@who": "Ada"}})
+		if err == nil || !strings.Contains(err.Error(), "--param who=value") {
+			t.Fatalf("err = %v", err)
 		}
 	})
 
-	t.Run("value containing comma survives 0x1F split", func(t *testing.T) {
-		out := "note\n----\na, b, c\n"
-		rows, err := a.Parse(executor.RawResult{Stdout: []byte(out)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if *rows.Rows[0][0] != "a, b, c" {
-			t.Fatalf("cell = %q", *rows.Rows[0][0])
-		}
-	})
-
-	t.Run("crlf normalized", func(t *testing.T) {
-		out := "id\r\n--\r\n7\r\n"
-		rows, err := a.Parse(executor.RawResult{Stdout: []byte(out)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if *rows.Rows[0][0] != "7" {
-			t.Fatalf("cell = %q", *rows.Rows[0][0])
-		}
-	})
-
-	t.Run("single-column empty-string rows survive", func(t *testing.T) {
-		// Real go-sqlcmd shape: header, rule, data rows (an empty-string
-		// value in a single-column result prints as a blank line under
-		// -W), then one blank trailer line after the result set.
-		out := "a\n-\n\nx\n\n"
-		rows, err := a.Parse(executor.RawResult{Stdout: []byte(out)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(rows.Rows) != 2 {
-			t.Fatalf("rows = %d, want 2 (empty-string row must not vanish)", len(rows.Rows))
-		}
-		if rows.Rows[0][0] == nil || *rows.Rows[0][0] != "" {
-			t.Fatalf("cell = %v, want non-nil empty string", rows.Rows[0][0])
-		}
-		if *rows.Rows[1][0] != "x" {
-			t.Fatalf("cell = %q", *rows.Rows[1][0])
-		}
-	})
-
-	t.Run("trailing empty-string row survives trailer strip", func(t *testing.T) {
-		out := "a\n-\nx\n\n\n" // rows "x", ""; then trailer blank line
-		rows, err := a.Parse(executor.RawResult{Stdout: []byte(out)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(rows.Rows) != 2 {
-			t.Fatalf("rows = %d, want 2", len(rows.Rows))
-		}
-		if rows.Rows[1][0] == nil || *rows.Rows[1][0] != "" {
-			t.Fatalf("cell = %v, want non-nil empty string", rows.Rows[1][0])
-		}
-	})
-
-	t.Run("zero-row result set is empty", func(t *testing.T) {
-		out := "a\n-\n\n" // header, rule, trailer blank line, no data
-		rows, err := a.Parse(executor.RawResult{Stdout: []byte(out)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(rows.Rows) != 0 {
-			t.Fatalf("rows = %d, want 0", len(rows.Rows))
-		}
-	})
-
-	t.Run("empty output is empty rows", func(t *testing.T) {
-		rows, err := a.Parse(executor.RawResult{Stdout: []byte("\n")})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(rows.Columns) != 0 {
-			t.Fatalf("rows = %+v", rows)
-		}
-	})
-
-	t.Run("missing header rule is an error", func(t *testing.T) {
-		if _, err := a.Parse(executor.RawResult{Stdout: []byte("id\n7\n")}); err == nil {
-			t.Fatal("want header-rule error")
-		}
-	})
-
-	t.Run("nonzero exit is a parse error", func(t *testing.T) {
-		_, err := a.Parse(executor.RawResult{ExitCode: 1, Stderr: []byte("Msg 102, Level 15")})
+	t.Run("names differing only in case are ambiguous", func(t *testing.T) {
+		_, err := a.plan(Query{SQL: "SELECT @id", Params: map[string]string{"id": "1", "ID": "2"}})
 		if err == nil {
-			t.Fatal("want error")
+			t.Fatal("want an ambiguity error")
+		}
+	})
+
+	t.Run("a client directive is refused", func(t *testing.T) {
+		_, err := a.plan(Query{SQL: ":r other.sql\nSELECT 1"})
+		var le *LocalError
+		if !errors.As(err, &le) || !strings.Contains(err.Error(), ":r other.sql") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("empty submission is no batches", func(t *testing.T) {
+		got, err := a.plan(Query{SQL: "  \nGO\n"})
+		if err != nil || len(got) != 0 {
+			t.Fatalf("got %v, %v", got, err)
 		}
 	})
 }
 
-func TestSqlserverIsSchemaError(t *testing.T) {
-	a := sqlserverAdapter{}
-	cases := []struct {
-		out  string
-		exit int
-		want bool
+type fakeColumn struct {
+	name  string
+	scale int64
+}
+
+func (c fakeColumn) DatabaseTypeName() string { return c.name }
+func (c fakeColumn) DecimalSize() (int64, int64, bool) {
+	return 0, c.scale, c.scale >= 0
+}
+
+func TestSQLServerText(t *testing.T) {
+	at := time.Date(2026, 10, 26, 9, 5, 7, 123456700, time.UTC)
+	tests := []struct {
+		name string
+		v    any
+		col  fakeColumn
+		want string
 	}{
-		{"Msg 207, Level 16, State 1, Server x\nInvalid column name 'nope'.", 1, true},
-		{"Msg 208, Level 16, State 1\nInvalid object name 'ghosts'.", 1, true},
-		{"Invalid column name 'nope'.", 1, true}, // go-sqlcmd: no Msg prefix
-		{"Invalid object name 'ghosts'.", 1, true},
-		{"Msg 102, Level 15, State 1\nIncorrect syntax near 'SELEC'.", 1, false},
-		{"Msg 207, ...", 0, false},
+		{"string", "Ada", fakeColumn{"NVARCHAR", -1}, "Ada"},
+		{"empty string is not NULL", "", fakeColumn{"VARCHAR", -1}, ""},
+		{"int", int64(-42), fakeColumn{"INT", -1}, "-42"},
+		{"float", 1.5, fakeColumn{"FLOAT", -1}, "1.5"},
+		{"real keeps single precision", float64(float32(0.1)), fakeColumn{"REAL", -1}, "0.1"},
+		{"bit true", true, fakeColumn{"BIT", -1}, "1"},
+		{"bit false", false, fakeColumn{"BIT", -1}, "0"},
+		{"decimal is the driver's text", []byte("1.50"), fakeColumn{"DECIMAL", 2}, "1.50"},
+		{"money", []byte("3.0000"), fakeColumn{"MONEY", -1}, "3.0000"},
+		{"binary is 0x hex", []byte{0x0a, 0xff}, fakeColumn{"VARBINARY", -1}, "0x0AFF"},
+		{"guid in SQL Server byte order",
+			[]byte{0x67, 0x45, 0x23, 0x01, 0xab, 0x89, 0xef, 0xcd, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef},
+			fakeColumn{"UNIQUEIDENTIFIER", -1}, "01234567-89AB-CDEF-0123-456789ABCDEF"},
+		{"date", at, fakeColumn{"DATE", -1}, "2026-10-26"},
+		{"datetime has milliseconds", at, fakeColumn{"DATETIME", -1}, "2026-10-26 09:05:07.123"},
+		{"smalldatetime", at, fakeColumn{"SMALLDATETIME", -1}, "2026-10-26 09:05:07"},
+		{"datetime2 at its scale", at, fakeColumn{"DATETIME2", 7}, "2026-10-26 09:05:07.1234567"},
+		{"datetime2(0)", at, fakeColumn{"DATETIME2", 0}, "2026-10-26 09:05:07"},
+		{"time at its scale", at, fakeColumn{"TIME", 3}, "09:05:07.123"},
+		{"datetimeoffset", at.In(time.FixedZone("", 2*3600)), fakeColumn{"DATETIMEOFFSET", 2},
+			"2026-10-26 11:05:07.12 +02:00"},
 	}
-	for _, c := range cases {
-		got := a.IsSchemaError(executor.RawResult{ExitCode: c.exit, Stderr: []byte(c.out)})
-		if got != c.want {
-			t.Errorf("IsSchemaError(%q) = %v, want %v", c.out, got, c.want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mssqlText(tt.v, tt.col)
+			if got == nil || *got != tt.want {
+				t.Fatalf("got %v, want %q", got, tt.want)
+			}
+		})
+	}
+	if mssqlText(nil, fakeColumn{"NVARCHAR", -1}) != nil {
+		t.Fatal("NULL must render as nil, not a string")
+	}
+}
+
+func TestSQLServerFailure(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("engine error keeps its number and position", func(t *testing.T) {
+		err := mssqlFailure(ctx, mssql.Error{Number: 102, Class: 15, State: 1, LineNo: 3, Message: "Incorrect syntax near 'SELEC'."}, "")
+		want := "Msg 102, Level 15, State 1, Line 3: Incorrect syntax near 'SELEC'."
+		var qe *QueryError
+		if !errors.As(err, &qe) || qe.Msg != want || qe.Schema {
+			t.Fatalf("err = %#v, want %q", err, want)
 		}
-	}
-	// Some sqlcmd builds print errors to stdout when -r isn't honored.
-	if !a.IsSchemaError(executor.RawResult{ExitCode: 1, Stdout: []byte("Msg 207, Level 16")}) {
-		t.Error("schema errors on stdout must also be detected")
-	}
+	})
+	t.Run("207 and 208 are schema errors", func(t *testing.T) {
+		for _, n := range []int32{207, 208} {
+			var qe *QueryError
+			if !errors.As(mssqlFailure(ctx, mssql.Error{Number: n}, ""), &qe) || !qe.Schema {
+				t.Errorf("Msg %d not flagged as a schema error", n)
+			}
+		}
+	})
+	t.Run("where names the batch", func(t *testing.T) {
+		err := mssqlFailure(ctx, mssql.Error{Number: 8134, Class: 16, State: 1, Message: "Divide by zero error encountered."}, "batch 2 of 3")
+		if !strings.HasPrefix(err.Error(), "batch 2 of 3: Msg 8134") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("a cancelled run reports the cancel", func(t *testing.T) {
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		if err := mssqlFailure(cctx, errors.New("connection reset"), ""); !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	})
+	t.Run("a non-engine error is still a query error", func(t *testing.T) {
+		var qe *QueryError
+		if !errors.As(mssqlFailure(ctx, errors.New("dial tcp: refused"), ""), &qe) {
+			t.Fatal("want a QueryError")
+		}
+	})
 }
 
 func TestSQLServerPreviewSQL(t *testing.T) {

@@ -60,7 +60,7 @@ type model struct {
 
 	// runner performs a single query run; it defaults to execute and is
 	// swapped out in tests so run dispatch can be tested without invoking a
-	// real adapter subprocess.
+	// real database.
 	runner func(ctx context.Context, r session.Resolved, sql string) ([]adapter.Rows, bool, error)
 
 	// cancel stops the currently in-flight run, if any. It is set by
@@ -547,15 +547,15 @@ func introspectFailure(err error) string {
 }
 
 // quit cancels any in-flight run before asking Bubble Tea to exit. The held
-// CancelFunc is the only way to stop it: it asks a postgres server to cancel
-// the statement and kills a sqlcmd child process, so skipping it would leave a
-// slow query running after the TUI is gone.
+// CancelFunc is the only way to stop it: it asks the server to cancel the
+// statement, so skipping it would leave a slow query running after the TUI is
+// gone.
 func (m *model) quit() tea.Cmd {
 	if m.cancel != nil {
 		m.cancel()
 		m.cancel = nil
 	}
-	// An introspection started from the switcher holds a child process of its
+	// An introspection started from the switcher holds a connection of its
 	// own, and it outlives the UI just as readily as a slow query would.
 	if m.introspectCancel != nil {
 		m.introspectCancel()

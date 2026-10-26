@@ -1,4 +1,4 @@
-// Package cli wires resolvers, adapters, executor, and renderers into
+// Package cli wires resolvers, adapters and renderers into
 // the user-facing command surface.
 package cli
 
@@ -46,7 +46,7 @@ Flags:
   --database (-d) <db>    : override the host's configured database (query, schema, introspect, databases)
   --config (-c) <path>    : config file (default: $DB_QUERY_CONFIG or ~/.config/db-query/config.toml)
   --output (-o) <format>  : json|table|text|auto (default auto)
-  --param (-p) k=v        : bind a query parameter (repeatable); postgres: $1 bound by --param 1=v, sqlcmd: $(k)
+  --param (-p) k=v        : bind a query parameter (repeatable); postgres: $1 bound by --param 1=v, sqlserver: @k by --param k=v
   --file (-f) <path>      : read SQL from file ("-" for stdin)
   --source (-s) <name>    : run a previously saved query by name (query)
   --save <name>           : save the query under this name after it runs successfully (query)
@@ -133,7 +133,7 @@ host's merged result and which section each key came from.
 Exit codes:
   0  success
   1  config, usage, or credential error
-  2  the run could not happen: sqlcmd could not start, or --timeout expired
+  2  the run could not happen: --timeout expired or the run was cancelled
   3  schema error — the query references an unknown table or column; re-run with --refresh-schema
   4  other SQL error, or the server could not be reached
   5  refused by the safety gate — the query would modify state, or carries a client directive
@@ -186,7 +186,7 @@ func canonicalCommand(name string) string {
 }
 
 // Exit codes: 0 success; 1 config/usage/credential error; 2 the run could
-// not happen (sqlcmd failed to start, or the deadline expired); 3 schema
+// not happen (the deadline expired, or the run was cancelled); 3 schema
 // error (unknown table/column) — the reintrospect-worthy signal; 4 other SQL
 // error, or a server that could not be reached.
 func Run(args []string, stdout, stderr io.Writer) int {

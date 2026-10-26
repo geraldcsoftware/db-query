@@ -177,7 +177,7 @@ func TestEscCancelsAnInFlightRunBeforeQuitting(t *testing.T) {
 
 	_, cmd := m.Update(key("esc"))
 	if !canceled {
-		t.Fatal("Esc must cancel the in-flight run so the client subprocess is not orphaned")
+		t.Fatal("Esc must cancel the in-flight run so the statement is not left running on the server")
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Fatalf("cmd() = %T, want tea.QuitMsg", cmd())

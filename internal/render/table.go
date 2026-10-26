@@ -14,8 +14,7 @@ import (
 // nullCell is how SQL NULL prints in table output. Unlike text mode — where
 // NULL and the empty string both collapse to a blank cell — the table is for
 // human eyes at a terminal, so it shows the distinction json already carries.
-// Only Postgres can produce it: the sqlserver adapter's Path A never yields a
-// nil *string (design.md §7.2).
+// Both adapters produce it: each reports SQL NULL as a nil *string.
 const nullCell = "NULL"
 
 // ellipsis marks a cell truncated at MaxColWidth. Matches the convention

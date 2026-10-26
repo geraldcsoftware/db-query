@@ -2,10 +2,8 @@
 // the server, how credentials are presented, what an error means and what the
 // output looks like. Every adapter hands back the same neutral Rows.
 //
-// The two providers reach the server differently. Postgres speaks the wire
-// protocol itself through pgx, so no client binary is needed. SQL Server still
-// drives sqlcmd: the adapter builds an invocation, the central executor runs
-// it and the adapter parses what comes back.
+// Both providers speak their wire protocol directly, so no client binary is
+// needed: postgres through pgx, SQL Server through go-mssqldb.
 package adapter
 
 import (
@@ -15,14 +13,14 @@ import (
 
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
-	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
 // Query is provider-native SQL plus its parameter values. Params are
 // written in native placeholder syntax in the SQL and are never substituted
-// into the text by Go. Postgres binds $1, $2 server-side, so its keys are the
-// positions ("1", "2"); sqlcmd expands $(name) from its own -v.
+// into the text by Go: both providers bind them server-side. Postgres
+// parameters are positional, $1 and $2, so its keys are the positions ("1",
+// "2"); SQL Server parameters are named, @name, so its keys are the names.
 type Query struct {
 	SQL    string
 	Params map[string]string
@@ -69,18 +67,19 @@ type Adapter interface {
 	// Classify reports what a submission would do (docs/design.md §13.13).
 	// An adapter that can decide from the text alone returns a verdict. One
 	// that needs the engine returns sqlscan.ErrNeedsPlan, and the caller then
-	// drives PlanInvocation and ParsePlan for each statement.
+	// calls Plan.
 	//
 	// Callers switch on that error, never on a provider name, so a third
 	// provider chooses its own mechanism without touching any call site.
 	Classify(sql string) (sqlscan.Verdict, error)
 
-	// PlanInvocation builds a plan-only probe for one statement, credentials
-	// included, and ParsePlan turns its raw result into that statement's
-	// class. Both are unused by an adapter whose Classify succeeds. They are a
-	// build/parse pair: the executor runs the probe, never the adapter.
-	PlanInvocation(cred credential.Credential, host config.HostConfig, stmt string) (executor.Invocation, error)
-	ParsePlan(r executor.RawResult) (sqlscan.Class, string, error)
+	// Plan classifies each statement through the engine's planner, compiling
+	// it without running it, with params bound as Execute would bind them. It
+	// returns one Statement per statement, in order. An error means the
+	// planner could not be asked at all, which is not the same as a statement
+	// it refused to compile: that one comes back opaque. Unused by an adapter
+	// whose Classify succeeds.
+	Plan(ctx context.Context, cred credential.Credential, host config.HostConfig, statements []string, params map[string]string) ([]sqlscan.Statement, error)
 
 	// Dialect selects the quoting and batching rules the lexical pre-pass
 	// applies before either mechanism runs.
@@ -128,7 +127,8 @@ func For(provider string) (Adapter, error) {
 	return a, nil
 }
 
-// sortedKeys gives deterministic argv ordering for map-carried params.
+// sortedKeys gives a deterministic order over map-carried params, so the
+// first bad name reported is the same one every run.
 func sortedKeys(m map[string]string) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

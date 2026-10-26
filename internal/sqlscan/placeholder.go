@@ -4,30 +4,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
-
-// NormalisePlaceholders replaces client-side parameter placeholders with inert
-// literals so a submission can be classified.
-//
-// Only SQL Server has any. sqlcmd expands $(name) before it sends anything, so
-// the planner cannot parse one, and without this every parameterised query
-// would classify opaque. Postgres parameters are the server's own $1, $2,
-// which its grammar parses as they stand, so a postgres submission is returned
-// untouched.
-//
-// Only names that are actually bound are replaced, because that is exactly
-// what sqlcmd does. Literals, comments and quoted identifiers are skipped.
-//
-// Only the shape is being classified, so what a placeholder is replaced with
-// does not matter as long as it parses and cannot itself change the shape. The
-// bound values are covered by the digest and validated in the adapter; this
-// text is used for classification and nothing else, and never for the digest.
-func NormalisePlaceholders(sql string, params map[string]string, d Dialect) string {
-	if len(params) == 0 || d != DialectTSQL {
-		return sql
-	}
-	return normaliseTSQL(sql, params)
-}
 
 // PositionalParams returns the distinct parameter numbers a postgres statement
 // references as $1, $2 and so on, in ascending order.
@@ -72,30 +50,116 @@ func PositionalParams(sql string) []int {
 // protocol counts them in a 16-bit field.
 const maxParams = 65535
 
-func normaliseTSQL(sql string, params map[string]string) string {
-	var b strings.Builder
+// NamedParams returns the distinct names a T-SQL batch references as @name, in
+// the order they first appear and spelt as they first appear.
+//
+// SQL Server binds parameters server-side through sp_executesql, which has to
+// be told the name of each one, so the adapter has to know which a batch uses.
+// A reference is not necessarily a parameter: @name is also how T-SQL spells a
+// local variable, so the caller binds the names it was given values for and
+// leaves the rest to the batch's own DECLARE. System functions such as
+// @@ROWCOUNT are not references. Literals, quoted identifiers and comments are
+// skipped through the same helper the classifier uses, and an @ that continues
+// an identifier is part of that identifier.
+func NamedParams(sql string) []string {
+	var out []string
+	seen := map[string]bool{}
 	src := []rune(sql)
 	for i := 0; i < len(src); {
 		if end, kind := skipSpan(src, i, DialectTSQL); kind != spanNone {
-			b.WriteString(string(src[i:end]))
 			i = end
 			continue
 		}
-		if src[i] == '$' && i+1 < len(src) && src[i+1] == '(' {
+		if src[i] != '@' || (i > 0 && isTSQLNameRune(src[i-1])) {
+			i++
+			continue
+		}
+		if i+1 < len(src) && src[i+1] == '@' {
+			// @@ROWCOUNT and friends: skip the whole name, so its tail is
+			// not read as a reference of its own.
 			j := i + 2
-			for j < len(src) && src[j] != ')' {
+			for j < len(src) && isTSQLNameRune(src[j]) {
 				j++
 			}
-			if j < len(src) {
-				if _, bound := params[string(src[i+2:j])]; bound {
-					b.WriteString("'0'")
-					i = j + 1
-					continue
-				}
-			}
+			i = j
+			continue
 		}
-		b.WriteRune(src[i])
+		j := i + 1
+		for j < len(src) && isTSQLNameRune(src[j]) {
+			j++
+		}
+		if name := string(src[i+1 : j]); name != "" && !seen[strings.ToLower(name)] {
+			// Variable names compare case-insensitively under the default
+			// collations, so @Id and @id are one reference.
+			seen[strings.ToLower(name)] = true
+			out = append(out, name)
+		}
+		i = max(j, i+1)
+	}
+	return out
+}
+
+// isTSQLNameRune reports whether r can continue a T-SQL regular identifier,
+// which admits @, # and $ after the first character as well as the usual set.
+func isTSQLNameRune(r rune) bool {
+	return isIdentRune(r) || r == '@' || r == '#' || r == '$'
+}
+
+// Batch is one GO-separated batch of a T-SQL submission, with the number of
+// times the separator asked for it to run.
+type Batch struct {
+	SQL   string
+	Count int
+}
+
+// Batches splits a T-SQL submission at its GO separators, the unit SQL Server
+// compiles and runs at once. Unlike Scan it keeps everything else verbatim,
+// semicolons and comments included: a batch's statements share its variables,
+// so they must reach the server together and as written.
+//
+// GO takes an optional repeat count, as sqlcmd allowed. A count of zero is
+// read as one, the least surprising way to treat a request to run nothing.
+// Client directives are not recognised here; callers refuse them through Scan
+// first.
+func Batches(sql string) []Batch {
+	var out []Batch
+	var cur strings.Builder
+	flush := func(count int) {
+		if s := strings.TrimSpace(cur.String()); s != "" {
+			out = append(out, Batch{SQL: s, Count: max(count, 1)})
+		}
+		cur.Reset()
+	}
+	atLineStart := true
+	src := []rune(sql)
+	for i := 0; i < len(src); {
+		if end, kind := skipSpan(src, i, DialectTSQL); kind != spanNone {
+			cur.WriteString(string(src[i:end]))
+			// A line comment ends at its newline without consuming it, so
+			// the next line still starts fresh.
+			atLineStart = false
+			i = end
+			continue
+		}
+		c := src[i]
+		if atLineStart && isGoLine(src, i) {
+			j := i + 2
+			for j < len(src) && src[j] != '\n' {
+				j++
+			}
+			count, _ := strconv.Atoi(strings.TrimSpace(string(src[i+2 : j])))
+			flush(count)
+			i = j
+			continue
+		}
+		cur.WriteRune(c)
+		if c == '\n' {
+			atLineStart = true
+		} else if !unicode.IsSpace(c) {
+			atLineStart = false
+		}
 		i++
 	}
-	return b.String()
+	flush(1)
+	return out
 }

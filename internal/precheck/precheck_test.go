@@ -132,6 +132,58 @@ func TestPlannerProviderWithoutAConnectionIsIncompleteNotClean(t *testing.T) {
 	}
 }
 
+func evalPlanned(t *testing.T, sql string, params map[string]string, run PlanRunner) Document {
+	t.Helper()
+	a, err := adapter.For("sqlserver")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Evaluate(Input{
+		Adapter: a,
+		Host:    config.HostConfig{Name: "h", Provider: "sqlserver", Database: "d", ReadOnly: true},
+		SQL:     sql,
+		Params:  params,
+		Source:  Source{Kind: "arg"},
+		Key:     testKey,
+		RunPlan: run,
+	})
+}
+
+func TestPlannerIsHandedEachStatementAndTheParams(t *testing.T) {
+	var gotStmts []string
+	var gotParams map[string]string
+	doc := evalPlanned(t, "SELECT @who;\nGO\nSELECT 2", map[string]string{"who": "Ada"},
+		func(stmts []string, params map[string]string) ([]sqlscan.Statement, error) {
+			gotStmts, gotParams = stmts, params
+			out := make([]sqlscan.Statement, len(stmts))
+			for i := range stmts {
+				out[i] = sqlscan.Statement{Index: i + 1, Class: sqlscan.ClassRead, DecidedBy: "SELECT"}
+			}
+			return out, nil
+		})
+	// The placeholder reaches the planner as written: it is the engine's own
+	// syntax, bound there, not text to be rewritten here.
+	if len(gotStmts) != 2 || gotStmts[0] != "SELECT @who" || gotStmts[1] != "SELECT 2" {
+		t.Errorf("statements: got %q", gotStmts)
+	}
+	if gotParams["who"] != "Ada" {
+		t.Errorf("params: got %v", gotParams)
+	}
+	if doc.Decision.Action != sqlscan.ActionAllow {
+		t.Errorf("action: got %q, want allow", doc.Decision.Action)
+	}
+}
+
+func TestPlannerThatSkipsAStatementFailsClosed(t *testing.T) {
+	doc := evalPlanned(t, "SELECT 1; DELETE FROM t", nil,
+		func(stmts []string, _ map[string]string) ([]sqlscan.Statement, error) {
+			return []sqlscan.Statement{{Index: 1, Class: sqlscan.ClassRead, DecidedBy: "SELECT"}}, nil
+		})
+	if doc.Status != StatusIncomplete || doc.Decision.Action == sqlscan.ActionAllow || doc.PrecheckToken != nil {
+		t.Errorf("a statement nobody classified passed: status %q, action %q", doc.Status, doc.Decision.Action)
+	}
+}
+
 func TestDocumentOmitsSQLAndParamValues(t *testing.T) {
 	// §13.14: a literal in the SQL can be an account number, and the audit
 	// record must not carry it.

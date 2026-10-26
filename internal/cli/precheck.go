@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 
-	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/precheck"
 	"github.com/geraldcsoftware/db-query/internal/render"
 	"github.com/geraldcsoftware/db-query/internal/session"
@@ -74,7 +73,6 @@ func evaluate(r session.Resolved, c commonFlags, p precheckFlags, sql string, pa
 	doc := precheck.Evaluate(precheck.Input{
 		Adapter:    r.Adapter,
 		Host:       r.Host,
-		Cred:       r.Cred,
 		SQL:        sql,
 		Params:     params,
 		Source:     p.source,
@@ -86,14 +84,13 @@ func evaluate(r session.Resolved, c commonFlags, p precheckFlags, sql string, pa
 	return doc, tuple, key, nil
 }
 
-// plannerFor runs a plan-only probe for the providers that classify through
-// the engine. The closure lives here rather than in the adapter or the gate so
-// that §11's rule holds: the executor runs invocations, nothing else does.
+// plannerFor lets the providers that classify through the engine reach it, as
+// this invocation's credential and under its --timeout.
 func plannerFor(r session.Resolved, c commonFlags) precheck.PlanRunner {
-	return func(inv executor.Invocation) (executor.RawResult, error) {
+	return func(statements []string, params map[string]string) ([]sqlscan.Statement, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 		defer cancel()
-		return executor.Run(ctx, inv)
+		return r.Adapter.Plan(ctx, r.Cred, r.Host, statements, params)
 	}
 }
 
@@ -137,8 +134,10 @@ func refusalMessage(doc precheck.Document, why string) string {
 		doc.Target.Database, doc.Target.Host, why)
 	switch doc.Decision.ReasonCode {
 	case sqlscan.ReasonClientDirective:
-		return msg + "\nRemove the client directive: db-query sends SQL to the server, not commands to psql or sqlcmd."
-	case sqlscan.ReasonParserUnavailable:
+		return msg + "\nRemove the client directive: db-query sends SQL to the server, not commands to a client such as psql or sqlcmd."
+	case sqlscan.ReasonParserUnavailable, sqlscan.ReasonPrecheckIncomplete:
+		// Nothing was classified, so the host's posture is not what stood in
+		// the way and relaxing it would not help.
 		return msg
 	default:
 		if doc.ReadOnly.Configured {

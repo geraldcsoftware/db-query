@@ -13,7 +13,6 @@ import (
 
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
-	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
@@ -354,15 +353,11 @@ func (postgresAdapter) Classify(sql string) (sqlscan.Verdict, error) {
 	return sqlscan.ClassifyPostgres(sql), nil
 }
 
-// PlanInvocation and ParsePlan are unreachable for postgres, whose Classify
-// always succeeds. They return errors rather than panicking so that a future
-// caller wiring them by mistake fails closed and visibly.
-func (postgresAdapter) PlanInvocation(credential.Credential, config.HostConfig, string) (executor.Invocation, error) {
-	return executor.Invocation{}, fmt.Errorf("postgres classifies offline; no planner probe exists")
-}
-
-func (postgresAdapter) ParsePlan(executor.RawResult) (sqlscan.Class, string, error) {
-	return sqlscan.ClassOpaque, "", fmt.Errorf("postgres classifies offline; no planner probe exists")
+// Plan is unreachable for postgres, whose Classify always succeeds. It returns
+// an error rather than panicking so that a future caller wiring it by mistake
+// fails closed and visibly.
+func (postgresAdapter) Plan(context.Context, credential.Credential, config.HostConfig, []string, map[string]string) ([]sqlscan.Statement, error) {
+	return nil, fmt.Errorf("postgres classifies offline; no planner probe exists")
 }
 
 func (postgresAdapter) Dialect() sqlscan.Dialect { return sqlscan.DialectPostgres }
