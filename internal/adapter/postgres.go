@@ -10,10 +10,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
-	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
@@ -122,8 +122,8 @@ type pgStatement struct {
 }
 
 // plan splits a submission into statements and binds each one's parameters.
-// It runs before a connection is opened, so a submission with a mistake in its
-// last statement runs none of them.
+// It runs before anything is sent, so a submission with a mistake in its last
+// statement runs none of them.
 //
 // Parameters are positional and bound by the server, so the value of $1 never
 // becomes SQL text: there is nothing to quote and nothing to inject. Each
@@ -178,22 +178,16 @@ func isParamPosition(k string) bool {
 	return err == nil && n > 0 && n <= 65535 && strconv.Itoa(n) == k
 }
 
-// Execute runs a submission over the wire protocol. A single statement runs on
-// its own. Several run inside one transaction, in order, and the first to fail
-// stops the run: nothing after it is sent and the transaction is rolled back,
-// so a script either applies whole or not at all. Every result set is kept, one
-// per statement that returned columns.
-//
-// Statements that cannot run inside a transaction (VACUUM, CREATE DATABASE,
-// CREATE INDEX CONCURRENTLY) therefore work only when submitted alone.
-func (a postgresAdapter) Execute(ctx context.Context, cred credential.Credential, host config.HostConfig, q Query) ([]Rows, error) {
-	stmts, err := a.plan(q)
-	if err != nil {
-		return nil, err
-	}
-	if len(stmts) == 0 {
-		return nil, nil
-	}
+// Check refuses a submission whose parameters cannot be bound, or that holds a
+// client directive, without connecting.
+func (a postgresAdapter) Check(q Query) error {
+	_, err := a.plan(q)
+	return err
+}
+
+// Open connects to host as cred. ctx bounds the connection attempt only; the
+// connection lasts until Close.
+func (a postgresAdapter) Open(ctx context.Context, cred credential.Credential, host config.HostConfig) (Conn, error) {
 	cfg, err := a.connConfig(cred, host)
 	if err != nil {
 		return nil, err
@@ -205,32 +199,104 @@ func (a postgresAdapter) Execute(ctx context.Context, cred credential.Credential
 		}
 		return nil, &QueryError{Msg: err.Error()}
 	}
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		conn.Close(closeCtx)
-	}()
+	return &pgConn{conn: conn}, nil
+}
 
+// pgConn is one postgres session. It is not safe for concurrent use; callers
+// serialise runs on it, as internal/session does.
+type pgConn struct {
+	conn *pgconn.PgConn
+	// broken is set when a run ended in a state this code cannot vouch for:
+	// cancelled mid-statement, a dropped link, a rollback that did not go
+	// through. The session is then replaced rather than reused.
+	broken bool
+}
+
+func (c *pgConn) Usable() bool { return !c.broken && !c.conn.IsClosed() }
+
+func (c *pgConn) Ping(ctx context.Context) error { return c.conn.Ping(ctx) }
+
+func (c *pgConn) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return c.conn.Close(ctx)
+}
+
+// Execute runs a submission. A single statement runs on its own. Several run
+// as one unit, in order, and the first to fail stops the run: nothing after it
+// is sent and the unit is rolled back, so a script either applies whole or not
+// at all. Every result set is kept, one per statement that returned columns.
+//
+// The unit is a transaction when the session is idle. When the session is
+// already inside a transaction the caller opened (a BEGIN run earlier on the
+// same connection), it is a savepoint instead, so a failing script undoes its
+// own work and leaves the caller's transaction, and what was done in it,
+// exactly as it was. Statements that cannot run inside a transaction (VACUUM,
+// CREATE DATABASE, CREATE INDEX CONCURRENTLY) therefore work only when
+// submitted alone.
+func (c *pgConn) Execute(ctx context.Context, q Query) ([]Rows, error) {
+	if !c.Usable() {
+		return nil, &LocalError{Msg: "the postgres connection is no longer usable"}
+	}
+	stmts, err := postgresAdapter{}.plan(q)
+	if err != nil {
+		return nil, err
+	}
+	if len(stmts) == 0 {
+		return nil, nil
+	}
+	return c.run(ctx, stmts)
+}
+
+// failed words err and records whether it leaves the session in doubt. A
+// server error is the server answering, which leaves the session as the
+// statement left it; a cancel, a timeout or a transport failure does not.
+func (c *pgConn) failed(ctx context.Context, err error, where string) error {
+	var pe *pgconn.PgError
+	if ctx.Err() != nil || !errors.As(err, &pe) {
+		c.broken = true
+	}
+	return pgFailure(ctx, err, where)
+}
+
+// pgSavepoint names the savepoint a script runs under inside a caller's
+// transaction.
+const pgSavepoint = "db_query_script"
+
+func (c *pgConn) run(ctx context.Context, stmts []pgStatement) ([]Rows, error) {
 	script := len(stmts) > 1
+	begin, commit, rollback := "BEGIN", "COMMIT", "ROLLBACK"
+	starting, committing := "starting the transaction", "committing the transaction"
+	if script && c.conn.TxStatus() != 'I' {
+		// Inside the caller's transaction. When that transaction has already
+		// failed, the SAVEPOINT is refused and nothing of the script is sent;
+		// the server's message says the transaction is aborted.
+		starting, committing = "starting the script's savepoint", "releasing the script's savepoint"
+		begin = "SAVEPOINT " + pgSavepoint
+		commit = "RELEASE SAVEPOINT " + pgSavepoint
+		rollback = "ROLLBACK TO SAVEPOINT " + pgSavepoint + "; RELEASE SAVEPOINT " + pgSavepoint
+	}
 	if script {
-		if err := conn.Exec(ctx, "BEGIN").Close(); err != nil {
-			return nil, pgFailure(ctx, err, "starting the transaction")
+		if err := c.conn.Exec(ctx, begin).Close(); err != nil {
+			return nil, c.failed(ctx, err, starting)
 		}
 	}
 	var sets []Rows
 	for i, st := range stmts {
-		rows, err := runStatement(ctx, conn, st)
+		rows, err := runStatement(ctx, c.conn, st)
 		if err != nil {
 			where := ""
 			if script {
 				where = fmt.Sprintf("statement %d of %d", i+1, len(stmts))
-				// Closing the connection would roll back too; saying so
-				// explicitly does not leave it to the server to notice.
-				if ctx.Err() == nil {
-					_ = conn.Exec(ctx, "ROLLBACK").Close()
+				// Closing the connection would roll back too, but the
+				// connection outlives the run now, so the rollback has to be
+				// said. One that does not go through leaves the session in a
+				// state nothing can vouch for.
+				if ctx.Err() != nil || c.conn.Exec(ctx, rollback).Close() != nil {
+					c.broken = true
 				}
 			}
-			return nil, pgFailure(ctx, err, where)
+			return nil, c.failed(ctx, err, where)
 		}
 		if rows != nil {
 			sets = append(sets, *rows)
@@ -239,8 +305,8 @@ func (a postgresAdapter) Execute(ctx context.Context, cred credential.Credential
 	if script {
 		// A deferred constraint is checked here, so the commit can fail on
 		// its own after every statement succeeded.
-		if err := conn.Exec(ctx, "COMMIT").Close(); err != nil {
-			return nil, pgFailure(ctx, err, "committing the transaction")
+		if err := c.conn.Exec(ctx, commit).Close(); err != nil {
+			return nil, c.failed(ctx, err, committing)
 		}
 	}
 	return sets, nil
@@ -255,9 +321,10 @@ func runStatement(ctx context.Context, conn *pgconn.PgConn, st pgStatement) (*Ro
 	fields := rr.FieldDescriptions()
 	var rows *Rows
 	if len(fields) > 0 {
-		rows = &Rows{Columns: make([]string, len(fields))}
+		rows = &Rows{Columns: make([]string, len(fields)), Kinds: make([]Kind, len(fields))}
 		for i, f := range fields {
 			rows.Columns[i] = f.Name
+			rows.Kinds[i] = pgKind(f.DataTypeOID)
 		}
 	}
 	for rr.NextRow() {
@@ -277,6 +344,21 @@ func runStatement(ctx context.Context, conn *pgconn.PgConn, st pgStatement) (*Ro
 		return nil, err
 	}
 	return rows, nil
+}
+
+// pgKind maps a column's type to its Kind. Only the built-in numeric and
+// boolean types qualify; money prints with a currency symbol and a domain
+// carries its own OID, so both stay text.
+func pgKind(oid uint32) Kind {
+	switch oid {
+	case pgtype.Int2OID, pgtype.Int4OID, pgtype.Int8OID, pgtype.OIDOID,
+		pgtype.Float4OID, pgtype.Float8OID, pgtype.NumericOID:
+		return KindNumber
+	case pgtype.BoolOID:
+		return KindBool
+	default:
+		return KindText
+	}
 }
 
 // pgFailure words a failed statement. A server error keeps its severity,
@@ -348,21 +430,11 @@ func quotePostgresIdent(name string) string {
 }
 
 // Classify decides offline, against PostgreSQL's own grammar. It never
-// connects, so a postgres pre-check holds when the database is unreachable and
-// costs no round trip.
-func (postgresAdapter) Classify(sql string) (sqlscan.Verdict, error) {
+// touches the runner, so a postgres pre-check holds when the database is
+// unreachable and costs no round trip. Parameters are $1, $2, which the
+// grammar parses as they stand.
+func (postgresAdapter) Classify(_ context.Context, sql string, _ map[string]string, _ Runner) (sqlscan.Verdict, error) {
 	return sqlscan.ClassifyPostgres(sql), nil
-}
-
-// PlanInvocation and ParsePlan are unreachable for postgres, whose Classify
-// always succeeds. They return errors rather than panicking so that a future
-// caller wiring them by mistake fails closed and visibly.
-func (postgresAdapter) PlanInvocation(credential.Credential, config.HostConfig, string) (executor.Invocation, error) {
-	return executor.Invocation{}, fmt.Errorf("postgres classifies offline; no planner probe exists")
-}
-
-func (postgresAdapter) ParsePlan(executor.RawResult) (sqlscan.Class, string, error) {
-	return sqlscan.ClassOpaque, "", fmt.Errorf("postgres classifies offline; no planner probe exists")
 }
 
 func (postgresAdapter) Dialect() sqlscan.Dialect { return sqlscan.DialectPostgres }

@@ -2,10 +2,8 @@
 // the server, how credentials are presented, what an error means and what the
 // output looks like. Every adapter hands back the same neutral Rows.
 //
-// The two providers reach the server differently. Postgres speaks the wire
-// protocol itself through pgx, so no client binary is needed. SQL Server still
-// drives sqlcmd: the adapter builds an invocation, the central executor runs
-// it and the adapter parses what comes back.
+// Both providers speak their wire protocol directly, so no client binary is
+// needed: postgres through pgx, SQL Server through go-mssqldb.
 package adapter
 
 import (
@@ -15,14 +13,14 @@ import (
 
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
-	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
 // Query is provider-native SQL plus its parameter values. Params are
 // written in native placeholder syntax in the SQL and are never substituted
-// into the text by Go. Postgres binds $1, $2 server-side, so its keys are the
-// positions ("1", "2"); sqlcmd expands $(name) from its own -v.
+// into the text by Go: both providers bind them server-side. Postgres
+// parameters are positional, $1 and $2, so its keys are the positions ("1",
+// "2"); SQL Server parameters are named, @name, so its keys are the names.
 type Query struct {
 	SQL    string
 	Params map[string]string
@@ -31,9 +29,38 @@ type Query struct {
 // Rows is the neutral rowset every adapter parses into and every
 // renderer renders from. A nil *string is SQL NULL; &"" is the empty
 // string.
+//
+// Every value is carried as the text the provider renders it as, so text and
+// table output print exactly what the server wrote. Kinds says, column by
+// column, what that text stands for, for the formats that have types of their
+// own: json prints a number as a number. A column without a kind, including
+// every column of a Rows built without Kinds, is text. Kinds is not persisted
+// with a Rows (the schema cache stores the catalogue, which is all text), so a
+// cache file keeps the shape it always had.
 type Rows struct {
 	Columns []string
+	Kinds   []Kind `json:"-"`
 	Rows    [][]*string
+}
+
+// Kind is what a column's values are, as far as a typed output format can
+// tell them apart. It is deliberately coarse: anything that is not plainly a
+// number or a boolean is text, dates and times included, so a value is never
+// reinterpreted on its way out.
+type Kind uint8
+
+const (
+	KindText Kind = iota
+	KindNumber
+	KindBool
+)
+
+// Kind reports the kind of column i, text when none was recorded.
+func (r Rows) Kind(i int) Kind {
+	if i < len(r.Kinds) {
+		return r.Kinds[i]
+	}
+	return KindText
 }
 
 // First returns the first result set of a run, or an empty Rows when the run
@@ -46,45 +73,86 @@ func First(sets []Rows) Rows {
 	return sets[0]
 }
 
-// Adapter is one provider's way of running a submission.
+// Adapter is one provider's way of reaching a server and judging what is sent
+// to it. Everything that needs the server goes through a Conn.
 type Adapter interface {
 	Name() string
 
-	// Execute runs q against host as cred and returns one Rows for each
-	// statement that produced a result set, in submission order. A statement
-	// that returns no columns (an INSERT, a SET) contributes nothing, so a
-	// submission of only such statements returns none.
-	//
-	// The error says how far the run got, which is what the exit code
-	// reports: *LocalError when nothing was sent or the reply could not be
-	// read, *QueryError when the server or its client refused the work, and
-	// anything else when the run could not happen at all. A cancelled or
-	// expired ctx surfaces as an error wrapping ctx.Err().
-	Execute(ctx context.Context, cred credential.Credential, host config.HostConfig, q Query) ([]Rows, error)
+	// Open connects to host as cred. ctx bounds the connection attempt only;
+	// the connection lasts until its Close. A failure is a *QueryError when the
+	// server could not be reached or refused the login, a *LocalError when the
+	// host's settings could not even be turned into a connection, and an error
+	// wrapping ctx.Err() when the attempt was cancelled or timed out.
+	Open(ctx context.Context, cred credential.Credential, host config.HostConfig) (Conn, error)
+
+	// Check refuses, with a *LocalError, a submission that could not be sent
+	// as given: a parameter that cannot be bound, a client directive. It needs
+	// no connection, so a caller runs it before opening one and a refused
+	// submission never reaches the server. Conn.Execute applies the same
+	// checks; this only moves them ahead of the connection.
+	Check(q Query) error
 
 	IntrospectSQL() string          // lists user tables + columns
 	ListDatabasesSQL() string       // lists connectable database names
 	PreviewSQL(table string) string // "first 100 rows" of one table, provider-native
 
-	// Classify reports what a submission would do (docs/design.md §13.13).
-	// An adapter that can decide from the text alone returns a verdict. One
-	// that needs the engine returns sqlscan.ErrNeedsPlan, and the caller then
-	// drives PlanInvocation and ParsePlan for each statement.
+	// Classify reports what a submission would do (docs/design.md §13.13),
+	// with params bound as Execute would bind them. It never runs the
+	// submission.
 	//
-	// Callers switch on that error, never on a provider name, so a third
-	// provider chooses its own mechanism without touching any call site.
-	Classify(sql string) (sqlscan.Verdict, error)
-
-	// PlanInvocation builds a plan-only probe for one statement, credentials
-	// included, and ParsePlan turns its raw result into that statement's
-	// class. Both are unused by an adapter whose Classify succeeds. They are a
-	// build/parse pair: the executor runs the probe, never the adapter.
-	PlanInvocation(cred credential.Credential, host config.HostConfig, stmt string) (executor.Invocation, error)
-	ParsePlan(r executor.RawResult) (sqlscan.Class, string, error)
+	// How it decides is the adapter's own business, which is what keeps a
+	// caller from ever asking which provider it holds. One that decides from
+	// the text alone never touches r. One that asks the engine's planner runs
+	// on r's connection, compiling without executing, and leaves the session
+	// ready to execute; a nil r means no connection may be made, and it
+	// returns an error rather than a verdict.
+	//
+	// On error the verdict carries only the mechanism that could not decide,
+	// so a caller can report which.
+	Classify(ctx context.Context, sql string, params map[string]string, r Runner) (sqlscan.Verdict, error)
 
 	// Dialect selects the quoting and batching rules the lexical pre-pass
 	// applies before either mechanism runs.
 	Dialect() sqlscan.Dialect
+}
+
+// Conn is one open session on a server. Runs on it share the session, so a
+// temporary table, a SET or a transaction one run leaves open is there for the
+// next. It is not safe for concurrent use: one run at a time.
+type Conn interface {
+	// Execute runs q and returns one Rows for each statement that produced a
+	// result set, in submission order. A statement that returns no columns
+	// (an INSERT, a SET) contributes nothing, so a submission of only such
+	// statements returns none.
+	//
+	// The error says how far the run got, which is what the exit code
+	// reports: *LocalError when nothing was sent or the reply could not be
+	// read, *QueryError when the server refused the work, and anything else
+	// when the run could not happen at all. A cancelled or expired ctx
+	// surfaces as an error wrapping ctx.Err().
+	Execute(ctx context.Context, q Query) ([]Rows, error)
+
+	// Usable reports whether the session can take another run. It turns false
+	// once a run ends in a state the adapter cannot vouch for, such as a
+	// cancel mid-statement or a dropped link, and the caller then closes it
+	// and opens another. A server error that leaves the session as the
+	// statement left it, an unknown column say, does not count.
+	Usable() bool
+
+	// Ping checks the session is still alive on the server, sending nothing
+	// of the caller's. A caller uses it before reusing a connection that has
+	// sat idle, since a server or a firewall may have dropped it meanwhile.
+	Ping(ctx context.Context) error
+
+	Close() error
+}
+
+// Runner runs f on a connection, opening one if need be. It is how Classify
+// reaches the server without owning a connection: internal/session's Session
+// is one. A classifier that changes the session it plans on marks the
+// connection unusable, so the runner replaces it before anything runs.
+type Runner interface {
+	With(ctx context.Context, f func(Conn) error) error
 }
 
 // LocalError is a failure on this side of the connection: the submission
@@ -128,7 +196,8 @@ func For(provider string) (Adapter, error) {
 	return a, nil
 }
 
-// sortedKeys gives deterministic argv ordering for map-carried params.
+// sortedKeys gives a deterministic order over map-carried params, so the
+// first bad name reported is the same one every run.
 func sortedKeys(m map[string]string) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

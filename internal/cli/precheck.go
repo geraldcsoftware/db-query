@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 
-	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/precheck"
 	"github.com/geraldcsoftware/db-query/internal/render"
 	"github.com/geraldcsoftware/db-query/internal/session"
@@ -59,7 +58,7 @@ func sourceOf(positional []string, file, savedName string) precheck.Source {
 }
 
 // evaluate builds the dry-run document for a resolved invocation.
-func evaluate(r session.Resolved, c commonFlags, p precheckFlags, sql string, params map[string]string) (precheck.Document, precheck.Tuple, []byte, error) {
+func evaluate(r *session.Session, c commonFlags, p precheckFlags, sql string, params map[string]string) (precheck.Document, precheck.Tuple, []byte, error) {
 	key, err := precheck.LoadKey()
 	if err != nil {
 		return precheck.Document{}, precheck.Tuple{}, nil, err
@@ -71,30 +70,23 @@ func evaluate(r session.Resolved, c commonFlags, p precheckFlags, sql string, pa
 		SQL:         sql,
 		ParamValues: params,
 	}
-	doc := precheck.Evaluate(precheck.Input{
+	// --timeout bounds the pre-check the way it bounds the run. The planner, for
+	// a provider that has one, connects through the session; it spends that
+	// connection, so the query itself runs on a fresh one.
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+	doc := precheck.Evaluate(ctx, precheck.Input{
 		Adapter:    r.Adapter,
 		Host:       r.Host,
-		Cred:       r.Cred,
 		SQL:        sql,
 		Params:     params,
 		Source:     p.source,
 		Tool:       precheck.Tool{Version: buildInfo.Version, Commit: buildInfo.Commit},
 		Key:        key,
-		RunPlan:    plannerFor(r, c),
+		Runner:     r,
 		IncludeSQL: p.showSQL,
 	})
 	return doc, tuple, key, nil
-}
-
-// plannerFor runs a plan-only probe for the providers that classify through
-// the engine. The closure lives here rather than in the adapter or the gate so
-// that §11's rule holds: the executor runs invocations, nothing else does.
-func plannerFor(r session.Resolved, c commonFlags) precheck.PlanRunner {
-	return func(inv executor.Invocation) (executor.RawResult, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
-		defer cancel()
-		return executor.Run(ctx, inv)
-	}
 }
 
 // emitDocument writes the dry-run document and returns the process exit code.
@@ -137,8 +129,10 @@ func refusalMessage(doc precheck.Document, why string) string {
 		doc.Target.Database, doc.Target.Host, why)
 	switch doc.Decision.ReasonCode {
 	case sqlscan.ReasonClientDirective:
-		return msg + "\nRemove the client directive: db-query sends SQL to the server, not commands to psql or sqlcmd."
-	case sqlscan.ReasonParserUnavailable:
+		return msg + "\nRemove the client directive: db-query sends SQL to the server, not commands to a client such as psql or sqlcmd."
+	case sqlscan.ReasonParserUnavailable, sqlscan.ReasonPrecheckIncomplete:
+		// Nothing was classified, so the host's posture is not what stood in
+		// the way and relaxing it would not help.
 		return msg
 	default:
 		if doc.ReadOnly.Configured {

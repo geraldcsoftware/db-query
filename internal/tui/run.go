@@ -52,7 +52,7 @@ func (m *model) startRun(sql, source string) tea.Cmd {
 	m.running = true
 	m.results.clear()
 	run := m.runner
-	sess := m.session
+	sess := m.conn
 	gen := m.runGen
 	return func() tea.Msg {
 		sets, schemaErr, err := run(ctx, sess, sql)

@@ -3,14 +3,13 @@
 A Go CLI that runs SQL against PostgreSQL and SQL Server, resolves
 credentials on demand from a configured source, and returns query output
 in a selectable format — an aligned table at a terminal, tab-separated text
-when piped. PostgreSQL is reached over its own wire protocol, so no client
-binary is needed; SQL Server is reached through `sqlcmd`. See
-`docs/design.md` for the full design.
+when piped. Both databases are reached over their own wire protocols, so no
+client binary is needed. See `docs/design.md` for the full design.
 
 ```
  cred URI ─▶ [resolver] ─▶ Credential ─▶ [adapter.Execute] ─▶ []Rows (one per result set) ─▶ [renderer[format]] ─▶ stdout
                                               │
-                    postgres: pgx, wire protocol · sqlserver: sqlcmd via the central executor
+                    postgres: pgx, wire protocol · sqlserver: go-mssqldb, TDS
 ```
 
 ## Usage
@@ -103,11 +102,13 @@ the host in effect is whatever `DB_QUERY_HOST` says until you override it.
   bound by the server: write `$1`, `$2` in the SQL and pass `--param 1=Ada
   --param 2=42`. The server infers each one's type from where it is used, so
   `WHERE id = $1` takes `--param 1=42` as an integer. On SQL Server they are
-  sqlcmd's own `$(name)` variables, bound with `--param name=value`. See
-  [Parameters](#parameters).
-- A submission may hold several statements. On PostgreSQL they run in order
-  inside one transaction, the first error stops the run and rolls it back, and
-  every result set is printed. See [Scripts](#scripts-several-statements).
+  named and also bound by the server: write `@name` in the SQL and pass
+  `--param name=value`. See [Parameters](#parameters).
+- A submission may hold several statements, and every result set is printed.
+  On PostgreSQL they run in order inside one transaction, and the first error
+  stops the run and rolls it back. On SQL Server they run batch by batch, split
+  at `GO`, and the first error stops the run. See
+  [Scripts](#scripts-several-statements).
 - `--output json|table|text|auto` (default `auto`). `auto` renders a bordered
   table when stdout is a terminal and tab-separated `text` otherwise, so
   results are readable by eye while a pipe, a redirect, or a program calling
@@ -116,6 +117,19 @@ the host in effect is whatever `DB_QUERY_HOST` says until you override it.
   whole shell. Every command that prints rows — `query`, `list`, `schema`,
   `introspect`, `hosts` — honours the setting. In `json` mode errors are
   emitted as structured JSON on stderr.
+- In `json`, numeric columns are JSON numbers and boolean columns are `true`
+  or `false`; everything else, dates and times included, is a string, and
+  NULL is `null`. A number keeps the server's digits exactly, so a `bigint`
+  or a `numeric(38,10)` is not rounded, but a consumer that reads numbers as
+  doubles (JavaScript, `jq` before 1.7) rounds beyond 2^53. A value the type
+  cannot hold as JSON, such as a float `NaN`, stays a string. `text` and
+  `table` output are unchanged: they print the server's own text (`t`/`f` for
+  a postgres boolean, `1`/`0` for a SQL Server `bit`).
+
+  | Provider | JSON number | JSON boolean |
+  |---|---|---|
+  | PostgreSQL | `smallint`, `integer`, `bigint`, `oid`, `real`, `double precision`, `numeric` | `boolean` |
+  | SQL Server | `tinyint`, `smallint`, `int`, `bigint`, `real`, `float`, `decimal`/`numeric`, `money`, `smallmoney` | `bit` |
 - `--max-col-width <n>` (`query`, `schema`; default 50, `0` = unlimited) caps a
   **table** cell at `n` display cells, truncating with `…`. Only `table` output
   is affected; `text` and `json` always carry values whole.
@@ -222,7 +236,11 @@ no grammar or planner can see them, and no operator approval applies.
 
 `--dry-run` classifies a query, prints the decision as JSON, and runs nothing.
 On PostgreSQL it opens no connection, so it works against a host that is
-unreachable, though the host's credential must still resolve.
+unreachable, though the host's credential must still resolve. On SQL Server it
+connects and asks the planner for each statement's plan under
+`SET SHOWPLAN_XML ON`, which compiles without executing. Bound parameters are
+declared for the planner with the type they will be sent as, so a
+parameterised statement is classified as it will run.
 
 ```sh
 db-query -H prod-core -d core q "SELECT id FROM people" --dry-run
@@ -316,8 +334,41 @@ The first catches SQL written for `psql`'s `:'name'` interpolation, which this
 tool no longer uses. A parameter can stand only where a value can: a table or
 column name cannot be a parameter.
 
-On SQL Server, parameters are sqlcmd's `$(name)` variables, a textual
-substitution; values containing quotes, `;`, `--` or `$(` are refused.
+On SQL Server, parameters are named: `@name` in the SQL, bound with
+`--param name=value`. They are bound by the server too, through
+`sp_executesql`, so a value is never spliced into the statement and any value
+is accepted, quotes and semicolons included:
+
+```sh
+db-query query --host reporting --param who=Grace \
+  "SELECT id FROM people WHERE name = @who"
+```
+
+- A value of plain ASCII is sent as `varchar`, any other as `nvarchar`, sized to
+  the value. `varchar` keeps an index seek on a `varchar` column, which an
+  `nvarchar` parameter would turn into a scan. SQL Server converts the value
+  where the statement compares it with another type, so `WHERE id = @min`
+  against an `int` column works as written. A few places take no implicit
+  conversion, such as `TOP` and `OFFSET`: write `TOP (CAST(@n AS int))`.
+- A batch that uses a parameter is run through `sp_executesql`, which scopes
+  what it creates: a `#temporary` table, a `SET` or a `USE` in that batch is
+  gone when it ends. Create the table in a batch of its own, without
+  parameters, and fill it in the next.
+- Names match case-insensitively, as T-SQL variable names do under the default
+  collations, and a name may not start with a digit. Pass the name without its
+  `@`; `--param @who=Grace` is refused with a pointer to `--param who=Grace`.
+- An `@name` with no `--param` is left alone, because it may be a local
+  variable the batch declares for itself. If it is not, the server reports
+  `Must declare the scalar variable "@name"`.
+- A value bound but never referenced is ignored, as it is on PostgreSQL.
+- The pre-check plans each statement on its own, so a statement that reads a
+  variable declared by an earlier statement (`DECLARE @n int = 1; SELECT …
+  WHERE id = @n`) does not compile there and is refused as `opaque`. Bind the
+  value with `--param` instead.
+
+Queries written for the old `sqlcmd` `$(name)` substitution must be rewritten
+with `@name`. Nothing substitutes `$(name)` any more, so inside quotes it is an
+ordinary string and outside them a syntax error.
 
 ### Scripts: several statements
 
@@ -337,6 +388,24 @@ A PostgreSQL submission holding more than one statement runs as a script:
 - A single statement runs on its own, outside any explicit transaction, so
   statements PostgreSQL refuses inside one (`VACUUM`, `CREATE DATABASE`,
   `CREATE INDEX CONCURRENTLY`) work only when submitted alone.
+
+A SQL Server submission runs the way `sqlcmd` ran it, batch by batch:
+
+- `GO` alone on a line separates batches, and `GO 3` runs the batch before it
+  three times. Everything between two `GO` lines is sent as one batch, so its
+  statements share their variables.
+- All batches run on one connection, so a temporary table or a `SET` made in
+  one batch is still there in the next, unless that batch uses a parameter
+  (see [Parameters](#parameters)).
+- There is **no implicit transaction**. The first batch to fail stops the run
+  and nothing after it is sent, but what earlier batches did stays done. Wrap
+  the script in `BEGIN TRANSACTION` … `COMMIT` with `SET XACT_ABORT ON` if it
+  must apply whole or not at all.
+- The error names the failing batch, e.g. `batch 2 of 3: Msg 208, Level 16,
+  State 1, Line 1: Invalid object name 'ghosts'.`, and a failed script prints
+  no results.
+- Every result set is printed, as on PostgreSQL, and `NULL` is a real null: a
+  JSON `null`, and `NULL` in table output.
 
 The safety gate judges the script as a whole by its least safe statement, as
 it always has, before any of it is sent.
@@ -426,7 +495,7 @@ replace the previous server's names.
 |------|---------|
 | `0`  | success |
 | `1`  | config, usage, or credential error |
-| `2`  | the run could not happen: `sqlcmd` could not start, or `--timeout` expired |
+| `2`  | the run could not happen: `--timeout` expired |
 | `3`  | schema error — the query references an unknown table or column (re-run with `--refresh-schema`) |
 | `4`  | other SQL error, or the server could not be reached |
 | `5`  | refused by [safety screening](#query-safety-screening), or declined at the operator challenge |
@@ -543,6 +612,29 @@ several result sets shows one at a time, led on the label row by which it is
 holds an embedded Neovim, which is what it holds wherever one can run. `F10` is
 the way out that works everywhere either way. See
 [The Query editor](#the-query-editor).
+
+### One session per database
+
+Every run in the Query pane goes through one connection, opened on the first
+run and kept for as long as you stay on that database, as in `psql` or SSMS. A
+temporary table, a `SET`, or a transaction you `BEGIN` is still there for the
+next run. A PostgreSQL script run while a transaction is open is wrapped in a
+savepoint rather than a transaction of its own, so a failing script undoes its
+own statements and leaves yours as they were. Leaving the database (`F2`) or
+quitting closes the connection, which rolls back anything still open, so
+`COMMIT` what you mean to keep.
+
+A run that is cancelled or loses its connection part-way leaves the session in
+a state nothing can vouch for, so the next run opens a fresh connection; any
+open transaction is gone with the old one. A run that the server merely
+refuses, an unknown column say, keeps the session.
+
+On the command line, one invocation is one connection too: a first-time schema
+build and the query share it, where they used to log in separately. The one
+exception is the SQL Server pre-check, which plans on a connection of its own
+and discards it, because planning can change parse-time settings of the session
+it runs on (`SET PARSEONLY`, `SET QUOTED_IDENTIFIER`) without any error to
+notice.
 
 ### Switching database
 
@@ -767,7 +859,11 @@ host       = "sql01.internal"
 database   = "reports"
 username   = "keychain:reporting-sql/svc_reports"
 credential = "keychain:reporting-sql"
-encrypt    = "true"                # provider-specific keys pass through to the adapter
+# Provider-specific keys pass through to the adapter. For SQL Server:
+#   encrypt                = "true" (default) | "strict" | "false" | "disable"
+#   trustservercertificate = true   # skip certificate verification (self-signed servers)
+#   hostnameincertificate  = "sql01.corp"  # the name to verify the certificate against
+#   instance               = "SQLEXPRESS"  # a named instance, found through SQL Browser
 
 [hosts.scratch]
 provider   = "postgres"
@@ -792,8 +888,9 @@ than being read as false.
 Credential schemes: `env:VAR`, `bws:<secret-id>[#field]` (Bitwarden
 Secrets Manager, needs `BWS_ACCESS_TOKEN`), `bw:item/<id-or-name>`
 (Bitwarden CLI, needs `BW_SESSION`), `keychain:<service>[/<account>]`
-(macOS). Resolution is lazy and per-invocation; passwords ride an
-environment overlay to the client, never argv.
+(macOS). Resolution is lazy and per-invocation, and a password goes straight
+to the server: no child process, environment variable or argv ever carries
+it.
 
 The password source is always the **`credential`** key — a resolver URI, never
 a plaintext password. A host key named `password` (or `pwd`/`pass`/`passwd`) is
@@ -915,7 +1012,7 @@ zsh's completion cache picks up the new function.
 
 ## Requirements
 
-- `sqlcmd` on PATH for sqlserver hosts ([go-sqlcmd](https://github.com/microsoft/go-sqlcmd) or legacy mssql-tools)
+- No database client: both providers are reached over their own protocols.
 - `nvim` 0.12.0 or newer on PATH, optional: interactive mode uses it as the
   Query pane's editor when it is there, and falls back to a plain text area when
   it is not. See [The Query editor](#the-query-editor)
@@ -930,8 +1027,7 @@ make cover          # unit tests + coverage summary
 make integration    # docker compose up, run the postgres + sqlserver suites, tear down
 ```
 
-Integration tests need Docker and a local `sqlcmd` binary; the postgres suite
-needs no client binary. Image
+Integration tests need Docker and no database client binary. Image
 refs are overridable when pulling through a mirror:
 
 ```sh

@@ -121,11 +121,11 @@ func TestPostgresScripts(t *testing.T) {
 		if res.code != 0 {
 			t.Fatalf("code=%d stderr=%s", res.code, res.stderr)
 		}
-		var sets [][]map[string]*string
+		var sets [][]map[string]any
 		if err := json.Unmarshal([]byte(res.stdout), &sets); err != nil {
 			t.Fatalf("not an array of result sets: %v\n%s", err, res.stdout)
 		}
-		if len(sets) != 2 || *sets[0][0]["a"] != "1" || *sets[1][0]["b"] != "x" || sets[1][0]["c"] != nil {
+		if len(sets) != 2 || sets[0][0]["a"] != float64(1) || sets[1][0]["b"] != "x" || sets[1][0]["c"] != nil {
 			t.Fatalf("sets = %s", res.stdout)
 		}
 	})
@@ -175,6 +175,28 @@ func TestPostgresScripts(t *testing.T) {
 			t.Fatalf("code=%d stdout=%q stderr=%s", res.code, res.stdout, res.stderr)
 		}
 	})
+}
+
+// TestPostgresJSONTypes pins the json types a postgres column comes out as:
+// numbers and booleans as themselves, digit for digit, everything else as the
+// server's own text.
+func TestPostgresJSONTypes(t *testing.T) {
+	pgReady(t)
+	res := runTool(t, nil, "query", "--host", "pg", "--output", "json", `SELECT
+		1::int AS i, 9007199254740993::bigint AS big, 12345678901234567890.0123::numeric AS n,
+		1.5::float8 AS f, 'NaN'::float8 AS nan, true AS b, '2026-10-26'::date AS d, '7'::text AS s`)
+	if res.code != 0 {
+		t.Fatalf("code=%d stderr=%s", res.code, res.stderr)
+	}
+	want := `"i": 1, "big": 9007199254740993, "n": 12345678901234567890.0123, "f": 1.5, "nan": "NaN", "b": true, "d": "2026-10-26", "s": "7"`
+	if !strings.Contains(res.stdout, want) {
+		t.Fatalf("stdout = %s\nwant it to contain %s", res.stdout, want)
+	}
+	// text output is unchanged: the server's own rendering.
+	res = runTool(t, nil, "query", "--host", "pg", "SELECT true AS b, 1.50::numeric AS n")
+	if res.code != 0 || res.stdout != "b\tn\nt\t1.50\n" {
+		t.Fatalf("code=%d stdout=%q", res.code, res.stdout)
+	}
 }
 
 func TestPostgresOutputFormats(t *testing.T) {

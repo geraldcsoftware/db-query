@@ -218,7 +218,7 @@ func (r resultsPane) currentSlice() adapter.Rows {
 	if end > len(r.rows.Rows) {
 		end = len(r.rows.Rows)
 	}
-	return adapter.Rows{Columns: r.rows.Columns, Rows: r.rows.Rows[start:end]}
+	return adapter.Rows{Columns: r.rows.Columns, Kinds: r.rows.Kinds, Rows: r.rows.Rows[start:end]}
 }
 
 // view renders the current page as a borderless table. --output/--border/

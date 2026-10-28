@@ -97,7 +97,9 @@ func TestListDatabasesWritesCache(t *testing.T) {
 		t.Fatalf("setup code=%d", code)
 	}
 	var errb strings.Builder
-	rows, code := ListDatabases(r, c, &errb)
+	s := New(r)
+	defer s.Close()
+	rows, code := ListDatabases(s, c, &errb)
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errb.String())
 	}

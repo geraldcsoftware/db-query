@@ -40,6 +40,10 @@ type Reply struct {
 	Columns []string
 	Rows    [][]*string
 
+	// OIDs, when set, declares each column's type; a column without one is
+	// text (OID 25).
+	OIDs []uint32
+
 	// Code and Message, when Code is set, make the statement fail with that
 	// SQLSTATE. Detail and Hint ride along when set.
 	Code, Message, Detail, Hint string
@@ -268,11 +272,18 @@ func (s *Server) serve(c net.Conn) {
 			q := Query{SQL: m.String, Simple: true}
 			s.record(q)
 			tag := strings.ToUpper(strings.TrimSpace(m.String))
-			switch tag {
-			case "BEGIN":
+			switch {
+			case tag == "BEGIN":
 				tx = 'T'
-			case "COMMIT", "ROLLBACK":
+			case tag == "COMMIT", tag == "ROLLBACK":
 				tx = 'I'
+			case strings.HasPrefix(tag, "ROLLBACK TO SAVEPOINT"):
+				// The real server leaves a failed transaction on rolling back
+				// to a savepoint; the fake only needs to say so.
+				s.handler(q)
+				if tx == 'E' {
+					tx = 'T'
+				}
 			default:
 				r := s.handler(q)
 				if r.Code != "" {
@@ -311,6 +322,14 @@ func (s *Server) serve(c net.Conn) {
 			if pending != nil && !failed {
 				q := *pending
 				s.record(q)
+				// A transaction a caller opens as an ordinary statement is
+				// tracked too, so a later run sees the session inside it.
+				switch strings.ToUpper(strings.TrimSpace(q.SQL)) {
+				case "BEGIN":
+					tx = 'T'
+				case "COMMIT", "ROLLBACK":
+					tx = 'I'
+				}
 				r := s.handler(q)
 				if r.Delay > 0 {
 					select {
@@ -366,7 +385,11 @@ func sendResult(be *pgproto3.Backend, r Reply) {
 	}
 	fields := make([]pgproto3.FieldDescription, len(r.Columns))
 	for i, c := range r.Columns {
-		fields[i] = pgproto3.FieldDescription{Name: []byte(c), DataTypeOID: 25, DataTypeSize: -1, TypeModifier: -1}
+		oid := uint32(25)
+		if i < len(r.OIDs) && r.OIDs[i] != 0 {
+			oid = r.OIDs[i]
+		}
+		fields[i] = pgproto3.FieldDescription{Name: []byte(c), DataTypeOID: oid, DataTypeSize: -1, TypeModifier: -1}
 	}
 	be.Send(&pgproto3.RowDescription{Fields: fields})
 	for _, row := range r.Rows {

@@ -1,20 +1,11 @@
 // Package sqlscan classifies SQL before it reaches an engine, and holds the
 // vocabulary both providers report in. It knows nothing about connections or
 // clients: an adapter either decides from the text (postgres, via the vendored
-// PostgreSQL grammar) or reports ErrNeedsPlan and is driven through a planner
-// probe (sqlserver). See docs/design.md §13.12–§13.14.
+// PostgreSQL grammar) or asks the engine's planner (sqlserver), and reports its
+// verdict in these terms either way. See docs/design.md §13.12–§13.14.
 package sqlscan
 
-import (
-	"errors"
-	"fmt"
-)
-
-// ErrNeedsPlan is returned by an adapter that cannot decide from the text and
-// needs the engine's planner. Callers switch on this error rather than on a
-// provider name, so a third provider picks its own mechanism without touching
-// any call site.
-var ErrNeedsPlan = errors.New("sqlscan: this provider classifies through the engine planner")
+import "fmt"
 
 // Class is what one statement would do, ordered by how restrictively it must
 // be treated. ClassOpaque sorts highest deliberately: a statement the

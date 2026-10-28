@@ -1,127 +1,176 @@
 package adapter
 
 import (
-	"io"
+	"context"
 	"strings"
 	"testing"
 
-	"github.com/geraldcsoftware/db-query/internal/config"
-	"github.com/geraldcsoftware/db-query/internal/credential"
-	"github.com/geraldcsoftware/db-query/internal/executor"
 	"github.com/geraldcsoftware/db-query/internal/sqlscan"
 )
 
-// The whole point of the ErrNeedsPlan contract is that a caller never asks
-// which provider it is holding.
+// countingRunner records whether a classifier reached for a connection, and
+// hands over whatever conn it was given.
+type countingRunner struct {
+	calls int
+	conn  Conn
+}
+
+func (r *countingRunner) With(_ context.Context, f func(Conn) error) error {
+	r.calls++
+	return f(r.conn)
+}
+
+// The point of one Classify call is that a caller never asks which provider it
+// is holding: each adapter picks its mechanism and reports which it used.
 func TestClassifyMechanismIsChosenByTheAdapter(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("postgres decides offline and never connects", func(t *testing.T) {
+		if !sqlscan.ParserAvailable() {
+			t.Skip("built without cgo: the postgres classifier refuses every submission by design")
+		}
+		r := &countingRunner{}
+		v, err := postgresAdapter{}.Classify(ctx, "SELECT $1", map[string]string{"1": "x"}, r)
+		if err != nil || v.Mechanism != sqlscan.MechanismParser || v.Class != sqlscan.ClassRead {
+			t.Fatalf("verdict = %+v, err = %v", v, err)
+		}
+		if r.calls != 0 {
+			t.Fatal("the parser mechanism reached for a connection")
+		}
+		if (postgresAdapter{}).Dialect() != sqlscan.DialectPostgres {
+			t.Fatal("dialect")
+		}
+	})
+	t.Run("sqlserver without a connection cannot decide", func(t *testing.T) {
+		v, err := sqlserverAdapter{}.Classify(ctx, "SELECT 1", nil, nil)
+		if err == nil || v.Mechanism != sqlscan.MechanismPlanner {
+			t.Fatalf("verdict = %+v, err = %v; want an error naming the planner", v, err)
+		}
+		if (sqlserverAdapter{}).Dialect() != sqlscan.DialectTSQL {
+			t.Fatal("dialect")
+		}
+	})
+	t.Run("sqlserver refuses a bad param name before connecting", func(t *testing.T) {
+		r := &countingRunner{}
+		if _, err := (sqlserverAdapter{}).Classify(ctx, "SELECT @who", map[string]string{"@who": "x"}, r); err == nil {
+			t.Fatal("want the name refused")
+		}
+		if r.calls != 0 {
+			t.Fatal("a refused submission reached for a connection")
+		}
+	})
+	t.Run("sqlserver will not plan on another provider's connection", func(t *testing.T) {
+		r := &countingRunner{conn: &pgConn{}}
+		if _, err := (sqlserverAdapter{}).Classify(ctx, "SELECT 1", nil, r); err == nil {
+			t.Fatal("planning on a postgres connection must fail closed")
+		}
+	})
+}
+
+func TestSQLServerPlanTextDeclaresBoundParams(t *testing.T) {
 	tests := []struct {
-		provider      string
-		wantNeedsPlan bool
-		wantDialect   sqlscan.Dialect
+		name   string
+		stmt   string
+		params map[string]string
+		want   string
 	}{
-		{"postgres", false, sqlscan.DialectPostgres},
-		{"sqlserver", true, sqlscan.DialectTSQL},
+		{"no params, untouched", "SELECT 1", nil, "SELECT 1"},
+		{"unreferenced params are not declared", "SELECT 1", map[string]string{"who": "Ada"}, "SELECT 1"},
+		{"ASCII is varchar at its length", "SELECT @who",
+			map[string]string{"who": "Grace"}, "DECLARE @who varchar(5);\nSELECT @who"},
+		{"an empty value is varchar(max), as the driver sends it", "SELECT @who",
+			map[string]string{"who": ""}, "DECLARE @who varchar(max);\nSELECT @who"},
+		{"ASCII over 8000 is varchar(max)", "SELECT @who",
+			map[string]string{"who": strings.Repeat("x", 8001)}, "DECLARE @who varchar(max);\nSELECT @who"},
+		{"non-ASCII is nvarchar, counted in UTF-16 units", "SELECT @who",
+			map[string]string{"who": "héllo"}, "DECLARE @who nvarchar(5);\nSELECT @who"},
+		{"non-ASCII over 4000 is nvarchar(max)", "SELECT @who",
+			map[string]string{"who": strings.Repeat("é", 4001)}, "DECLARE @who nvarchar(max);\nSELECT @who"},
+		{"the --param spelling is declared", "SELECT @WHO",
+			map[string]string{"who": "Ada"}, "DECLARE @who varchar(3);\nSELECT @WHO"},
+		{"a local variable is left to the batch", "SELECT @a, @b",
+			map[string]string{"b": "1"}, "DECLARE @b varchar(1);\nSELECT @a, @b"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.provider, func(t *testing.T) {
-			a, err := For(tt.provider)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = a.Classify("SELECT 1")
-			gotNeedsPlan := err == sqlscan.ErrNeedsPlan
-			if gotNeedsPlan != tt.wantNeedsPlan {
-				t.Errorf("ErrNeedsPlan: got %v, want %v (err=%v)", gotNeedsPlan, tt.wantNeedsPlan, err)
-			}
-			if a.Dialect() != tt.wantDialect {
-				t.Errorf("dialect: got %v, want %v", a.Dialect(), tt.wantDialect)
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mssqlPlanText(tt.stmt, tt.params); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestSQLServerPlanInvocationCompilesWithoutExecuting(t *testing.T) {
-	inv, err := sqlserverAdapter{}.PlanInvocation(credential.Credential{}, config.HostConfig{}, "SELECT 1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, err := io.ReadAll(inv.Stdin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(body), "SET SHOWPLAN_XML ON") {
-		t.Errorf("probe does not request a plan: %q", body)
-	}
-	// The probe must not turn execution back on inside the batch it is
-	// planning.
-	if strings.Contains(strings.ToUpper(string(body)), "SHOWPLAN_XML OFF") {
-		t.Errorf("probe re-enables execution within the same batch: %q", body)
-	}
-}
-
-func TestSQLServerParsePlan(t *testing.T) {
+func TestSQLServerShowplanClass(t *testing.T) {
 	tests := []struct {
-		name   string
-		result executor.RawResult
-		want   sqlscan.Class
+		name string
+		plan string
+		want sqlscan.Class
 	}{
 		{
 			"select",
-			executor.RawResult{Stdout: []byte(`<StmtSimple StatementType="SELECT" />`)},
+			`<StmtSimple StatementType="SELECT" />`,
 			sqlscan.ClassRead,
 		},
 		{
 			// The engine's label for a SELECT that touches no table
 			// (SELECT 1, SELECT @@VERSION). A read, not an unknown verb.
 			"select without query",
-			executor.RawResult{Stdout: []byte(`<StmtSimple StatementType="SELECT WITHOUT QUERY" />`)},
+			`<StmtSimple StatementType="SELECT WITHOUT QUERY" />`,
 			sqlscan.ClassRead,
 		},
 		{
 			"delete",
-			executor.RawResult{Stdout: []byte(`<StmtSimple StatementType="DELETE" />`)},
+			`<StmtSimple StatementType="DELETE" />`,
 			sqlscan.ClassDestructive,
 		},
 		{
 			"update",
-			executor.RawResult{Stdout: []byte(`<StmtSimple StatementType="UPDATE" />`)},
+			`<StmtSimple StatementType="UPDATE" />`,
 			sqlscan.ClassWrite,
 		},
 		{
 			// SELECT INTO creates the target table, so it is a schema change
 			// on this provider for the same reason it is on postgres.
 			"select into",
-			executor.RawResult{Stdout: []byte(`<StmtSimple StatementType="SELECT INTO" />`)},
+			`<StmtSimple StatementType="SELECT INTO" />`,
 			sqlscan.ClassDestructive,
 		},
 		{
 			"a batch takes its worst statement",
-			executor.RawResult{Stdout: []byte(`<StmtSimple StatementType="SELECT" /><StmtSimple StatementType="DELETE" />`)},
+			`<StmtSimple StatementType="SELECT" /><StmtSimple StatementType="DELETE" />`,
 			sqlscan.ClassDestructive,
 		},
 		{
-			// Not compiling is not the same as being safe.
-			"failed compile is opaque",
-			executor.RawResult{ExitCode: 1, Stderr: []byte("Msg 102: incorrect syntax")},
+			"a plan with no statement type is opaque",
+			`<ShowPlanXML/>`,
 			sqlscan.ClassOpaque,
 		},
 		{
-			"a plan with no statement type is opaque",
-			executor.RawResult{Stdout: []byte(`<ShowPlanXML/>`)},
+			// A type the allowlist has never seen, whatever characters it
+			// holds, still denies rather than being skipped.
+			"an unusual verb is still judged",
+			`<StmtSimple StatementType="SELECT" /><StmtSimple StatementType="CREATE-THING 2" />`,
 			sqlscan.ClassOpaque,
+		},
+		{
+			"a statement with no type cannot hide behind one that has one",
+			`<StmtSimple StatementType="SELECT" /><StmtCond><Condition/></StmtCond>`,
+			sqlscan.ClassOpaque,
+		},
+		{
+			"user SQL in the plan is escaped and counts for nothing",
+			`<StmtSimple StatementText="SELECT '&lt;Stmt x&gt;'" StatementType="SELECT" />`,
+			sqlscan.ClassRead,
 		},
 		{
 			"an unrecognised verb denies rather than passing",
-			executor.RawResult{Stdout: []byte(`<StmtSimple StatementType="SOMETHING NEW" />`)},
+			`<StmtSimple StatementType="SOMETHING NEW" />`,
 			sqlscan.ClassOpaque,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, _, err := sqlserverAdapter{}.ParsePlan(tt.result)
-			if err != nil {
-				t.Fatal(err)
-			}
+			got, _ := mssqlShowplanClass(tt.plan)
 			if got != tt.want {
 				t.Errorf("got %s, want %s", got, tt.want)
 			}

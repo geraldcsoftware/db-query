@@ -1,4 +1,4 @@
-// Package cli wires resolvers, adapters, executor, and renderers into
+// Package cli wires resolvers, adapters and renderers into
 // the user-facing command surface.
 package cli
 
@@ -46,7 +46,7 @@ Flags:
   --database (-d) <db>    : override the host's configured database (query, schema, introspect, databases)
   --config (-c) <path>    : config file (default: $DB_QUERY_CONFIG or ~/.config/db-query/config.toml)
   --output (-o) <format>  : json|table|text|auto (default auto)
-  --param (-p) k=v        : bind a query parameter (repeatable); postgres: $1 bound by --param 1=v, sqlcmd: $(k)
+  --param (-p) k=v        : bind a query parameter (repeatable); postgres: $1 bound by --param 1=v, sqlserver: @k by --param k=v
   --file (-f) <path>      : read SQL from file ("-" for stdin)
   --source (-s) <name>    : run a previously saved query by name (query)
   --save <name>           : save the query under this name after it runs successfully (query)
@@ -133,7 +133,7 @@ host's merged result and which section each key came from.
 Exit codes:
   0  success
   1  config, usage, or credential error
-  2  the run could not happen: sqlcmd could not start, or --timeout expired
+  2  the run could not happen: --timeout expired or the run was cancelled
   3  schema error — the query references an unknown table or column; re-run with --refresh-schema
   4  other SQL error, or the server could not be reached
   5  refused by the safety gate — the query would modify state, or carries a client directive
@@ -186,7 +186,7 @@ func canonicalCommand(name string) string {
 }
 
 // Exit codes: 0 success; 1 config/usage/credential error; 2 the run could
-// not happen (sqlcmd failed to start, or the deadline expired); 3 schema
+// not happen (the deadline expired, or the run was cancelled); 3 schema
 // error (unknown table/column) — the reintrospect-worthy signal; 4 other SQL
 // error, or a server that could not be reached.
 func Run(args []string, stdout, stderr io.Writer) int {
@@ -462,6 +462,9 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	if code != 0 {
 		return code
 	}
+	// One connection for the whole command, opened on first use.
+	s := session.New(r)
+	defer s.Close()
 
 	if sourceSet {
 		sq, err := savedquery.Load(sourceName, category)
@@ -486,7 +489,7 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	// earlier would be classifying something other than what runs.
 	pre.resolve()
 	pre.source = sourceOf(positional, sqlFile, sourceName)
-	doc, tuple, key, err := evaluate(r, c, pre, sql, params)
+	doc, tuple, key, err := evaluate(s, c, pre, sql, params)
 	if err != nil {
 		render.Error(stderr, c.output, err.Error())
 		return 1
@@ -504,12 +507,12 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	// query never runs against a schema we could not introspect.
 	cachePath := schema.CachePath(r.Host.Host, r.Host.Database)
 	if refreshSchema || !schema.Exists(cachePath) {
-		if code := session.BuildSchema(r, cachePath, toSessionFlags(c), stderr); code != 0 {
+		if code := session.BuildSchema(s, cachePath, toSessionFlags(c), stderr); code != 0 {
 			return code
 		}
 	}
 
-	sets, code := session.RunOnce(r, adapter.Query{SQL: sql, Params: params}, toSessionFlags(c), true, stderr)
+	sets, code := session.RunOnce(s, adapter.Query{SQL: sql, Params: params}, toSessionFlags(c), true, stderr)
 	if code != 0 {
 		return code // a non-zero run saves nothing and returns its own code
 	}
@@ -673,10 +676,13 @@ func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) int
 	if code != 0 {
 		return code
 	}
+	// One connection for the whole command, opened on first use.
+	s := session.New(r)
+	defer s.Close()
 
 	cachePath := schema.CachePath(r.Host.Host, r.Host.Database)
 	if refreshSchema || !schema.Exists(cachePath) {
-		if code := session.BuildSchema(r, cachePath, toSessionFlags(c), stderr); code != 0 {
+		if code := session.BuildSchema(s, cachePath, toSessionFlags(c), stderr); code != 0 {
 			return code
 		}
 	}
@@ -773,7 +779,7 @@ func filterTable(rows adapter.Rows, name string) (adapter.Rows, bool, error) {
 	if !qualified {
 		wantSchema, wantTable = "", name
 	}
-	out := adapter.Rows{Columns: rows.Columns}
+	out := adapter.Rows{Columns: rows.Columns, Kinds: rows.Kinds}
 	for _, row := range rows.Rows {
 		if !strings.EqualFold(cell(row, tableIdx), wantTable) {
 			continue
@@ -802,10 +808,13 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 	if code != 0 {
 		return code
 	}
+	// One connection for the whole command, opened on first use.
+	s := session.New(r)
+	defer s.Close()
 
 	// introspect always rebuilds: run the provider catalog query, persist
 	// it to the cache, then print it.
-	sets, code := session.RunOnce(r, adapter.Query{SQL: r.Adapter.IntrospectSQL()}, toSessionFlags(c), false, stderr)
+	sets, code := session.RunOnce(s, adapter.Query{SQL: s.Adapter.IntrospectSQL()}, toSessionFlags(c), false, stderr)
 	if code != 0 {
 		return code
 	}
@@ -816,7 +825,7 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 	}
 	// The connection is already open and this command exists to rebuild caches,
 	// so the database list is refreshed in the same run. Failure is a warning.
-	refreshDatabaseList(r, c, stderr)
+	refreshDatabaseList(s, c, stderr)
 	return renderRows(rows, c.output, false, defaultMaxColWidth, envBorder(), stdout, stderr)
 }
 
@@ -825,19 +834,19 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 // failure is a warning and never an exit code: introspect's contract is to
 // rebuild the schema, which has already succeeded by the time this runs.
 //
-// It only ever catches transport-level failure — a client that could not start
-// or exited nonzero. Neither provider errors on a permission shortfall; a
+// It only ever catches a failed run: an unreachable server or a refused
+// query. Neither provider errors on a permission shortfall; a
 // restricted login simply sees fewer databases, and a truncated list is
 // indistinguishable from a complete one (design.md §13.9). The warning is plain
 // text even under --output json, because the command is succeeding and stderr
 // carries structured errors only on failure.
-func refreshDatabaseList(r session.Resolved, c commonFlags, stderr io.Writer) {
+func refreshDatabaseList(s *session.Session, c commonFlags, stderr io.Writer) {
 	// io.Discard: the underlying error must not print as though introspect
 	// itself had failed. The warning points at the command that will show it.
-	if _, code := listDatabases(r, c, io.Discard); code != 0 {
+	if _, code := listDatabases(s, c, io.Discard); code != 0 {
 		fmt.Fprintf(stderr, "db-query: warning: could not refresh the database list for %s; "+
 			"--database completion may be stale. Run 'db-query --host %s databases' to see why.\n",
-			r.Host.Name, r.Host.Name)
+			s.Host.Name, s.Host.Name)
 	}
 }
 
@@ -857,8 +866,11 @@ func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) 
 	if code != 0 {
 		return code
 	}
+	// One connection for the whole command, opened on first use.
+	s := session.New(r)
+	defer s.Close()
 
-	rows, code := listDatabases(r, c, stderr)
+	rows, code := listDatabases(s, c, stderr)
 	if code != 0 {
 		return code
 	}
@@ -869,8 +881,8 @@ func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) 
 // --database completion, returning the rows so a caller can render them too.
 // The listing lives in internal/session so internal/tui's startup picker can
 // run the same one; this wrapper is only the commonFlags conversion.
-func listDatabases(r session.Resolved, c commonFlags, errOut io.Writer) (adapter.Rows, int) {
-	return session.ListDatabases(r, toSessionFlags(c), errOut)
+func listDatabases(s *session.Session, c commonFlags, errOut io.Writer) (adapter.Rows, int) {
+	return session.ListDatabases(s, toSessionFlags(c), errOut)
 }
 
 // databaseListRows renames the provider's column to a neutral "database".

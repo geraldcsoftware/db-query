@@ -144,7 +144,9 @@ func databaseChoices(r session.Resolved, c session.CommonFlags, stderr io.Writer
 	// The live error is held back rather than printed as it happens: it is
 	// noise if the cache covers for it, and the picker is about to redraw.
 	var listErr bytes.Buffer
-	rows, code := session.ListDatabases(r, c, &listErr)
+	s := session.New(r)
+	defer s.Close()
+	rows, code := session.ListDatabases(s, c, &listErr)
 	if code == 0 {
 		if names := session.DatabaseNames(rows); len(names) > 0 {
 			return names, 0

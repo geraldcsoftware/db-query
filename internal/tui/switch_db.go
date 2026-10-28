@@ -89,7 +89,7 @@ type introspectDoneMsg struct {
 // session.ListDatabases because a listing that cannot be cancelled would hold
 // the popup open past the point the user gave up on it.
 func listDatabases(ctx context.Context, r session.Resolved) ([]string, error) {
-	rows, _, err := execute(ctx, r, r.Adapter.ListDatabasesSQL())
+	rows, _, err := executeOnce(ctx, r, r.Adapter.ListDatabasesSQL())
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +105,7 @@ func listDatabases(ctx context.Context, r session.Resolved) ([]string, error) {
 // disturb the session the panes are still showing.
 func introspectInto(ctx context.Context, r session.Resolved, database string) error {
 	r.Host.Database = database
-	rows, _, err := execute(ctx, r, r.Adapter.IntrospectSQL())
+	rows, _, err := executeOnce(ctx, r, r.Adapter.IntrospectSQL())
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func introspectInto(ctx context.Context, r session.Resolved, database string) er
 
 // openSwitcher opens the popup on the cached database names and asks for a
 // fresh listing behind it. Opening on the cache is what makes F2 feel
-// instant: the listing is a subprocess against a possibly-distant host, and
+// instant: the listing is a round trip to a possibly-distant host, and
 // waiting for it before drawing anything would make the key feel broken.
 func (m model) openSwitcher() (tea.Model, tea.Cmd) {
 	names, _ := dblist.Read(dblist.CachePath(m.session.Host.Name)) // absent cache is an empty list, not an error
@@ -208,8 +208,8 @@ func (m model) startIntrospect() (tea.Model, tea.Cmd) {
 }
 
 // cancelIntrospect asks the running introspection to stop. The state change
-// waits for the introspectDoneMsg that follows, since the child process takes
-// a moment to die and reporting it finished before it has is a lie the next
+// waits for the introspectDoneMsg that follows, since the run takes a moment
+// to stop and reporting it finished before it has is a lie the next
 // keystroke could catch out.
 func (m model) cancelIntrospect() (tea.Model, tea.Cmd) {
 	if m.introspectCancel != nil {
@@ -240,6 +240,11 @@ func (m model) applyDatabase(database string) (tea.Model, tea.Cmd) {
 	m.runGen++
 
 	m.session.Host.Database = database
+	// The old database's connection is let go and the new one opens on the
+	// first run, so a temporary table or open transaction from one database
+	// never follows the user into another.
+	old := m.conn
+	m.conn = session.New(m.session)
 	m.schema = newSchemaPane(m.session.Host)
 	m.schema.setSize(contentRows(m.rects[paneSchema]))
 	// Completion follows the Schema pane, or it would go on offering the
@@ -252,7 +257,7 @@ func (m model) applyDatabase(database string) (tea.Model, tea.Cmd) {
 	m = m.closeSwitcher()
 	m.statusMsg = "switched to " + database
 	m.statusGen++
-	return m, clearStatusAfter(m.statusGen)
+	return m, tea.Batch(clearStatusAfter(m.statusGen), closeSession(old))
 }
 
 // view renders the popup's box. Every state draws the same frame under the same

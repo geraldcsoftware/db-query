@@ -104,13 +104,10 @@ func TestClassifyPostgres(t *testing.T) {
 // decides whether the tool is usable. Under a fail-closed policy a classifier
 // that refuses ordinary SELECTs gets switched off, so these must all pass.
 //
-// It runs the whole pipeline, normaliser included, rather than the classifier
-// alone. Testing the classifier by itself is what let a normaliser bug through:
-// it rewrote the colons in a time format as placeholders, and the corpus never
-// saw it because the corpus never called it.
+// The corpus keeps the cases a since-removed placeholder normaliser once got
+// wrong (it rewrote the colons in a time format as placeholders), so nothing
+// that comes to sit in front of the classifier can quietly repeat that.
 func TestClassifyPostgresAllowsOrdinaryReads(t *testing.T) {
-	// A bound parameter, since the normaliser only engages when one exists.
-	params := map[string]string{"1": "Ada"}
 	reads := []string{
 		"SELECT DISTINCT ON (a) a, b FROM t ORDER BY a, b",
 		"SELECT * FROM generate_series(1,10) WITH ORDINALITY",
@@ -149,7 +146,7 @@ func TestClassifyPostgresAllowsOrdinaryReads(t *testing.T) {
 		"SELECT * FROM t WHERE name = $1",
 	}
 	for _, sql := range reads {
-		if got := ClassifyPostgres(NormalisePlaceholders(sql, params, DialectPostgres)); got.Class != ClassRead {
+		if got := ClassifyPostgres(sql); got.Class != ClassRead {
 			t.Errorf("falsely refused an ordinary read as %s: %s\n  %+v", got.Class, sql, got.Statements)
 		}
 	}

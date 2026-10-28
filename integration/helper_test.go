@@ -2,13 +2,14 @@
 
 // Package integration runs the built db-query binary against real
 // databases started by docker-compose.yml (make integration). Two
-// suites live here: TestPostgres* (the wire protocol, no client binary) and
-// TestSQLServer* (sqlcmd).
+// suites live here, TestPostgres* and TestSQLServer*. Neither needs a client
+// binary: db-query speaks both wire protocols itself.
 package integration
 
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	_ "github.com/microsoft/go-mssqldb"
 )
 
 const (
@@ -73,6 +75,8 @@ username   = "dbq"
 credential = "env:DBQ_PG_PASSWORD"
 readonly   = false
 
+# The container serves a self-signed certificate, so verification is turned
+# off here; encryption itself stays on, as it does by default.
 [hosts.mssql-master]
 provider   = "sqlserver"
 host       = "127.0.0.1"
@@ -80,6 +84,7 @@ port       = %s
 database   = "master"
 username   = "sa"
 credential = "env:DBQ_MSSQL_PASSWORD"
+trustservercertificate = true
 
 [hosts.mssql]
 provider   = "sqlserver"
@@ -88,6 +93,7 @@ port       = %s
 database   = "dbqtest"
 username   = "sa"
 credential = "env:DBQ_MSSQL_PASSWORD"
+trustservercertificate = true
 `,
 		envOr("DBQ_PG_PORT", "15432"),
 		envOr("DBQ_PG_PORT", "15432"),
@@ -166,25 +172,24 @@ func seedPG(t testing.TB, sql string) {
 	}
 }
 
-// seedMSSQL runs one batch straight through sqlcmd, connecting the way the
-// adapter does: every detail through the SQLCMD* overlay, nothing on argv, so
-// the fixture and the subject under test reach the same server the same way.
-// -b matches the adapter too, making a batch error exit nonzero.
+// seedMSSQL runs one batch straight through the driver db-query uses, with
+// the same encryption settings as the hosts above.
 //
 // It bypasses db-query deliberately. See the note in mssqlReady for why the
 // fixture cannot be built with the tool itself.
-func seedMSSQL(t testing.TB, database, sql string) {
+func seedMSSQL(t testing.TB, database, batch string) {
 	t.Helper()
-	cmd := exec.Command("sqlcmd", "-b", "-Q", sql)
-	cmd.Env = append(os.Environ(),
-		"SQLCMDSERVER=tcp:127.0.0.1,"+envOr("DBQ_MSSQL_PORT", "11433"),
-		"SQLCMDUSER=sa",
-		"SQLCMDPASSWORD="+mssqlPassword,
-		"SQLCMDDBNAME="+database,
-	)
-	out, err := cmd.CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, err := sql.Open("sqlserver", fmt.Sprintf(
+		"sqlserver://sa:%s@127.0.0.1:%s?database=%s&encrypt=true&trustservercertificate=true",
+		mssqlPassword, envOr("DBQ_MSSQL_PORT", "11433"), database))
 	if err != nil {
-		t.Fatalf("seeding %s failed: %v\n%s", database, err, out)
+		t.Fatalf("connecting to seed %s: %v", database, err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, batch); err != nil {
+		t.Fatalf("seeding %s failed: %v", database, err)
 	}
 }
 
