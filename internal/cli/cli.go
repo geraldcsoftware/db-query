@@ -62,6 +62,8 @@ Flags:
                             0 = unlimited) (query, schema)
   --border <style>        : table output: ascii|light|markdown|none (default ascii, or $DB_QUERY_BORDER)
                             (query, schema)
+  --stats                 : print rows returned, rows affected and elapsed time on stderr
+                            (default on when stderr is a terminal; --stats=false turns it off) (query)
   --tables (-T)           : schema: print one schema-qualified table name per line instead of columns
   --help (-h)             : show this help (works on any command)
   --version (-v)          : print version information
@@ -395,7 +397,7 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	var c commonFlags
 	params := paramFlags{}
 	var sqlFile, saveName, sourceName, category string
-	var refreshSchema, noHeaders, force bool
+	var refreshSchema, noHeaders, force, stats bool
 	var maxColWidth int
 	var border string
 	fs := newFlagSet("query", stderr)
@@ -414,6 +416,9 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	fs.IntVar(&maxColWidth, "max-col-width", defaultMaxColWidth, "table output: truncate cells wider than this (0 = unlimited)")
 	fs.StringVar(&border, "border", envBorder(), "table output: frame style ("+strings.Join(render.Borders(), "|")+")")
 	fs.BoolVar(&force, "force", false, "with --save: overwrite an existing query and bypass the duplicate check")
+	// On by default only where a person is reading stderr, so a script that
+	// captures stderr to detect failure sees nothing new on success.
+	fs.BoolVar(&stats, "stats", isTerminal(stderr), "print rows returned, rows affected and elapsed time on stderr (default true when stderr is a terminal)")
 	var pre precheckFlags
 	fs.BoolVar(&pre.dryRun, "dry-run", false, "classify the query and print the decision as JSON; run nothing")
 	fs.StringVar(&pre.token, "precheck", "", "the token from a prior --dry-run of this exact invocation")
@@ -512,12 +517,21 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 		}
 	}
 
-	sets, code := session.RunOnce(s, adapter.Query{SQL: sql, Params: params}, toSessionFlags(c), true, stderr)
+	res, code := session.RunOnce(s, adapter.Query{SQL: sql, Params: params}, toSessionFlags(c), true, stderr)
 	if code != 0 {
 		return code // a non-zero run saves nothing and returns its own code
 	}
-	if code := renderSets(sets, c.output, noHeaders, maxColWidth, border, stdout, stderr); code != 0 {
+	if code := renderSets(res.Sets, c.output, noHeaders, maxColWidth, border, stdout, stderr); code != 0 {
 		return code
+	}
+	// The summary follows the rows, on stderr, so stdout carries the result
+	// and nothing else. It honours --output the way an error does: json
+	// writes it as a JSON line, every other format as prose.
+	if stats {
+		if err := render.Stats(stderr, resolveOutput(c.output, stdout), res); err != nil {
+			render.Error(stderr, c.output, err.Error())
+			return 1
+		}
 	}
 
 	// Save on success only: the query ran, exited 0, and its output has been
@@ -814,11 +828,11 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 
 	// introspect always rebuilds: run the provider catalog query, persist
 	// it to the cache, then print it.
-	sets, code := session.RunOnce(s, adapter.Query{SQL: s.Adapter.IntrospectSQL()}, toSessionFlags(c), false, stderr)
+	res, code := session.RunOnce(s, adapter.Query{SQL: s.Adapter.IntrospectSQL()}, toSessionFlags(c), false, stderr)
 	if code != 0 {
 		return code
 	}
-	rows := adapter.First(sets)
+	rows := adapter.First(res.Sets)
 	if err := schema.Write(schema.CachePath(r.Host.Host, r.Host.Database), rows); err != nil {
 		render.Error(stderr, c.output, err.Error())
 		return 1

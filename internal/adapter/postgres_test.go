@@ -308,12 +308,56 @@ func TestPostgresExecuteNothingToRun(t *testing.T) {
 // execOnce opens a connection, runs q and closes it: one run, as every caller
 // made before connections outlived a run.
 func execOnce(ctx context.Context, host config.HostConfig, q Query) ([]Rows, error) {
+	res, err := runOnce(ctx, host, q)
+	return res.Sets, err
+}
+
+// runOnce is execOnce returning the whole Result.
+func runOnce(ctx context.Context, host config.HostConfig, q Query) (Result, error) {
 	c, err := postgresAdapter{}.Open(ctx, testCred, host)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	defer c.Close()
 	return c.Execute(ctx, q)
+}
+
+func TestPostgresExecuteReportsEachStatementsCommandTag(t *testing.T) {
+	srv := pgfake.Start(t, func(q pgfake.Query) pgfake.Reply {
+		switch {
+		case strings.HasPrefix(q.SQL, "CREATE"):
+			return pgfake.Reply{Tag: "CREATE TABLE"}
+		case strings.HasPrefix(q.SQL, "INSERT"):
+			return pgfake.Reply{Tag: "INSERT 0 3"}
+		case strings.HasPrefix(q.SQL, "UPDATE"):
+			r := pgfake.Rows([]string{"id"}, []string{"1"}, []string{"2"})
+			r.Tag = "UPDATE 2"
+			return r
+		case strings.HasPrefix(q.SQL, "DELETE"):
+			return pgfake.Reply{Tag: "DELETE 0"}
+		}
+		return pgfake.Rows([]string{"n"}, []string{"1"}, []string{"2"}, []string{"3"})
+	})
+	res, err := runOnce(context.Background(), fakeHost(srv), Query{SQL: "CREATE TABLE t (id int); " +
+		"INSERT INTO t VALUES (1), (2), (3); UPDATE t SET id = id RETURNING id; DELETE FROM t WHERE false; SELECT id FROM t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Stat{
+		{Tag: "CREATE TABLE"},
+		{Tag: "INSERT 0 3", Rows: 3, Counted: true},
+		// RETURNING produces a set, but the count is still of rows changed.
+		{Tag: "UPDATE 2", Rows: 2, Counted: true},
+		{Tag: "DELETE 0", Rows: 0, Counted: true},
+		{Tag: "SELECT 3", Rows: 3, Counted: true, Returned: true},
+	}
+	if !reflect.DeepEqual(res.Stats, want) {
+		t.Fatalf("stats = %+v\nwant    %+v", res.Stats, want)
+	}
+	// BEGIN and COMMIT wrapped the script, and are db-query's, not the user's.
+	if len(res.Sets) != 2 {
+		t.Fatalf("sets = %d, want 2", len(res.Sets))
+	}
 }
 
 func TestPostgresConnRunsShareOneSession(t *testing.T) {

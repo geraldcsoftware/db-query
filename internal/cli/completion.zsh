@@ -124,6 +124,7 @@ _dbq_cmd_query() {
     '--no-headers[omit the header line]' \
     '--max-col-width[table output: truncate cells wider than n (0 = unlimited)]:cells:' \
     '--border[table output: frame style]:border:(ascii light markdown none)' \
+    '--stats[print rows returned, rows affected and elapsed time on stderr]' \
     '*:SQL:_message "SQL is free-form; no completion"'
 }
 

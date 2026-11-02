@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf16"
 
+	"github.com/golang-sql/sqlexp"
 	mssql "github.com/microsoft/go-mssqldb"
 
 	"github.com/geraldcsoftware/db-query/internal/config"
@@ -261,15 +262,15 @@ func mssqlArgs(text string, params map[string]string) []any {
 // implicit transaction: a batch that fails part-way keeps whatever its earlier
 // statements did, unless the batch manages its own transaction. Every result
 // set is kept, one per statement that returned columns.
-func (c *mssqlConn) Execute(ctx context.Context, q Query) ([]Rows, error) {
+func (c *mssqlConn) Execute(ctx context.Context, q Query) (Result, error) {
 	if c.broken {
-		return nil, &LocalError{Msg: "the sqlserver connection is no longer usable"}
+		return Result{}, &LocalError{Msg: "the sqlserver connection is no longer usable"}
 	}
 	batches, err := sqlserverAdapter{}.plan(q)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
-	var sets []Rows
+	var res Result
 	for i, b := range batches {
 		for range b.count {
 			got, err := runBatch(ctx, c.conn, b)
@@ -279,61 +280,119 @@ func (c *mssqlConn) Execute(ctx context.Context, q Query) ([]Rows, error) {
 				if len(batches) > 1 {
 					where = fmt.Sprintf("batch %d of %d", i+1, len(batches))
 				}
-				return nil, mssqlFailure(ctx, err, where)
+				return Result{}, mssqlFailure(ctx, err, where)
 			}
-			sets = append(sets, got...)
+			res.Sets = append(res.Sets, got.Sets...)
+			res.Stats = append(res.Stats, got.Stats...)
 		}
 	}
-	return sets, nil
+	return res, nil
 }
 
-// runBatch sends one batch and reads every result set it produces. A
-// statement with no result columns (an INSERT, a SET) produces none.
-func runBatch(ctx context.Context, conn *sql.Conn, b mssqlBatch) ([]Rows, error) {
-	rs, err := conn.QueryContext(ctx, b.sql, b.args...)
+// runBatch sends one batch and reads every result set it produces, and every
+// row count the server reports. A statement with no result columns (an
+// INSERT, a SET) produces no set, but a DML statement still reports a count.
+//
+// The counts are not on database/sql's Rows, so the batch is read through the
+// driver's message stream instead: a ReturnMessage passed among the arguments
+// turns the reply into a sequence of messages (a result set ready, a row
+// count, an error, a PRINT) read one at a time, in the order the server sent
+// them. In this mode a server error arrives as a message rather than from
+// QueryContext. The run reports the first statement that failed, and of the
+// errors that statement raised, the last, which is the one the driver itself
+// reports outside this mode. It is returned once the reply has been read to its
+// end, which is when the session is ready for the next batch.
+func runBatch(ctx context.Context, conn *sql.Conn, b mssqlBatch) (Result, error) {
+	msgs := &sqlexp.ReturnMessage{}
+	rs, err := conn.QueryContext(ctx, b.sql, append([]any{msgs}, b.args...)...)
+	if err != nil {
+		return Result{}, err
+	}
+	defer rs.Close()
+	var res Result
+	// pending holds the errors raised by the statement being read; first is
+	// the one the run reports.
+	var pending []error
+	var first error
+	// open is whether the last result set read is still waiting for the count
+	// that closes it: the server reports a SELECT's row count after its rows,
+	// and that count is of rows returned, not rows changed.
+	open := false
+	for active := true; active; {
+		switch m := msgs.Message(ctx).(type) {
+		case sqlexp.MsgNext:
+			set, err := readSet(rs)
+			if err != nil {
+				return Result{}, err
+			}
+			if set != nil {
+				res.Sets = append(res.Sets, *set)
+				open = true
+			}
+		case sqlexp.MsgRowsAffected:
+			res.Stats = append(res.Stats, Stat{Rows: m.Count, Counted: true, Returned: open})
+			open = false
+		case sqlexp.MsgNextResultSet:
+			if first == nil && len(pending) > 0 {
+				first = pending[len(pending)-1]
+			}
+			pending = nil
+			active = rs.NextResultSet()
+			open = false
+		case sqlexp.MsgError:
+			pending = append(pending, m.Error)
+		}
+	}
+	if first == nil && len(pending) > 0 {
+		first = pending[len(pending)-1]
+	}
+	// A cancel ends the message stream early, which reads like its end; the
+	// context says which it was.
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	if first != nil {
+		return Result{}, first
+	}
+	if err := rs.Err(); err != nil {
+		return Result{}, err
+	}
+	return res, nil
+}
+
+// readSet reads the result set rs is positioned on, or returns nil for one
+// without columns.
+func readSet(rs *sql.Rows) (*Rows, error) {
+	types, err := rs.ColumnTypes()
 	if err != nil {
 		return nil, err
 	}
-	defer rs.Close()
-	var sets []Rows
-	for {
-		types, err := rs.ColumnTypes()
-		if err != nil {
+	if len(types) == 0 {
+		for rs.Next() {
+		}
+		return nil, rs.Err()
+	}
+	set := Rows{Columns: make([]string, len(types)), Kinds: make([]Kind, len(types)), Rows: [][]*string{}}
+	for i, t := range types {
+		set.Columns[i] = t.Name()
+		set.Kinds[i] = mssqlKind(t.DatabaseTypeName())
+	}
+	vals := make([]any, len(types))
+	ptrs := make([]any, len(types))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	for rs.Next() {
+		if err := rs.Scan(ptrs...); err != nil {
 			return nil, err
 		}
-		if len(types) > 0 {
-			set := Rows{Columns: make([]string, len(types)), Kinds: make([]Kind, len(types)), Rows: [][]*string{}}
-			for i, t := range types {
-				set.Columns[i] = t.Name()
-				set.Kinds[i] = mssqlKind(t.DatabaseTypeName())
-			}
-			vals := make([]any, len(types))
-			ptrs := make([]any, len(types))
-			for i := range vals {
-				ptrs[i] = &vals[i]
-			}
-			for rs.Next() {
-				if err := rs.Scan(ptrs...); err != nil {
-					return nil, err
-				}
-				row := make([]*string, len(vals))
-				for i, v := range vals {
-					row[i] = mssqlText(v, types[i])
-				}
-				set.Rows = append(set.Rows, row)
-			}
-			sets = append(sets, set)
+		row := make([]*string, len(vals))
+		for i, v := range vals {
+			row[i] = mssqlText(v, types[i])
 		}
-		if !rs.NextResultSet() {
-			break
-		}
+		set.Rows = append(set.Rows, row)
 	}
-	// An engine error part-way through a batch arrives here, after the result
-	// sets before it.
-	if err := rs.Err(); err != nil {
-		return nil, err
-	}
-	return sets, nil
+	return &set, rs.Err()
 }
 
 // mssqlKind maps a column's type to its Kind. A sql_variant column can hold
