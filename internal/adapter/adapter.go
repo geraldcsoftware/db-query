@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/credential"
@@ -73,6 +74,52 @@ func First(sets []Rows) Rows {
 	return sets[0]
 }
 
+// Result is everything a run brought back: the result sets, and what the
+// server said about each statement it completed.
+type Result struct {
+	// Sets holds one Rows for each statement that produced a result set, in
+	// submission order. A statement that returns no columns (an INSERT, a SET)
+	// contributes nothing.
+	Sets []Rows
+
+	// Stats holds the server's own report on each statement it completed, in
+	// the order it sent them. It is not one entry per statement: postgres
+	// reports every statement, SQL Server only those that count rows, and not
+	// even those under SET NOCOUNT ON. The statements db-query wraps a script
+	// in (BEGIN, COMMIT, a savepoint) are its own and are left out.
+	Stats []Stat
+
+	// Elapsed is how long the server took over the run, from sending it to
+	// reading the end of the reply. Opening the connection is not part of it.
+	// The adapter leaves it zero; internal/session's Run measures it.
+	Elapsed time.Duration
+}
+
+// Stat is the server's report on one completed statement.
+type Stat struct {
+	// Tag is the postgres command tag, such as "INSERT 0 3" or
+	// "CREATE TABLE". SQL Server has nothing like it, so there it is empty.
+	Tag string
+
+	// Rows is how many rows the statement touched: affected by an INSERT,
+	// UPDATE, DELETE or MERGE, returned by a SELECT. It means something only
+	// when Counted is set.
+	Rows int64
+
+	// Counted reports whether the server gave a row count at all. A CREATE
+	// TABLE has none, and neither has anything under SQL Server's NOCOUNT,
+	// which is not the same as a count of zero.
+	Counted bool
+
+	// Returned reports that Rows counts rows the statement returned rather
+	// than rows it changed: a SELECT's count. A postgres INSERT, UPDATE,
+	// DELETE or MERGE with a RETURNING clause produces a result set but still
+	// counts what it changed, so it is not Returned. SQL Server does not say
+	// which statement a count belongs to, so there any count that closes a
+	// result set is Returned, an INSERT with an OUTPUT clause included.
+	Returned bool
+}
+
 // Adapter is one provider's way of reaching a server and judging what is sent
 // to it. Everything that needs the server goes through a Conn.
 type Adapter interface {
@@ -120,17 +167,16 @@ type Adapter interface {
 // temporary table, a SET or a transaction one run leaves open is there for the
 // next. It is not safe for concurrent use: one run at a time.
 type Conn interface {
-	// Execute runs q and returns one Rows for each statement that produced a
-	// result set, in submission order. A statement that returns no columns
-	// (an INSERT, a SET) contributes nothing, so a submission of only such
-	// statements returns none.
+	// Execute runs q and returns its result sets and the server's report on
+	// each statement it completed (see Result). A submission of statements
+	// that return no columns has no sets, but still has its stats.
 	//
 	// The error says how far the run got, which is what the exit code
 	// reports: *LocalError when nothing was sent or the reply could not be
 	// read, *QueryError when the server refused the work, and anything else
 	// when the run could not happen at all. A cancelled or expired ctx
 	// surfaces as an error wrapping ctx.Err().
-	Execute(ctx context.Context, q Query) ([]Rows, error)
+	Execute(ctx context.Context, q Query) (Result, error)
 
 	// Usable reports whether the session can take another run. It turns false
 	// once a run ends in a state the adapter cannot vouch for, such as a

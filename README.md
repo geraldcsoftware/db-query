@@ -130,6 +130,21 @@ the host in effect is whatever `DB_QUERY_HOST` says until you override it.
   |---|---|---|
   | PostgreSQL | `smallint`, `integer`, `bigint`, `oid`, `real`, `double precision`, `numeric` | `boolean` |
   | SQL Server | `tinyint`, `smallint`, `int`, `bigint`, `real`, `float`, `decimal`/`numeric`, `money`, `smallmoney` | `bit` |
+- `--stats` (`query`) prints a summary of the run on stderr once the rows are
+  out: rows returned, rows affected and how long the server took, for example
+  `db-query: 12 rows returned, 3 rows affected (41ms)`. It is on by default
+  when stderr is a terminal and off otherwise, so a script that captures
+  stderr sees nothing new on success; pass `--stats` or `--stats=false` to
+  choose. Under `--output json` the summary is one JSON line,
+  `{"stats": {...}}`, with `result_sets`, `rows_returned`, `rows_affected`,
+  `elapsed_ms` and a `statements` array holding the server's report on each
+  statement (`tag` is the PostgreSQL command tag, such as `INSERT 0 3`, and
+  `rows` is `null` where the server gave no count). Stdout is unchanged.
+  `rows_affected` is `null`, and the prose says `ok`, when no statement gave a
+  count: a DDL statement has none, and SQL Server sends none under
+  `SET NOCOUNT ON`. On SQL Server an `INSERT`, `UPDATE` or `DELETE` with an
+  `OUTPUT` clause counts as rows returned, because the server does not say
+  which statement a count belongs to; PostgreSQL's `RETURNING` counts as both.
 - `--max-col-width <n>` (`query`, `schema`; default 50, `0` = unlimited) caps a
   **table** cell at `n` display cells, truncating with `…`. Only `table` output
   is affected; `text` and `json` always carry values whole.

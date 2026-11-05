@@ -94,9 +94,21 @@ database   = "dbqtest"
 username   = "sa"
 credential = "env:DBQ_MSSQL_PASSWORD"
 trustservercertificate = true
+
+# mssqlrw is mssql with the readonly default turned off, as pgrw is for pg.
+[hosts.mssqlrw]
+provider   = "sqlserver"
+host       = "127.0.0.1"
+port       = %s
+database   = "dbqtest"
+username   = "sa"
+credential = "env:DBQ_MSSQL_PASSWORD"
+trustservercertificate = true
+readonly   = false
 `,
 		envOr("DBQ_PG_PORT", "15432"),
 		envOr("DBQ_PG_PORT", "15432"),
+		envOr("DBQ_MSSQL_PORT", "11433"),
 		envOr("DBQ_MSSQL_PORT", "11433"),
 		envOr("DBQ_MSSQL_PORT", "11433"))
 	if err := os.WriteFile(configPath, []byte(cfg), 0o600); err != nil {

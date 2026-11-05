@@ -141,12 +141,12 @@ type stubConn struct {
 	ran    int
 }
 
-func (c *stubConn) Execute(context.Context, adapter.Query) ([]adapter.Rows, error) {
+func (c *stubConn) Execute(context.Context, adapter.Query) (adapter.Result, error) {
 	if c.dead {
-		return nil, errors.New("driver: bad connection")
+		return adapter.Result{}, errors.New("driver: bad connection")
 	}
 	c.ran++
-	return nil, nil
+	return adapter.Result{}, nil
 }
 func (c *stubConn) Usable() bool { return true }
 func (c *stubConn) Ping(context.Context) error {

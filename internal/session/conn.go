@@ -60,20 +60,29 @@ func (s *Session) With(ctx context.Context, f func(adapter.Conn) error) error {
 	return f(s.conn)
 }
 
-// Execute runs q on the session's connection. A submission the adapter
-// refuses as given is refused before the connection is opened, so it never
-// reaches the server.
+// Execute runs q on the session's connection and returns its result sets. A
+// submission the adapter refuses as given is refused before the connection is
+// opened, so it never reaches the server.
 func (s *Session) Execute(ctx context.Context, q adapter.Query) ([]adapter.Rows, error) {
+	res, err := s.Run(ctx, q)
+	return res.Sets, err
+}
+
+// Run is Execute with the server's report on each statement as well as the
+// result sets, and how long the run took once the connection was open.
+func (s *Session) Run(ctx context.Context, q adapter.Query) (adapter.Result, error) {
 	if err := s.Adapter.Check(q); err != nil {
-		return nil, err
+		return adapter.Result{}, err
 	}
-	var sets []adapter.Rows
+	var res adapter.Result
 	err := s.With(ctx, func(c adapter.Conn) error {
+		start := time.Now()
 		var err error
-		sets, err = c.Execute(ctx, q)
+		res, err = c.Execute(ctx, q)
+		res.Elapsed = time.Since(start)
 		return err
 	})
-	return sets, err
+	return res, err
 }
 
 // Close closes the connection, if one was opened. A Session can be used again

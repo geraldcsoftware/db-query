@@ -234,16 +234,16 @@ func (c *pgConn) Close() error {
 // exactly as it was. Statements that cannot run inside a transaction (VACUUM,
 // CREATE DATABASE, CREATE INDEX CONCURRENTLY) therefore work only when
 // submitted alone.
-func (c *pgConn) Execute(ctx context.Context, q Query) ([]Rows, error) {
+func (c *pgConn) Execute(ctx context.Context, q Query) (Result, error) {
 	if !c.Usable() {
-		return nil, &LocalError{Msg: "the postgres connection is no longer usable"}
+		return Result{}, &LocalError{Msg: "the postgres connection is no longer usable"}
 	}
 	stmts, err := postgresAdapter{}.plan(q)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	if len(stmts) == 0 {
-		return nil, nil
+		return Result{}, nil
 	}
 	return c.run(ctx, stmts)
 }
@@ -263,7 +263,7 @@ func (c *pgConn) failed(ctx context.Context, err error, where string) error {
 // transaction.
 const pgSavepoint = "db_query_script"
 
-func (c *pgConn) run(ctx context.Context, stmts []pgStatement) ([]Rows, error) {
+func (c *pgConn) run(ctx context.Context, stmts []pgStatement) (Result, error) {
 	script := len(stmts) > 1
 	begin, commit, rollback := "BEGIN", "COMMIT", "ROLLBACK"
 	starting, committing := "starting the transaction", "committing the transaction"
@@ -278,12 +278,12 @@ func (c *pgConn) run(ctx context.Context, stmts []pgStatement) ([]Rows, error) {
 	}
 	if script {
 		if err := c.conn.Exec(ctx, begin).Close(); err != nil {
-			return nil, c.failed(ctx, err, starting)
+			return Result{}, c.failed(ctx, err, starting)
 		}
 	}
-	var sets []Rows
+	var res Result
 	for i, st := range stmts {
-		rows, err := runStatement(ctx, c.conn, st)
+		rows, stat, err := runStatement(ctx, c.conn, st)
 		if err != nil {
 			where := ""
 			if script {
@@ -296,27 +296,29 @@ func (c *pgConn) run(ctx context.Context, stmts []pgStatement) ([]Rows, error) {
 					c.broken = true
 				}
 			}
-			return nil, c.failed(ctx, err, where)
+			return Result{}, c.failed(ctx, err, where)
 		}
 		if rows != nil {
-			sets = append(sets, *rows)
+			res.Sets = append(res.Sets, *rows)
 		}
+		res.Stats = append(res.Stats, stat)
 	}
 	if script {
 		// A deferred constraint is checked here, so the commit can fail on
 		// its own after every statement succeeded.
 		if err := c.conn.Exec(ctx, commit).Close(); err != nil {
-			return nil, c.failed(ctx, err, committing)
+			return Result{}, c.failed(ctx, err, committing)
 		}
 	}
-	return sets, nil
+	return res, nil
 }
 
 // runStatement sends one statement through the extended protocol and reads its
 // result as text, the server's own rendering of every value, so a date or a
 // numeric prints exactly as the server writes it. It returns nil Rows for a
-// statement with no result columns.
-func runStatement(ctx context.Context, conn *pgconn.PgConn, st pgStatement) (*Rows, error) {
+// statement with no result columns, and the statement's command tag as a Stat
+// either way.
+func runStatement(ctx context.Context, conn *pgconn.PgConn, st pgStatement) (*Rows, Stat, error) {
 	rr := conn.ExecParams(ctx, st.sql, st.values, st.oids, nil, nil)
 	fields := rr.FieldDescriptions()
 	var rows *Rows
@@ -340,10 +342,28 @@ func runStatement(ctx context.Context, conn *pgconn.PgConn, st pgStatement) (*Ro
 			rows.Rows = append(rows.Rows, row)
 		}
 	}
-	if _, err := rr.Close(); err != nil {
-		return nil, err
+	tag, err := rr.Close()
+	if err != nil {
+		return nil, Stat{}, err
 	}
-	return rows, nil
+	return rows, pgStat(tag, rows != nil), nil
+}
+
+// pgStat reads a command tag. Its row count, when it has one, is its last
+// word: "INSERT 0 3", "UPDATE 5", "SELECT 12", "MERGE 2", "COPY 10". A tag that
+// ends in anything else ("CREATE TABLE", "SET") has none. hasSet is whether the
+// statement produced a result set; one that changes rows counts the rows it
+// changed even when it also returns them, through RETURNING.
+func pgStat(tag pgconn.CommandTag, hasSet bool) Stat {
+	changed := tag.Insert() || tag.Update() || tag.Delete() || strings.HasPrefix(tag.String(), "MERGE ")
+	st := Stat{Tag: tag.String(), Returned: hasSet && !changed}
+	text := st.Tag
+	if i := strings.LastIndexByte(text, ' '); i >= 0 {
+		if n, err := strconv.ParseInt(text[i+1:], 10, 64); err == nil {
+			st.Rows, st.Counted = n, true
+		}
+	}
+	return st
 }
 
 // pgKind maps a column's type to its Kind. Only the built-in numeric and

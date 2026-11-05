@@ -97,7 +97,7 @@ func Setup(c CommonFlags, stderr io.Writer) (Resolved, int) {
 	return Resolved{Adapter: a, Cred: cred, Host: host}, 0
 }
 
-// RunOnce runs a query against a resolved host and returns its result sets,
+// RunOnce runs a query against a resolved host and returns its result,
 // applying the exit-code contract: 1 (the submission could not be sent, or
 // the reply could not be read), 2 (the run could not happen: it timed out or
 // was cancelled), 3 (schema error), 4 (other SQL error),
@@ -108,32 +108,32 @@ func Setup(c CommonFlags, stderr io.Writer) (Resolved, int) {
 // The run uses s's connection, opening it if this is the first, so the
 // commands that run several queries against one host (a schema build and then
 // the query itself) connect once.
-func RunOnce(s *Session, q adapter.Query, c CommonFlags, hintRefresh bool, stderr io.Writer) ([]adapter.Rows, int) {
+func RunOnce(s *Session, q adapter.Query, c CommonFlags, hintRefresh bool, stderr io.Writer) (adapter.Result, int) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 	defer cancel()
-	sets, err := s.Execute(ctx, q)
+	res, err := s.Run(ctx, q)
 	var local *adapter.LocalError
 	var query *adapter.QueryError
 	switch {
 	case err == nil:
-		return sets, 0
+		return res, 0
 	case errors.As(err, &local):
 		render.Error(stderr, c.Output, err.Error())
-		return nil, 1
+		return adapter.Result{}, 1
 	case errors.As(err, &query):
 		msg := query.Msg
 		if !query.Schema {
 			render.Error(stderr, c.Output, msg)
-			return nil, 4
+			return adapter.Result{}, 4
 		}
 		if hintRefresh {
 			msg += "\nhint: the schema may have changed — re-run with --refresh-schema to rebuild the schema cache"
 		}
 		render.Error(stderr, c.Output, msg)
-		return nil, 3
+		return adapter.Result{}, 3
 	default:
 		render.Error(stderr, c.Output, err.Error())
-		return nil, 2
+		return adapter.Result{}, 2
 	}
 }
 
@@ -142,11 +142,11 @@ func RunOnce(s *Session, q adapter.Query, c CommonFlags, hintRefresh bool, stder
 // are cached, never rendered. It returns 0 on success or RunOnce's exit
 // code on failure.
 func BuildSchema(s *Session, cachePath string, c CommonFlags, stderr io.Writer) int {
-	sets, code := RunOnce(s, adapter.Query{SQL: s.Adapter.IntrospectSQL()}, c, false, stderr)
+	res, code := RunOnce(s, adapter.Query{SQL: s.Adapter.IntrospectSQL()}, c, false, stderr)
 	if code != 0 {
 		return code
 	}
-	if err := schema.Write(cachePath, adapter.First(sets)); err != nil {
+	if err := schema.Write(cachePath, adapter.First(res.Sets)); err != nil {
 		render.Error(stderr, c.Output, err.Error())
 		return 1
 	}
@@ -165,11 +165,11 @@ func BuildSchema(s *Session, cachePath string, c CommonFlags, stderr io.Writer) 
 // as non-fatal sets to io.Discard so nothing prints as though the command it
 // was attached to had failed.
 func ListDatabases(s *Session, c CommonFlags, errOut io.Writer) (adapter.Rows, int) {
-	sets, code := RunOnce(s, adapter.Query{SQL: s.Adapter.ListDatabasesSQL()}, c, false, errOut)
+	res, code := RunOnce(s, adapter.Query{SQL: s.Adapter.ListDatabasesSQL()}, c, false, errOut)
 	if code != 0 {
 		return adapter.Rows{}, code
 	}
-	rows := adapter.First(sets)
+	rows := adapter.First(res.Sets)
 	if err := dblist.Write(dblist.CachePath(s.Host.Name), DatabaseNames(rows)); err != nil {
 		render.Error(errOut, c.Output, err.Error())
 		return adapter.Rows{}, 1

@@ -9,6 +9,7 @@
 package pgfake
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"net"
@@ -51,6 +52,11 @@ type Reply struct {
 	// Delay holds the reply back, as a slow statement would. A cancel request
 	// from the client ends the wait with SQLSTATE 57014.
 	Delay time.Duration
+
+	// Tag, when set, is the command tag the statement completes with, such as
+	// "UPDATE 3". Unset, a statement with columns completes as "SELECT n" for
+	// its n rows, and one without as "OK".
+	Tag string
 }
 
 // Handler answers one statement.
@@ -380,7 +386,7 @@ func sendResult(be *pgproto3.Backend, r Reply) {
 	be.Send(&pgproto3.BindComplete{})
 	if len(r.Columns) == 0 {
 		be.Send(&pgproto3.NoData{})
-		be.Send(&pgproto3.CommandComplete{CommandTag: []byte("OK")})
+		be.Send(&pgproto3.CommandComplete{CommandTag: []byte(cmp.Or(r.Tag, "OK"))})
 		return
 	}
 	fields := make([]pgproto3.FieldDescription, len(r.Columns))
@@ -401,5 +407,5 @@ func sendResult(be *pgproto3.Backend, r Reply) {
 		}
 		be.Send(&pgproto3.DataRow{Values: vals})
 	}
-	be.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT " + strconv.Itoa(len(r.Rows)))})
+	be.Send(&pgproto3.CommandComplete{CommandTag: []byte(cmp.Or(r.Tag, "SELECT "+strconv.Itoa(len(r.Rows))))})
 }
