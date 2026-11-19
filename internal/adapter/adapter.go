@@ -139,9 +139,8 @@ type Adapter interface {
 	// checks; this only moves them ahead of the connection.
 	Check(q Query) error
 
-	IntrospectSQL() string          // lists user tables + columns
-	ListDatabasesSQL() string       // lists connectable database names
-	PreviewSQL(table string) string // "first 100 rows" of one table, provider-native
+	IntrospectSQL() string    // lists user tables + columns
+	ListDatabasesSQL() string // lists connectable database names
 
 	// Classify reports what a submission would do (docs/design.md §13.13),
 	// with params bound as Execute would bind them. It never runs the
@@ -184,11 +183,6 @@ type Conn interface {
 	// and opens another. A server error that leaves the session as the
 	// statement left it, an unknown column say, does not count.
 	Usable() bool
-
-	// Ping checks the session is still alive on the server, sending nothing
-	// of the caller's. A caller uses it before reusing a connection that has
-	// sat idle, since a server or a firewall may have dropped it meanwhile.
-	Ping(ctx context.Context) error
 
 	Close() error
 }

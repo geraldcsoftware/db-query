@@ -20,7 +20,6 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 	"github.com/geraldcsoftware/db-query/internal/schema"
 	"github.com/geraldcsoftware/db-query/internal/session"
-	"github.com/geraldcsoftware/db-query/internal/tui"
 )
 
 const usage = `db-query — run SQL against configured hosts via native clients
@@ -29,7 +28,6 @@ Usage:
   db-query [shared flags] <command> [flags] [args]
   db-query [shared flags] "<SQL>" [query flags]    on a terminal, runs the SQL as query
   db-query [shared flags] < file.sql               on a terminal, runs SQL from stdin as query
-  db-query [shared flags]                          on a terminal, opens the interactive TUI
 
 Commands:
   query      (q)     --host <name> [flags] [SQL]   run ad-hoc SQL (positional, -f file, stdin) or a saved query
@@ -109,7 +107,6 @@ Environment:
   DB_QUERY_BORDER        default for --border
   DB_QUERY_CONFIG        default config file path
   DB_QUERY_QUERIES_DIR   saved-query store directory
-  DB_QUERY_TUI_PAGE_SIZE rows per page in the interactive mode's Results pane (default 100)
 
 A flag beats the environment, and the environment beats the config file, so an
 exported DB_QUERY_HOST/DB_QUERY_DATABASE pair makes every command in that shell
@@ -203,8 +200,6 @@ func canonicalCommand(name string) string {
 func Run(args []string, stdout, stderr io.Writer) int {
 	// No arguments at all is not a special case: it parses to no shared flags
 	// and no command, which the len(rest) == 0 branch below already handles.
-	// Returning early here instead would make the bare `db-query` the one
-	// invocation that could never reach the TUI.
 	//
 	// The shared flags are parsed off the front of the command line before the
 	// command is chosen. Go's flag package stops at the first non-flag token,
@@ -228,18 +223,15 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	rest := fs.Args()
 	interactive := isTerminal(stdout)
 	if len(rest) == 0 {
-		// No command has three outcomes. Off a terminal there is nothing to run,
-		// so usage is printed. On a terminal with SQL redirected or piped into
-		// stdin, that SQL runs as query. On a terminal with stdin also a
-		// terminal, the interactive TUI opens.
-		if !interactive {
-			fmt.Fprint(stderr, usage)
-			return 1
-		}
-		if !isTerminal(os.Stdin) {
+		// No command has two outcomes. On a terminal with SQL redirected or
+		// piped into stdin, that SQL runs as query. Anywhere else there is
+		// nothing to run, so usage is printed on stderr and the exit code is 1:
+		// off a terminal, or on a terminal with stdin also a terminal.
+		if interactive && !isTerminal(os.Stdin) {
 			return runQuery(nil, globals, stdout, stderr)
 		}
-		return launchTUI(toSessionFlags(globals), buildInfo.Version, stdout, stderr)
+		fmt.Fprint(stderr, usage)
+		return 1
 	}
 	cmdArgs := rest[1:]
 	switch canonicalCommand(rest[0]) {
@@ -911,8 +903,7 @@ func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) 
 
 // listDatabases runs a host's catalog listing and persists the names for
 // --database completion, returning the rows so a caller can render them too.
-// The listing lives in internal/session so internal/tui's startup picker can
-// run the same one; this wrapper is only the commonFlags conversion.
+// This wrapper is only the commonFlags conversion.
 func listDatabases(s *session.Session, c commonFlags, errOut io.Writer) (adapter.Rows, int) {
 	return session.ListDatabases(s, toSessionFlags(c), errOut)
 }
@@ -1074,9 +1065,9 @@ func renderSets(sets []adapter.Rows, output string, noHeaders bool, maxColWidth 
 // real terminal belongs to. It is a type assertion, not a build-tagged
 // isatty call: dependency-free, and a *bytes.Buffer or *strings.Builder in a
 // test is not an *os.File, so it reads false exactly like a pipe or redirect.
-// isTerminal and launchTUI are variables rather than plain functions so a test
-// can exercise the branch that only exists on a terminal — running no command
-// at all opens the interactive mode — without needing a real one.
+// isTerminal is a variable rather than a plain function so a test can exercise
+// the branches that only exist on a terminal, such as SQL given without the
+// query command, without needing a real one.
 var isTerminal = func(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	if !ok {
@@ -1085,8 +1076,6 @@ var isTerminal = func(w io.Writer) bool {
 	info, err := f.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
-
-var launchTUI = tui.Run
 
 // resolveOutput maps render.AutoFormat onto a concrete format: table when w
 // is a terminal, text otherwise. Any explicit format passes through
