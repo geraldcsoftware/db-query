@@ -847,6 +847,52 @@ func TestQueryScriptStopsAtFirstError(t *testing.T) {
 	}
 }
 
+func TestImplicitQueryNeedsATerminal(t *testing.T) {
+	seedSchemaCache(t)
+	needsClassifier(t)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"ok"}, []string{"1"})))
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	args := []string{"--host", "testpg", "--config", cfg, "SELECT $1", "--param", "1=Ada"}
+
+	code, _, errb := run(t, args...)
+	if code != 1 || !strings.Contains(errb, `db-query query "<SQL>"`) {
+		t.Fatalf("off a terminal: code=%d err=%q", code, errb)
+	}
+	if n := len(srv.Queries()); n != 0 {
+		t.Fatalf("off a terminal the SQL reached the server %d time(s)", n)
+	}
+
+	stubTerminal(t)
+	code, _, errb = run(t, args...)
+	if code != 0 {
+		t.Fatalf("on a terminal: code=%d err=%q", code, errb)
+	}
+	q := srv.Queries()
+	if len(q) != 1 || q[0].SQL != "SELECT $1" || len(q[0].Params) != 1 || string(q[0].Params[0]) != "Ada" {
+		t.Fatalf("short form did not run as query with its trailing --param; sent %+v", q)
+	}
+}
+
+func TestUnknownCommandMessage(t *testing.T) {
+	cases := []struct {
+		word        string
+		interactive bool
+		want        string
+	}{
+		{"scehma", true, `db-query: unknown command "scehma" (did you mean "schema"?)`},
+		{"scehma", false, `db-query: unknown command "scehma" (did you mean "schema"?)`},
+		{"qeury", true, `db-query: unknown command "qeury" (did you mean "query"?)`},
+		{"select", true, `db-query: unknown command "select"; to run SQL without the query command, pass it as one quoted argument`},
+		{"select 1", false, `db-query: unknown command "select 1"; outside a terminal, run SQL through the query command: db-query query "<SQL>"`},
+	}
+	for _, c := range cases {
+		if got := unknownCommandMessage(c.word, c.interactive); got != c.want {
+			t.Errorf("unknownCommandMessage(%q, %v)\n got: %s\nwant: %s", c.word, c.interactive, got, c.want)
+		}
+	}
+}
+
 // TestQueryFlagsAfterSQL guards the interspersed-args parsing: flags placed
 // after the positional SQL (which Go's flag package would otherwise swallow)
 // must still bind. The SQL and a trailing --param both have to reach the server.

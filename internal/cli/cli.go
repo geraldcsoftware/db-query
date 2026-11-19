@@ -27,6 +27,8 @@ const usage = `db-query — run SQL against configured hosts via native clients
 
 Usage:
   db-query [shared flags] <command> [flags] [args]
+  db-query [shared flags] "<SQL>" [query flags]    on a terminal, runs the SQL as query
+  db-query [shared flags] < file.sql               on a terminal, runs SQL from stdin as query
   db-query [shared flags]                          on a terminal, opens the interactive TUI
 
 Commands:
@@ -92,6 +94,13 @@ end of the line — so the previous command can be edited instead of retyped:
 
 The same flag given after the command wins over one given before it. Only these
 five are accepted before the command; a command's own flags belong after it.
+
+Without a command. On a terminal, a quoted argument containing a space runs as
+query, so db-query --host test "select 1" is db-query --host test query "select 1",
+and SQL piped or redirected into db-query with no command runs the same way. A
+single bare word is still read as a command name, so a mistyped command fails
+rather than reaching the server. Off a terminal (stdout piped or redirected, an
+agent, cron, CI) both shortcuts are off and the query command is required.
 
 Environment:
   DB_QUERY_HOST          default for --host
@@ -218,13 +227,20 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	rest := fs.Args()
+	interactive := isTerminal(stdout)
 	if len(rest) == 0 {
-		if isTerminal(stdout) {
-			return launchTUI(toSessionFlags(globals), buildInfo.Version, stdout, stderr)
+		// No command has three outcomes. Off a terminal there is nothing to run,
+		// so usage is printed. On a terminal with SQL redirected or piped into
+		// stdin, that SQL runs as query. On a terminal with stdin also a
+		// terminal, the interactive TUI opens.
+		if !interactive {
+			fmt.Fprint(stderr, usage)
+			return 1
 		}
-		// Shared flags but no command, and not a terminal: nothing to run.
-		fmt.Fprint(stderr, usage)
-		return 1
+		if !isTerminal(os.Stdin) {
+			return runQuery(nil, globals, stdout, stderr)
+		}
+		return launchTUI(toSessionFlags(globals), buildInfo.Version, stdout, stderr)
 	}
 	cmdArgs := rest[1:]
 	switch canonicalCommand(rest[0]) {
@@ -251,7 +267,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "db-query: unknown command %q\n\n%s", rest[0], usage)
+		if interactive && looksLikeSQL(rest[0]) {
+			return runQuery(rest, globals, stdout, stderr)
+		}
+		fmt.Fprintf(stderr, "%s\n\n%s", unknownCommandMessage(rest[0], interactive), usage)
 		return 1
 	}
 }

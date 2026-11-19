@@ -3,9 +3,11 @@ package cli
 import (
 	"bytes"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/geraldcsoftware/db-query/internal/pgfake"
 	"github.com/geraldcsoftware/db-query/internal/session"
 )
 
@@ -75,5 +77,35 @@ func TestBareInvocationOffATerminalStillPrintsUsage(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Usage:") {
 		t.Errorf("expected usage on stderr, got %q", stderr.String())
+	}
+}
+
+func TestPipedSQLRunsInsteadOfTheTUI(t *testing.T) {
+	seedSchemaCache(t)
+	needsClassifier(t)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"ok"}, []string{"1"})))
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	launched := stubTerminal(t)
+
+	f, err := os.Open(writeFile(t, t.TempDir(), "q.sql", "SELECT 1", 0o600))
+	if err != nil {
+		t.Fatal(err)
+	}
+	realStdin := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() { os.Stdin = realStdin; f.Close() })
+	// stdout is a terminal; stdin is the redirected file.
+	isTerminal = func(w io.Writer) bool { return w != io.Writer(os.Stdin) }
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"--host", "testpg", "--config", cfg}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d err=%q", code, stderr.String())
+	}
+	if launched.Host != "" {
+		t.Fatal("the TUI opened although SQL arrived on stdin")
+	}
+	if q := srv.Queries(); len(q) != 1 || q[0].SQL != "SELECT 1" {
+		t.Fatalf("stdin SQL not run; sent %+v", q)
 	}
 }
