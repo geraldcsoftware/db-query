@@ -102,6 +102,10 @@ _db-query() {
         databases)    _dbq_cmd_databases ;;
         hosts)        _dbq_cmd_hosts ;;
         completion)   _dbq_cmd_completion ;;
+        # These take no flags or arguments to complete.
+        help|version) ;;
+        # Not a command: the short form, where the SQL stands in the command position.
+        *)            _dbq_cmd_query ;;
       esac
       ;;
   esac

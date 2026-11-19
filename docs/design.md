@@ -2127,3 +2127,84 @@ These were judged not worth the code:
   repetition, so the pre-check's verdict covers every repetition; a count
   that exhausts memory is the caller's request.
 
+### 13.22 Implicit query (amends §13.7, §13.10)
+
+People at a terminal leave out the `query` command and type
+`db-query --host X "select ..."`, which used to fail with `unknown command`.
+The short form now runs as a query, and so does SQL on stdin with no command,
+while a mistyped command name still fails as one. Both shortcuts serve someone
+typing; whatever captures or redirects the output behaves as before.
+
+**Dispatch order.** After the shared flags (§13.7) are parsed:
+
+1. A known command or alias runs unchanged.
+2. On a terminal, a first argument containing whitespace runs `query`, which
+   receives every remaining argument, so trailing query flags work through the
+   existing interspersed parsing.
+3. Any other first argument is `unknown command`, with a hint, followed by
+   usage, exit 1.
+4. With no argument at all: on a terminal with stdin not a character device (a
+   pipe, a redirected file, a heredoc), `query` reads SQL from stdin; on a
+   terminal otherwise, the interactive mode opens (§13.10); off a terminal,
+   usage and exit 1.
+
+**Whitespace is the trace of quoting.** The shell removes quotes before
+`db-query` starts, so the program cannot tell `scehma` from `"scehma"`. Space,
+tab or newline inside one argument is the only evidence that the user quoted,
+escaped or substituted it, and no command name or alias contains whitespace, so
+the rule cannot shadow a command. It extends the contract `query` already
+enforces (`expected one SQL argument, got N (quote the query)`). Keyword
+detection was rejected: it needs per-dialect keyword lists, misses valid
+openings such as `(select ...)` and leading comments, and is still a guess.
+Treating every unknown word as SQL was rejected because `db-query scehma
+--tables` would reach the server and return a syntax error instead of
+`unknown command`. A near miss (edit distance of at most 2 from a full command
+name, aliases excluded because one or two letters match almost anything) names
+the command in either mode; otherwise a terminal is told to pass SQL as one
+quoted argument, and anything else is told to use `db-query query "<SQL>"`,
+which is the line an agent or script reads.
+
+**Interactive means stdout is a terminal.** The test is `isTerminal(stdout)`,
+unchanged, the same one that selects table output (§13.8) and opens the
+interactive mode (§13.10). Stderr was considered, since it would keep `| jq`
+and `> file` interactive, but agents routinely capture stdout while discarding
+stderr to `/dev/null`, which the character-device test counts as a terminal, so
+an agent's habitual `2>/dev/null` would have passed it. Stdout is the stream
+agents always capture. The cost is that `| jq`, `> out.tsv` and
+`$(db-query ...)` need the explicit `query` command. An opt-in alias on top of
+the terminal test was declined: it would also exclude scripts run by hand, but
+leaves the shortcuts off for everyone who does not add it.
+
+**Stdin takes precedence over the interactive mode.** With no command, SQL on a
+non-terminal stdin runs as a query rather than opening the interface. A heredoc
+on a terminal (`db-query -H x <<'EOF'`) used to open the interface and ignore
+stdin; it now runs the query.
+
+**Accepted consequences.**
+
+- `/dev/null` is a character device, so `db-query ... > /dev/null` counts as
+  interactive, and a caller whose stdin is `/dev/null` keeps the old behaviour.
+- A script run by hand with stdout on the terminal gets the shortcuts; the same
+  script under cron or CI does not. There is no opt-in.
+- A caller holding an open pipe that never sends anything blocks on stdin, as an
+  explicit `query` with no SQL already does.
+- SQL whose first character is `-` is read as a flag by the shared parser, so
+  it goes through stdin, the limitation `query` already documents.
+- Query-only flags (`-f`, `--param`, `--dry-run` and the rest) still go after
+  the SQL; only the five shared flags are valid before it.
+- Exit codes and the precheck token are unchanged: the token binds provider,
+  host, database, SQL and parameter values rather than argv, so a token from the
+  short form is valid for the long form and the reverse.
+
+§13.10's guarantee holds unchanged: a pipe or a redirect with no command still
+gets usage and exit 1.
+
+**The workspace-tools gate hook must ship first.** A gate that recognised only
+`query` or `q` and skipped everything else as running no SQL would let
+`db-query -H x "delete from t"` pass unexamined and, on a host configured
+`readonly = false`, run a write with no token. The hook therefore fails closed:
+it skips only the commands known to run no SQL and gates every other
+invocation, including the short and stdin forms. Agents normally have stdout
+captured and so never reach the shortcuts, but a command run inside a terminal,
+or with stdout sent to `/dev/null`, does, which is why the hook changes
+regardless. Its release precedes this one.
