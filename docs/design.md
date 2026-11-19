@@ -2199,13 +2199,12 @@ stdin; it now runs the query.
 §13.10's guarantee holds unchanged: a pipe or a redirect with no command still
 gets usage and exit 1.
 
-**The workspace-tools gate hook must ship first.** It gates an invocation only
-when its subcommand is `query` or `q` and skips everything else as running no
-SQL, so `db-query -H x "delete from t"` would pass it unexamined and, on a host
-configured `readonly = false`, run a write with no token. The hook therefore
-fails closed: it skips only the commands known to run no SQL and gates every
-other invocation, including the short and stdin forms. Agents normally have
-stdout captured and so never reach the shortcuts, but a command run inside a
-terminal, or with stdout sent to `/dev/null`, does, which is why the hook
-changes regardless. Its release precedes this one.
-
+**The workspace-tools gate hook must ship first.** A gate that recognised only
+`query` or `q` and skipped everything else as running no SQL would let
+`db-query -H x "delete from t"` pass unexamined and, on a host configured
+`readonly = false`, run a write with no token. The hook therefore fails closed:
+it skips only the commands known to run no SQL and gates every other
+invocation, including the short and stdin forms. Agents normally have stdout
+captured and so never reach the shortcuts, but a command run inside a terminal,
+or with stdout sent to `/dev/null`, does, which is why the hook changes
+regardless. Its release precedes this one.

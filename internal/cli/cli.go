@@ -202,10 +202,9 @@ func canonicalCommand(name string) string {
 // error, or a server that could not be reached.
 func Run(args []string, stdout, stderr io.Writer) int {
 	// No arguments at all is not a special case: it parses to no shared flags
-	// and no command, which the len(rest) == 0 branch below already handles —
-	// opening the TUI on a terminal and printing usage anywhere else. Returning
-	// early here instead would make the bare `db-query` the one invocation that
-	// could never reach the TUI.
+	// and no command, which the len(rest) == 0 branch below already handles.
+	// Returning early here instead would make the bare `db-query` the one
+	// invocation that could never reach the TUI.
 	//
 	// The shared flags are parsed off the front of the command line before the
 	// command is chosen. Go's flag package stops at the first non-flag token,

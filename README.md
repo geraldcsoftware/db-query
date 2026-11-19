@@ -99,8 +99,8 @@ and exits 1.
 Query flags go after the SQL, as they do after `query`:
 
 ```sh
-db-query --host test "SELECT * FROM todos WHERE id = $1" --param 1=7 --dry-run
-db-query --host test -f report.sql   # error: -f is not a shared flag
+db-query --host test 'SELECT * FROM todos WHERE id = $1' --param 1=7 --dry-run
+db-query --host test -f report.sql   # flag provided but not defined: -f
 db-query --host test query -f report.sql
 ```
 
