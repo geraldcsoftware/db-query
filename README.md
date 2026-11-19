@@ -68,6 +68,40 @@ db-query --host test --dry-run q "SELECT 1"   # flag provided but not defined: -
 db-query --host test q --dry-run "SELECT 1"   # correct
 ```
 
+### Without the query command
+
+At a terminal, `query` can be left out. Quote the SQL as one argument, or send
+it on stdin:
+
+```sh
+db-query --host test "SELECT * FROM todos;"
+db-query --host test < report.sql
+```
+
+A single argument that contains whitespace is taken as SQL, because the shell
+strips the quotes and the space is the only trace of them left. A bare word
+never contains one, so it stays a command name: `db-query scehma` fails with
+`unknown command "scehma" (did you mean "schema"?)` instead of sending `scehma`
+to the server. Unquoted SQL (`db-query select * from t`) is therefore an
+unknown command too, and the error says to pass it as one quoted argument.
+
+Both forms apply only when stdout is a terminal. Anything that captures or
+redirects the output (`| jq`, `> out.tsv`, `$(db-query ...)`, an agent, cron,
+CI) needs the explicit `query` command. There, a quoted SQL argument fails with
+`unknown command "SELECT 1"; outside a terminal, run SQL through the query
+command: db-query query "<SQL>"`, and SQL on stdin with no command prints usage
+and exits 1.
+
+Query flags go after the SQL, as they do after `query`:
+
+```sh
+db-query --host test "SELECT * FROM todos WHERE id = $1" --param 1=7 --dry-run
+db-query --host test -f report.sql   # error: -f is not a shared flag
+db-query --host test query -f report.sql
+```
+
+Only the five shared flags may come before the SQL.
+
 ### Environment defaults
 
 `DB_QUERY_HOST` and `DB_QUERY_DATABASE` supply the defaults for `--host` and
