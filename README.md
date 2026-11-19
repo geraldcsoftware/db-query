@@ -22,6 +22,7 @@ db-query query      --host prod-core --save people-by-name --category reports \
 db-query query      --host prod-core --source people-by-name --category reports --param 1=Ada
 db-query query      --host prod-core -f migrate-and-check.sql  # several statements, one transaction
 db-query query      --host prod-core --dry-run "DELETE FROM people"   # classify it, run nothing
+db-query            --host prod-core "SELECT id, name FROM people"   # at a terminal, query may be left out
 db-query list       --category reports        # list saved queries
 db-query schema     --host prod-core          # show the cached schema (tables + columns)
 db-query schema     --host prod-core people   # one table's columns (bare or schema-qualified name)
@@ -67,6 +68,9 @@ after the command and error out before it, reporting the flag by name:
 db-query --host test --dry-run q "SELECT 1"   # flag provided but not defined: -dry-run
 db-query --host test q --dry-run "SELECT 1"   # correct
 ```
+
+At a terminal the SQL can also stand in the command position, with `query`
+left out; see "Without the query command" below.
 
 ### Without the query command
 
@@ -559,6 +563,9 @@ interactive UI instead of printing usage:
 db-query                      # host from --host/DB_QUERY_HOST/config, else a picker
 db-query --host prod-core     # skip the picker
 ```
+
+With SQL piped or redirected into stdin, it runs as a query instead of opening
+the UI; see "Without the query command".
 
 The host is resolved the usual way — `--host`, then `DB_QUERY_HOST`, then the
 config file. When that resolves nothing, a selection screen lists the configured
