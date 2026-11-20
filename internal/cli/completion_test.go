@@ -8,6 +8,7 @@ import (
 
 	"github.com/geraldcsoftware/db-query/internal/dblist"
 	"github.com/geraldcsoftware/db-query/internal/pgfake"
+	"github.com/geraldcsoftware/db-query/internal/remembered"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 )
 
@@ -214,6 +215,19 @@ func TestCompleteDatabasesFromEnvHost(t *testing.T) {
 	t.Setenv("DB_QUERY_HOST", "lionel")
 	if got := complete(t, "database"); got != "postgres\ntestdb\n" {
 		t.Fatalf("DB_QUERY_HOST must supply the host, got %q", got)
+	}
+}
+
+// TestCompleteDatabasesFromRememberedHost: completion never runs on a terminal
+// but still reads the remembered host, so --database completes after a run
+// that relied on it.
+func TestCompleteDatabasesFromRememberedHost(t *testing.T) {
+	seedDatabaseList(t, "lionel", "postgres", "testdb")
+	if err := remembered.Write(remembered.Target{Host: "lionel", Config: configInUse("")}); err != nil {
+		t.Fatal(err)
+	}
+	if got := complete(t, "database"); got != "postgres\ntestdb\n" {
+		t.Fatalf("the remembered host must supply the host, got %q", got)
 	}
 }
 
