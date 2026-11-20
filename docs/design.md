@@ -2285,12 +2285,12 @@ after the command alike):
 
 | Remembered | Run | Uses | Remembered afterwards |
 |---|---|---|---|
-| bebop / vgateway_auth | `-H bebop "..."` | bebop / vgateway_auth | unchanged |
-| bebop / vgateway_auth | `-H other "..."` | other / its configured database | other, no database |
-| bebop / vgateway_auth | `-H other -d x "..."` | other / x | other / x |
-| bebop / vgateway_auth | `-d y "..."` | bebop / y | bebop / y |
-| bebop / vgateway_auth | `"..."` with `DB_QUERY_HOST=other` exported | other / its configured database | unchanged |
-| bebop / vgateway_auth | `-d y "..."` with `DB_QUERY_HOST=other` exported | other / y | unchanged |
+| testhost / testdb | `-H testhost "..."` | testhost / testdb | unchanged |
+| testhost / testdb | `-H other "..."` | other / its configured database | other, no database |
+| testhost / testdb | `-H other -d x "..."` | other / x | other / x |
+| testhost / testdb | `-d y "..."` | testhost / y | testhost / y |
+| testhost / testdb | `"..."` with `DB_QUERY_HOST=other` exported | other / its configured database | unchanged |
+| testhost / testdb | `-d y "..."` with `DB_QUERY_HOST=other` exported | other / y | unchanged |
 | nothing | `-H a "..."` | a / its configured database | a, no database |
 
 Nothing is written unless the run flagged `--host` or `--database`, and
@@ -2326,8 +2326,8 @@ the run sets up its target, so a remembered host that is no longer configured
 is named before the error it causes:
 
 ```text
-db-query: bebop / vgateway_auth (remembered)
-db-query: bebop (remembered)                    when the target has no database
+db-query: testhost / testdb (remembered)
+db-query: testhost (remembered)                    when the target has no database
 ```
 
 It is plain text in every output format: it only ever appears on a terminal,
