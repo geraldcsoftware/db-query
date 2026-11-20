@@ -112,6 +112,15 @@ A flag beats the environment, and the environment beats the config file, so an
 exported DB_QUERY_HOST/DB_QUERY_DATABASE pair makes every command in that shell
 short while a one-off --host still overrides it.
 
+Remembered target. On a terminal, a query, schema, introspect or databases run
+remembers the --host and --database given to it as flags once it has reached
+them. A later run on a terminal fills in what it does not name: the remembered
+host, and the remembered database only while the host is the remembered one.
+It prints "db-query: <host> / <database> (remembered)" on stderr when it does.
+Flags and the DB_QUERY_* exports always win, and exports are never remembered.
+Off a terminal, and in a --dry-run or --precheck run, nothing is read or
+written. Delete $XDG_CACHE_HOME/db-query/target/last.json to forget it.
+
 Saved queries live under $DB_QUERY_QUERIES_DIR (else $XDG_CONFIG_HOME/db-query/queries,
 else ~/.config/db-query/queries) as <category>/<name>.sql, storing SQL with placeholders
 only — never resolved --param values. A saved query is bound to the provider it was saved

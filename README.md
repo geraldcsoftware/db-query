@@ -134,7 +134,9 @@ runs `db-query` with a terminal attached and still wants the stable format.
 invocation, which is how a wrapper that cannot add a flag screens what it is
 about to run. See [Query safety screening](#query-safety-screening).
 
-Precedence is flag (either position) → environment → config file. Note that an
+Precedence is flag (either position) → environment → the
+[remembered host and database](#remembered-host-and-database), on a terminal →
+config file. Note that an
 exported host is invisible state: `db-query hosts` shows what is configured, but
 the host in effect is whatever `DB_QUERY_HOST` says until you override it.
 - Params are values, never SQL text. On PostgreSQL they are positional and
@@ -213,6 +215,48 @@ the host in effect is whatever `DB_QUERY_HOST` says until you override it.
   any shape, so a 1×1 result prints just the bare value; in `table` it drops the
   header row and the row-count footer, leaving only the framed data. It is a
   no-op for `--output json`, whose objects are already self-describing.
+
+### Remembered host and database
+
+On a terminal, `query` (its short form and SQL piped into it included),
+`schema`, `introspect` and `databases` remember the `--host` and `--database`
+given to them as flags, once the run has reached them. A later run on a
+terminal fills in what it does not name, and says so on stderr:
+
+```sh
+db-query -H testhost -d testdb "select 1"
+db-query "select count(*) from todos"   # db-query: testhost / testdb (remembered)
+db-query s --tables                     # db-query: testhost / testdb (remembered)
+```
+
+The host is `--host`, then `DB_QUERY_HOST`, then the remembered host. The
+database is `--database`, then `DB_QUERY_DATABASE`, then the remembered
+database, then the host's configured `database`. A remembered database belongs
+to the host it was remembered with: it is used only while the host in use is
+the remembered one, and is never carried to another host.
+
+| Remembered | Run | Uses | Remembered afterwards |
+|---|---|---|---|
+| testhost / testdb | `-H testhost "..."` | testhost / testdb | unchanged |
+| testhost / testdb | `-H other "..."` | other / its configured database | other, no database |
+| testhost / testdb | `-H other -d x "..."` | other / x | other / x |
+| testhost / testdb | `-d y "..."` | testhost / y | testhost / y |
+| testhost / testdb | `"..."` with `DB_QUERY_HOST=other` exported | other / its configured database | unchanged |
+| nothing | `-H a "..."` | a / its configured database | a, no database |
+
+A run has reached its target when its connection opened, or when it succeeded
+without one (a schema answered from its cache). A query whose SQL fails still
+counts; a mistyped host or database never does.
+
+Nothing reads or writes the remembered target when stdout is piped or
+redirected (so a script, an agent or `| less` still needs `--host`), or in a
+`--dry-run` or `--precheck` run, `DB_QUERY_DRY_RUN` and `DB_QUERY_PRECHECK`
+included. Exported values are never remembered. Shell completion reads the
+remembered host but never writes it.
+
+It is kept in `$XDG_CACHE_HOME/db-query/target/last.json` (else
+`~/.cache/db-query/target/last.json`), readable only by you. Any run that
+flags a host or database replaces it; delete the file to forget it.
 
 ### Query safety screening
 
@@ -693,8 +737,9 @@ from a hidden `db-query __complete` command the script calls on TAB; it reads
 only config, cache and saved-query files, never a credential or a database.
 
 `--database` completes from the list `db-query databases` cached for that host,
-so it needs the host to be known — given as `--host`/`-H` anywhere on the line,
-or exported as `DB_QUERY_HOST`:
+so it needs the host to be known: given as `--host`/`-H` anywhere on the line,
+exported as `DB_QUERY_HOST`, or
+[remembered](#remembered-host-and-database) from an earlier run on a terminal:
 
 ```sh
 db-query --host prod-core databases      # once, to populate the list
