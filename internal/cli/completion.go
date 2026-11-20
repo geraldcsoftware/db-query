@@ -9,6 +9,7 @@ import (
 
 	"github.com/geraldcsoftware/db-query/internal/config"
 	"github.com/geraldcsoftware/db-query/internal/dblist"
+	"github.com/geraldcsoftware/db-query/internal/remembered"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 )
 
@@ -69,11 +70,18 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 	}
-	// An exported host stands in for one not yet typed on the line; the helper
-	// is a subprocess, so it inherits it for free. The flag wins, matching the
-	// CLI's own flag-then-environment precedence.
+	// The host comes from the line, else an exported DB_QUERY_HOST (the helper
+	// is a subprocess, so it inherits it for free), else the remembered target:
+	// the CLI's own precedence. The remembered host is read although completion
+	// never runs on a terminal, so that --database completes after a run that
+	// relied on it. Completion never writes it.
 	if host == "" {
 		host = os.Getenv("DB_QUERY_HOST")
+	}
+	if host == "" {
+		if t, ok := remembered.Read(); ok {
+			host = t.Host
+		}
 	}
 	switch target {
 	case "host":

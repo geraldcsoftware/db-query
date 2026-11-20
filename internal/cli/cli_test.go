@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/adapter"
 	"github.com/geraldcsoftware/db-query/internal/dblist"
 	"github.com/geraldcsoftware/db-query/internal/pgfake"
+	"github.com/geraldcsoftware/db-query/internal/remembered"
 	"github.com/geraldcsoftware/db-query/internal/savedquery"
 	"github.com/geraldcsoftware/db-query/internal/schema"
 	"github.com/geraldcsoftware/db-query/internal/sqlscan"
@@ -167,12 +169,21 @@ func run(t *testing.T, args ...string) (int, string, string) {
 // has DB_QUERY_HOST/DB_QUERY_DATABASE/DB_QUERY_CONFIG/DB_QUERY_OUTPUT/
 // DB_QUERY_BORDER exported in their own shell does not change what the tests
 // see. The tests that exercise the environment path set these explicitly with
-// t.Setenv.
+// t.Setenv. It also points the cache at a directory of the run's own, so no
+// test reads or writes the developer's real caches, the remembered target
+// among them.
 func TestMain(m *testing.M) {
 	for _, k := range []string{"DB_QUERY_HOST", "DB_QUERY_DATABASE", "DB_QUERY_CONFIG", "DB_QUERY_OUTPUT", "DB_QUERY_BORDER"} {
 		os.Unsetenv(k)
 	}
-	os.Exit(m.Run())
+	dir, err := os.MkdirTemp("", "db-query-cli-test-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_CACHE_HOME", dir)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 func TestHelpAndUsage(t *testing.T) {
@@ -871,6 +882,42 @@ func TestImplicitQueryNeedsATerminal(t *testing.T) {
 	q := srv.Queries()
 	if len(q) != 1 || q[0].SQL != "SELECT $1" || len(q[0].Params) != 1 || string(q[0].Params[0]) != "Ada" {
 		t.Fatalf("short form did not run as query with its trailing --param; sent %+v", q)
+	}
+}
+
+func TestRememberedTargetOnATerminal(t *testing.T) {
+	seedSchemaCache(t)
+	needsClassifier(t)
+	srv := fakePG(t, replyAll(pgfake.Rows([]string{"ok"}, []string{"1"})))
+	t.Setenv("DBQ_TEST_PW", "pw")
+	cfg := testConfig(t)
+	stubTerminal(t)
+
+	code, _, errb := run(t, "--config", cfg, "--host", "testpg", "--database", "testdb", "query", "select 1")
+	if code != 0 || strings.Contains(errb, "(remembered)") {
+		t.Fatalf("flagged run: code=%d err=%q", code, errb)
+	}
+	if got, ok := remembered.Read(); !ok || got != (remembered.Target{Host: "testpg", Database: "testdb"}) {
+		t.Fatalf("flagged run remembered %+v, %v", got, ok)
+	}
+
+	code, _, errb = run(t, "--config", cfg, "select 2")
+	if code != 0 || !strings.Contains(errb, "db-query: testpg / testdb (remembered)") {
+		t.Fatalf("unflagged run: code=%d err=%q", code, errb)
+	}
+	if q := srv.Queries(); len(q) != 2 || q[1].SQL != "select 2" {
+		t.Fatalf("unflagged run did not reach the remembered target; sent %+v", q)
+	}
+
+	code, _, errb = run(t, "--config", cfg, "query", "--dry-run", "select 3")
+	if code != 1 || !strings.Contains(errb, "--host is required") {
+		t.Fatalf("a dry run used the remembered target: code=%d err=%q", code, errb)
+	}
+
+	isTerminal = func(io.Writer) bool { return false }
+	code, _, errb = run(t, "--config", cfg, "query", "select 4")
+	if code != 1 || !strings.Contains(errb, "--host is required") {
+		t.Fatalf("an off-terminal run used the remembered target: code=%d err=%q", code, errb)
 	}
 }
 

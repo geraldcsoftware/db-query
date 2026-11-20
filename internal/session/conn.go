@@ -18,8 +18,9 @@ import (
 type Session struct {
 	Resolved
 
-	mu   sync.Mutex
-	conn adapter.Conn
+	mu     sync.Mutex
+	conn   adapter.Conn
+	opened bool // a connection has been opened at some point
 }
 
 // New wraps r in a Session. Nothing is opened until the first run.
@@ -41,8 +42,17 @@ func (s *Session) With(ctx context.Context, f func(adapter.Conn) error) error {
 			return err
 		}
 		s.conn = c
+		s.opened = true
 	}
 	return f(s.conn)
+}
+
+// Opened reports whether a connection was opened at any point in the
+// session's life, including one since closed or replaced.
+func (s *Session) Opened() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.opened
 }
 
 // Run runs q on the session's connection and returns its result sets with the
