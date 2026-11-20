@@ -221,7 +221,8 @@ the host in effect is whatever `DB_QUERY_HOST` says until you override it.
 On a terminal, `query` (its short form and SQL piped into it included),
 `schema`, `introspect` and `databases` remember the `--host` and `--database`
 given to them as flags, once the run has reached them. A later run on a
-terminal fills in what it does not name, and says so on stderr:
+terminal, under the same config file, fills in what it does not name, and says
+so on stderr:
 
 ```sh
 db-query -H testhost -d testdb "select 1"
@@ -233,7 +234,10 @@ The host is `--host`, then `DB_QUERY_HOST`, then the remembered host. The
 database is `--database`, then `DB_QUERY_DATABASE`, then the remembered
 database, then the host's configured `database`. A remembered database belongs
 to the host it was remembered with: it is used only while the host in use is
-the remembered one, and is never carried to another host.
+the remembered one, and is never carried to another host. The pair is tied to
+the config file in use as well: a run under another `--config` or
+`DB_QUERY_CONFIG` does not see it, because the same host name there can be
+another server.
 
 | Remembered | Run | Uses | Remembered afterwards |
 |---|---|---|---|
@@ -255,8 +259,11 @@ included. Exported values are never remembered. Shell completion reads the
 remembered host but never writes it.
 
 It is kept in `$XDG_CACHE_HOME/db-query/target/last.json` (else
-`~/.cache/db-query/target/last.json`), readable only by you. Any run that
-flags a host or database replaces it; delete the file to forget it.
+`~/.cache/db-query/target/last.json`), readable only by you. A terminal run
+that reaches its target with a flagged host or database updates it, as the
+table shows; delete the file to forget it. A remembered database that has since
+been dropped fails to connect, and a run that flags `-d` (or another `-H`)
+replaces it.
 
 ### Query safety screening
 

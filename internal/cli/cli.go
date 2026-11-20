@@ -114,9 +114,10 @@ short while a one-off --host still overrides it.
 
 Remembered target. On a terminal, a query, schema, introspect or databases run
 remembers the --host and --database given to it as flags once it has reached
-them. A later run on a terminal fills in what it does not name: the remembered
-host, and the remembered database only while the host is the remembered one.
-It prints "db-query: <host> / <database> (remembered)" on stderr when it does.
+them. A later run on a terminal, under the same config file, fills in what it
+does not name: the remembered host, and the remembered database only while the
+host is the remembered one, and says so on stderr:
+  db-query: <host> / <database> (remembered)
 Flags and the DB_QUERY_* exports always win, and exports are never remembered.
 Off a terminal, and in a --dry-run or --precheck run, nothing is read or
 written. Delete $XDG_CACHE_HOME/db-query/target/last.json to forget it.
@@ -490,12 +491,11 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) (cod
 		}
 	}
 
-	memo := resolveTarget(&c, isTerminal(stdout) && !pre.dryRun && pre.token == "")
+	memo := resolveTarget(&c, isTerminal(stdout) && !pre.dryRun && pre.token == "", stderr)
 	r, code := session.Setup(toSessionFlags(c), stderr)
 	if code != 0 {
 		return code
 	}
-	memo.note(stderr, r.Host.Name, r.Host.Database)
 	// One connection for the whole command, opened on first use.
 	s := session.New(r)
 	defer s.Close()
@@ -716,12 +716,11 @@ func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) (co
 	}
 
 	markFlagged(&c, fs)
-	memo := resolveTarget(&c, isTerminal(stdout))
+	memo := resolveTarget(&c, isTerminal(stdout), stderr)
 	r, code := session.Setup(toSessionFlags(c), stderr)
 	if code != 0 {
 		return code
 	}
-	memo.note(stderr, r.Host.Name, r.Host.Database)
 	// One connection for the whole command, opened on first use.
 	s := session.New(r)
 	defer s.Close()
@@ -852,12 +851,11 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 	}
 	markFlagged(&c, fs)
 
-	memo := resolveTarget(&c, isTerminal(stdout))
+	memo := resolveTarget(&c, isTerminal(stdout), stderr)
 	r, code := session.Setup(toSessionFlags(c), stderr)
 	if code != 0 {
 		return code
 	}
-	memo.note(stderr, r.Host.Name, r.Host.Database)
 	// One connection for the whole command, opened on first use.
 	s := session.New(r)
 	defer s.Close()
@@ -914,12 +912,11 @@ func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) 
 	}
 	markFlagged(&c, fs)
 
-	memo := resolveTarget(&c, isTerminal(stdout))
+	memo := resolveTarget(&c, isTerminal(stdout), stderr)
 	r, code := session.Setup(toSessionFlags(c), stderr)
 	if code != 0 {
 		return code
 	}
-	memo.note(stderr, r.Host.Name, r.Host.Database)
 	// One connection for the whole command, opened on first use.
 	s := session.New(r)
 	defer s.Close()

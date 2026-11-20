@@ -72,14 +72,15 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 	}
 	// The host comes from the line, else an exported DB_QUERY_HOST (the helper
 	// is a subprocess, so it inherits it for free), else the remembered target:
-	// the CLI's own precedence. The remembered host is read although completion
-	// never runs on a terminal, so that --database completes after a run that
-	// relied on it. Completion never writes it.
+	// the CLI's own precedence. The remembered host, the one remembered under
+	// the same config file, is read although completion never runs on a
+	// terminal, so that --database completes after a run that relied on it.
+	// Completion never writes it.
 	if host == "" {
 		host = os.Getenv("DB_QUERY_HOST")
 	}
 	if host == "" {
-		if t, ok := remembered.Read(); ok {
+		if t, ok := remembered.Read(configInUse(cfgPath)); ok {
 			host = t.Host
 		}
 	}

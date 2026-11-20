@@ -2321,8 +2321,9 @@ neither the line nor `DB_QUERY_HOST` names one, and never writes. Completion
 never runs on a terminal, so without this exception `--database` would not
 complete after a run that relied on the remembered host.
 
-**Notice.** When a remembered value filled a gap, one line on stderr after the
-target resolves and before any other output:
+**Notice.** When a remembered value filled a gap, one line on stderr before
+the run sets up its target, so a remembered host that is no longer configured
+is named before the error it causes:
 
 ```text
 db-query: bebop / vgateway_auth (remembered)
@@ -2339,9 +2340,13 @@ commands; putting them inside `Setup` would make it learn whether the run is
 on a terminal, where each value came from and whether the run is gated, which
 is CLI policy. The file is `$XDG_CACHE_HOME/db-query/target/last.json`, else
 `~/.cache/db-query/target/last.json`, placed through `internal/cache` like the
-schema and database-list caches: JSON `{"host": "...", "database": "..."}`
-with `database` omitted when empty, in a 0700 directory with file mode 0600.
-It is written to a temporary file beside it and renamed, so two terminals
+schema and database-list caches: JSON
+`{"host": "...", "database": "...", "config": "..."}` with `database` omitted
+when empty, in a 0700 directory with file mode 0600. `config` is the absolute
+path of the config file the run read: the same host label in another config
+file can be another server, so a run under another `--config` or
+`DB_QUERY_CONFIG`, and completion under it, sees nothing remembered. It is
+written to a temporary file beside it and renamed, so two terminals
 finishing at once leave one whole file and the last writer wins. A missing,
 unreadable or corrupt file, or one with no host, means nothing is remembered;
 a failed write is ignored, because the run's own result stands. Writing the
@@ -2355,10 +2360,17 @@ config (§4).
   precheck rule, but an agent's `schema`, `introspect` or `databases` run with
   stdout on `/dev/null` can still read and write the remembered target. The
   notice makes any such change visible on the next manual run.
+- The gate injects a precheck token only into a run it allows. A query it sends
+  to the user for approval (a write db-query did not consent to), or lets
+  through unclassified on a readonly host, carries none, so with stdout on
+  `/dev/null` such a run can use a remembered database its dry run did not
+  see. db-query's own run-time gate still classifies the statement against the
+  target it actually runs on, and challenges a write it did not consent to on
+  `/dev/tty`, naming that target.
 - Piping or redirecting output (`| less`, `> out.csv`) ignores the remembered
   target, so such a run needs `--host`.
-- A remembered host missing from the config in use (renamed, or another
-  `--config`) fails as an unknown host after the notice has named it. The next
-  flagged run replaces it.
+- A remembered host since removed or renamed in the config fails as an unknown
+  host after the notice has named it, and a remembered database since dropped
+  fails to connect the same way. The next flagged run replaces either.
 - A dry run typed by hand on a terminal does not use the remembered target, so
   it needs `--host`.

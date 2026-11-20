@@ -223,7 +223,7 @@ func TestCompleteDatabasesFromEnvHost(t *testing.T) {
 // that relied on it.
 func TestCompleteDatabasesFromRememberedHost(t *testing.T) {
 	seedDatabaseList(t, "lionel", "postgres", "testdb")
-	if err := remembered.Write(remembered.Target{Host: "lionel"}); err != nil {
+	if err := remembered.Write(remembered.Target{Host: "lionel", Config: configInUse("")}); err != nil {
 		t.Fatal(err)
 	}
 	if got := complete(t, "database"); got != "postgres\ntestdb\n" {

@@ -12,10 +12,13 @@ import (
 	"github.com/geraldcsoftware/db-query/internal/cache"
 )
 
-// Target is the host and database a manual run last pointed at.
+// Target is the host and database a manual run last pointed at, and the
+// config file whose host it names: the same label in another config file can
+// be another server.
 type Target struct {
 	Host     string `json:"host"`
 	Database string `json:"database,omitempty"`
+	Config   string `json:"config,omitempty"`
 }
 
 // Given is where one run's host and database came from, before the remembered
@@ -28,15 +31,17 @@ type Given struct {
 // Path is the file the remembered target is kept in.
 func Path() string { return filepath.Join(cache.Dir("target"), "last.json") }
 
-// Read returns the remembered target. ok is false when nothing usable is
-// remembered: the file is missing, unreadable or not JSON, or names no host.
-func Read() (Target, bool) {
+// Read returns the target remembered under the config file config. ok is
+// false when nothing usable is remembered for it: the file is missing,
+// unreadable or not JSON, names no host, or was written under another config
+// file.
+func Read(config string) (Target, bool) {
 	b, err := os.ReadFile(Path())
 	if err != nil {
 		return Target{}, false
 	}
 	var t Target
-	if json.Unmarshal(b, &t) != nil || t.Host == "" {
+	if json.Unmarshal(b, &t) != nil || t.Host == "" || t.Config != config {
 		return Target{}, false
 	}
 	return t, true

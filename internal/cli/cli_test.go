@@ -897,7 +897,7 @@ func TestRememberedTargetOnATerminal(t *testing.T) {
 	if code != 0 || strings.Contains(errb, "(remembered)") {
 		t.Fatalf("flagged run: code=%d err=%q", code, errb)
 	}
-	if got, ok := remembered.Read(); !ok || got != (remembered.Target{Host: "testpg", Database: "testdb"}) {
+	if got, ok := remembered.Read(configInUse(cfg)); !ok || got != (remembered.Target{Host: "testpg", Database: "testdb", Config: configInUse(cfg)}) {
 		t.Fatalf("flagged run remembered %+v, %v", got, ok)
 	}
 
@@ -907,6 +907,11 @@ func TestRememberedTargetOnATerminal(t *testing.T) {
 	}
 	if q := srv.Queries(); len(q) != 2 || q[1].SQL != "select 2" {
 		t.Fatalf("unflagged run did not reach the remembered target; sent %+v", q)
+	}
+
+	code, _, errb = run(t, "--config", testConfig(t), "select 3")
+	if code != 1 || !strings.Contains(errb, "--host is required") {
+		t.Fatalf("a run under another config file used the remembered target: code=%d err=%q", code, errb)
 	}
 
 	code, _, errb = run(t, "--config", cfg, "query", "--dry-run", "select 3")
