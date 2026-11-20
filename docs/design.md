@@ -803,6 +803,8 @@ is the §13.7 workflow this feature most serves.
 
 ### 13.10 The no-args interactive mode (extends §6, amends §9)
 
+Superseded by §13.23: the interactive mode was removed.
+
 Invoked with no command **and** with stdout attached to a terminal, `db-query`
 opens a four-pane Bubble Tea UI — Schema, Query, Saved, Results — rather than
 printing usage. The TTY test is the same `*os.File` + `ModeCharDevice`
@@ -871,6 +873,8 @@ direction is `cli → tui → session`; `tui` never imports `cli`, which is what
 keeps that shared logic in `session` rather than duplicated.
 
 ### 13.11 Database selection and in-session switching (amends §13.10)
+
+Superseded by §13.23: the interactive mode was removed.
 
 §13.10 specified a **name-only picker** and a session fixed to the database it
 started on. Both are amended here. The picker becomes an explained, filterable
@@ -2208,3 +2212,50 @@ invocation, including the short and stdin forms. Agents normally have stdout
 captured and so never reach the shortcuts, but a command run inside a terminal,
 or with stdout sent to `/dev/null`, does, which is why the hook changes
 regardless. Its release precedes this one.
+
+### 13.23 Interactive mode removed (supersedes §13.10, §13.11; amends §13.19, §13.22)
+
+The four-pane interactive mode (§13.10), its database picker and in-session
+switching (§13.11) and the embedded Neovim Query pane were removed on
+19/11/2026 because they were unused. The one-shot commands carry every
+capability the mode reached, so nothing it offered is lost to a caller.
+
+**What bare `db-query` does now.** With no command, `db-query` on a terminal
+with SQL redirected or piped into stdin runs that SQL as `query`, as §13.22
+specified. Every other no-command case prints usage on stderr and exits 1: off a
+terminal, as §13.10 already guaranteed, and now also on a terminal with stdin a
+terminal too, where the interactive mode used to open. This replaces the
+terminal branch of step 4 in §13.22's dispatch order. The terminal test, the
+character-device assertion on stdout, is unchanged and still selects table
+output (§13.8) and the short query form.
+
+**What left `internal/session`, and why.** §13.19 kept one connection per
+`Session` so the interactive mode could hold a session per database across
+runs; a command now opens one connection, runs and closes it. Removed:
+
+- `Session.Execute`, which only the interactive mode called. `Session.Run`
+  returns the same result sets with the server's report on each statement, and
+  is what `RunOnce` uses.
+- `session.Once`, the single-use connection for a listing that could run while
+  a query held the interactive session, and for introspecting another database.
+  No command needs it.
+- The idle-connection ping recorded in §13.21 (`idleCheck`, `lastUsed`,
+  `Conn.Ping` and its adapter implementations). It existed for a connection
+  left idle between runs, which only the interactive mode kept. A command's
+  connection lives for one invocation.
+- `Adapter.PreviewSQL`, which built the Schema pane's "first 100 rows"
+  statement, and the `schema.Table` and `schema.Column` grouping of a cached
+  catalogue, which only the panes read.
+
+Kept: one lazily opened connection per `Session`, the mutex that serialises
+runs, replacement of an unusable connection (`Usable`), `With`, `Run`,
+`RunOnce`, `BuildSchema` and `ListDatabases`. The Postgres savepoint wrap for
+a script inside an open transaction (§13.19) is unchanged; it protects any
+caller handed a session that is not idle, and nothing in it depended on the
+interactive mode.
+
+**Dependencies dropped.** `charm.land/bubbletea/v2`, `charm.land/bubbles/v2`,
+`charm.land/lipgloss/v2`, `github.com/charmbracelet/ultraviolet`,
+`github.com/charmbracelet/x/ansi` and `github.com/neovim/go-client`, with the
+indirect modules only they required. `nvim` is no longer an optional runtime
+dependency, and `DB_QUERY_TUI_PAGE_SIZE` no longer does anything.

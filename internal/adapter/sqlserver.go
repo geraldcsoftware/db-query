@@ -135,8 +135,6 @@ type mssqlConn struct {
 
 func (c *mssqlConn) Usable() bool { return !c.broken }
 
-func (c *mssqlConn) Ping(ctx context.Context) error { return c.conn.PingContext(ctx) }
-
 func (c *mssqlConn) Close() error {
 	err := c.conn.Close()
 	if dbErr := c.db.Close(); err == nil {
@@ -548,25 +546,6 @@ func (sqlserverAdapter) IntrospectSQL() string {
 	return `SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
 FROM INFORMATION_SCHEMA.COLUMNS
 ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION;`
-}
-
-// PreviewSQL is the TUI Schema pane's "Cmd+Enter on a table" shortcut:
-// T-SQL caps a row count with TOP, not LIMIT. The name comes from the cached
-// catalogue, so each dot-separated part is bracketed: without quoting, a
-// space-containing or reserved-word identifier would produce SQL that does
-// not parse.
-func (sqlserverAdapter) PreviewSQL(table string) string {
-	return fmt.Sprintf("SELECT TOP 100 * FROM %s;", quoteSQLServerIdent(table))
-}
-
-// quoteSQLServerIdent brackets each dot-separated part of a qualified name,
-// doubling any embedded closing bracket as T-SQL requires.
-func quoteSQLServerIdent(name string) string {
-	parts := strings.Split(name, ".")
-	for i, p := range parts {
-		parts[i] = "[" + strings.ReplaceAll(p, "]", "]]") + "]"
-	}
-	return strings.Join(parts, ".")
 }
 
 // Classify defers to the engine. No importable T-SQL parser exists as a Go

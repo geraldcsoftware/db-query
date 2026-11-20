@@ -1,10 +1,7 @@
 // Package session resolves a host's adapter and credential once, and runs
-// queries against it over one shared connection (Session). It is the seam
-// between internal/cli's command implementations and internal/tui's
-// interactive session — both call Setup, New and RunOnce so host/credential
-// resolution and query execution are defined exactly once. cli imports
-// session and tui; tui imports session only. Neither cli nor session ever
-// imports tui, so there is no import cycle.
+// queries against it over one connection (Session). internal/cli's command
+// implementations call Setup, New and RunOnce, so host/credential resolution
+// and query execution are defined exactly once.
 package session
 
 import (
@@ -156,8 +153,7 @@ func BuildSchema(s *Session, cachePath string, c CommonFlags, stderr io.Writer) 
 // ListDatabases runs a host's catalog listing and persists the names for
 // --database completion, returning the rows so a caller can render them too.
 // It pairs the adapter query with the cache write the same way BuildSchema
-// does for introspection, and lives here because both the CLI's databases
-// command and the TUI's startup picker need the same listing.
+// does for introspection.
 //
 // The cache is keyed on the config label, not the resolved server address: the
 // address may come from the credential via MergeCredential, and completion may

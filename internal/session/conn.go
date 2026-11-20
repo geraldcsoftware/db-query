@@ -18,15 +18,9 @@ import (
 type Session struct {
 	Resolved
 
-	mu       sync.Mutex
-	conn     adapter.Conn
-	lastUsed time.Time
+	mu   sync.Mutex
+	conn adapter.Conn
 }
-
-// idleCheck is how long a connection may sit unused before it is pinged on
-// its next use. A server's or a firewall's idle timeout is minutes at the
-// least, so this costs a round trip only after a pause a user would notice.
-var idleCheck = 30 * time.Second // a var so tests can shorten it
 
 // New wraps r in a Session. Nothing is opened until the first run.
 func New(r Resolved) *Session { return &Session{Resolved: r} }
@@ -37,14 +31,6 @@ func New(r Resolved) *Session { return &Session{Resolved: r} }
 func (s *Session) With(ctx context.Context, f func(adapter.Conn) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// A connection dropped by the server while idle is still Usable, since
-	// nothing has failed on it yet; pinging it here means the dead connection
-	// is replaced rather than costing the user a failed run. Retrying the run
-	// itself would not be safe: it might already have done something.
-	if s.conn != nil && s.conn.Usable() && time.Since(s.lastUsed) > idleCheck && s.conn.Ping(ctx) != nil {
-		_ = s.conn.Close() // it is dead; how it closes changes nothing
-		s.conn = nil
-	}
 	if s.conn != nil && !s.conn.Usable() {
 		_ = s.conn.Close() // it is being discarded; how it closes changes nothing
 		s.conn = nil
@@ -56,20 +42,13 @@ func (s *Session) With(ctx context.Context, f func(adapter.Conn) error) error {
 		}
 		s.conn = c
 	}
-	defer func() { s.lastUsed = time.Now() }()
 	return f(s.conn)
 }
 
-// Execute runs q on the session's connection and returns its result sets. A
-// submission the adapter refuses as given is refused before the connection is
-// opened, so it never reaches the server.
-func (s *Session) Execute(ctx context.Context, q adapter.Query) ([]adapter.Rows, error) {
-	res, err := s.Run(ctx, q)
-	return res.Sets, err
-}
-
-// Run is Execute with the server's report on each statement as well as the
-// result sets, and how long the run took once the connection was open.
+// Run runs q on the session's connection and returns its result sets with the
+// server's report on each statement, and how long the run took once the
+// connection was open. A submission the adapter refuses as given is refused
+// before the connection is opened, so it never reaches the server.
 func (s *Session) Run(ctx context.Context, q adapter.Query) (adapter.Result, error) {
 	if err := s.Adapter.Check(q); err != nil {
 		return adapter.Result{}, err
@@ -96,13 +75,4 @@ func (s *Session) Close() error {
 	err := s.conn.Close()
 	s.conn = nil
 	return err
-}
-
-// Once runs q on a connection of its own, opened for it and closed after. It
-// suits a run that must not wait behind, or disturb, a session already in use:
-// a catalogue listing behind a running query, say.
-func Once(ctx context.Context, r Resolved, q adapter.Query) ([]adapter.Rows, error) {
-	s := New(r)
-	defer s.Close()
-	return s.Execute(ctx, q)
 }
