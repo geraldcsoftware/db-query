@@ -112,6 +112,16 @@ A flag beats the environment, and the environment beats the config file, so an
 exported DB_QUERY_HOST/DB_QUERY_DATABASE pair makes every command in that shell
 short while a one-off --host still overrides it.
 
+Remembered target. On a terminal, a query, schema, introspect or databases run
+remembers the --host and --database given to it as flags once it has reached
+them. A later run on a terminal, under the same config file, fills in what it
+does not name: the remembered host, and the remembered database only while the
+host is the remembered one, and says so on stderr:
+  db-query: <host> / <database> (remembered)
+Flags and the DB_QUERY_* exports always win, and exports are never remembered.
+Off a terminal, and in a --dry-run or --precheck run, nothing is read or
+written. Delete $XDG_CACHE_HOME/db-query/target/last.json to forget it.
+
 Saved queries live under $DB_QUERY_QUERIES_DIR (else $XDG_CONFIG_HOME/db-query/queries,
 else ~/.config/db-query/queries) as <category>/<name>.sql, storing SQL with placeholders
 only — never resolved --param values. A saved query is bound to the provider it was saved
@@ -216,6 +226,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return exitParse(err, stdout)
 	}
+	markFlagged(&globals, fs)
 	if showVersion {
 		fmt.Fprintln(stdout, versionString())
 		return 0
@@ -272,6 +283,10 @@ type commonFlags struct {
 	output   string
 	timeout  time.Duration
 	database string
+	// hostFlag and databaseFlag record that host and database were given as
+	// flags, before or after the command, rather than taken from the
+	// environment. Only flagged values are remembered.
+	hostFlag, databaseFlag bool
 }
 
 // toSessionFlags converts the CLI's commonFlags into session.CommonFlags at
@@ -344,6 +359,7 @@ func addCommon(fs *flag.FlagSet, c *commonFlags, def commonFlags) {
 	fs.DurationVar(&c.timeout, "t", def.timeout, "shorthand for --timeout")
 	fs.StringVar(&c.database, "database", def.database, "override the host's configured database")
 	fs.StringVar(&c.database, "d", def.database, "shorthand for --database")
+	c.hostFlag, c.databaseFlag = def.hostFlag, def.databaseFlag
 }
 
 // newFlagSet builds a subcommand FlagSet whose parse errors go to stderr.
@@ -403,7 +419,7 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int {
+func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) (code int) {
 	var c commonFlags
 	params := paramFlags{}
 	var sqlFile, saveName, sourceName, category string
@@ -437,6 +453,8 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	if err != nil {
 		return exitParse(err, stdout)
 	}
+	markFlagged(&c, fs)
+	pre.resolve()
 	if err := render.ValidBorder(border); err != nil {
 		render.Error(stderr, c.output, err.Error())
 		return 1
@@ -473,6 +491,7 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 		}
 	}
 
+	memo := resolveTarget(&c, isTerminal(stdout) && !pre.dryRun && pre.token == "", stderr)
 	r, code := session.Setup(toSessionFlags(c), stderr)
 	if code != 0 {
 		return code
@@ -480,6 +499,7 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	// One connection for the whole command, opened on first use.
 	s := session.New(r)
 	defer s.Close()
+	defer func() { memo.save(s.Opened() || code == 0) }()
 
 	if sourceSet {
 		sq, err := savedquery.Load(sourceName, category)
@@ -502,7 +522,6 @@ func runQuery(args []string, globals commonFlags, stdout, stderr io.Writer) int 
 	// The safety gate sits here: after every source of SQL has resolved to one
 	// final string, and before anything is sent anywhere. A pre-check that ran
 	// earlier would be classifying something other than what runs.
-	pre.resolve()
 	pre.source = sourceOf(positional, sqlFile, sourceName)
 	doc, tuple, key, err := evaluate(s, c, pre, sql, params)
 	if err != nil {
@@ -666,7 +685,7 @@ func previewSQL(sql string) string {
 // introspect: cache-first, silently building the cache when absent (like
 // the query path) and hitting the live database only then or under
 // --refresh-schema.
-func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) int {
+func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) (code int) {
 	var c commonFlags
 	var tablesOnly, refreshSchema, noHeaders bool
 	var maxColWidth int
@@ -696,6 +715,8 @@ func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) int
 		return 1
 	}
 
+	markFlagged(&c, fs)
+	memo := resolveTarget(&c, isTerminal(stdout), stderr)
 	r, code := session.Setup(toSessionFlags(c), stderr)
 	if code != 0 {
 		return code
@@ -703,6 +724,7 @@ func runSchema(args []string, globals commonFlags, stdout, stderr io.Writer) int
 	// One connection for the whole command, opened on first use.
 	s := session.New(r)
 	defer s.Close()
+	defer func() { memo.save(s.Opened() || code == 0) }()
 
 	cachePath := schema.CachePath(r.Host.Host, r.Host.Database)
 	if refreshSchema || !schema.Exists(cachePath) {
@@ -816,7 +838,7 @@ func filterTable(rows adapter.Rows, name string) (adapter.Rows, bool, error) {
 	return out, len(out.Rows) > 0, nil
 }
 
-func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer) int {
+func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer) (code int) {
 	var c commonFlags
 	// --refresh-schema is accepted for symmetry with query; introspect
 	// always rebuilds the cache regardless, so the flag is a no-op here.
@@ -827,7 +849,9 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 	if err := fs.Parse(args); err != nil {
 		return exitParse(err, stdout)
 	}
+	markFlagged(&c, fs)
 
+	memo := resolveTarget(&c, isTerminal(stdout), stderr)
 	r, code := session.Setup(toSessionFlags(c), stderr)
 	if code != 0 {
 		return code
@@ -835,6 +859,7 @@ func runIntrospect(args []string, globals commonFlags, stdout, stderr io.Writer)
 	// One connection for the whole command, opened on first use.
 	s := session.New(r)
 	defer s.Close()
+	defer func() { memo.save(s.Opened() || code == 0) }()
 
 	// introspect always rebuilds: run the provider catalog query, persist
 	// it to the cache, then print it.
@@ -878,14 +903,16 @@ func refreshDatabaseList(s *session.Session, c commonFlags, stderr io.Writer) {
 // for shell completion. It is the only writer of that cache: the completion
 // helper reads the file and never opens a connection of its own, which is what
 // keeps a TAB from resolving a credential (design.md §13.9).
-func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) int {
+func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) (code int) {
 	var c commonFlags
 	fs := newFlagSet("databases", stderr)
 	addCommon(fs, &c, globals)
 	if err := fs.Parse(args); err != nil {
 		return exitParse(err, stdout)
 	}
+	markFlagged(&c, fs)
 
+	memo := resolveTarget(&c, isTerminal(stdout), stderr)
 	r, code := session.Setup(toSessionFlags(c), stderr)
 	if code != 0 {
 		return code
@@ -893,6 +920,7 @@ func runDatabases(args []string, globals commonFlags, stdout, stderr io.Writer) 
 	// One connection for the whole command, opened on first use.
 	s := session.New(r)
 	defer s.Close()
+	defer func() { memo.save(s.Opened() || code == 0) }()
 
 	rows, code := listDatabases(s, c, stderr)
 	if code != 0 {

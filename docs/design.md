@@ -531,7 +531,7 @@ as every other credential.
 Manual use is dominated by one loop: look at the schema, then run the query it
 informs, against the same host and database. Three changes make that loop cheap
 to retype — or rather, cheap to *not* retype — without adding a mode or a
-stateful "current connection":
+"current connection" held open between runs:
 
 - **Shared flags before the command.** `--host`, `--database`, `--config`,
   `--output` and `--timeout` may precede the command (`db-query --host test
@@ -2259,3 +2259,118 @@ interactive mode.
 `github.com/charmbracelet/x/ansi` and `github.com/neovim/go-client`, with the
 indirect modules only they required. `nvim` is no longer an optional runtime
 dependency, and `DB_QUERY_TUI_PAGE_SIZE` no longer does anything.
+
+### 13.24 Remembered target (amends §13.7, §13.9, §13.22)
+
+Running db-query by hand meant typing `--host` and `--database` on almost
+every run. On a terminal, db-query now remembers the host and database a run
+last pointed at, and points there again when a later run leaves them out. Each
+run still opens and closes its own connection.
+
+**§13.7 clarified.** "No stateful current connection" meant no connection held
+open between runs, which still holds, and §13.7 now says so. What carries
+between runs is where to point, never a connection.
+
+**Resolution.** The host is `--host`, then `DB_QUERY_HOST`, then the
+remembered host, else the existing `--host is required`. The database is
+`--database`, then `DB_QUERY_DATABASE`, then the remembered database, then the
+host's configured database. The remembered database applies only while the
+host in use is the remembered host: a database belongs to the host it was
+remembered with, and carrying it to another host would land a run on a
+database nobody chose for it.
+
+**What is remembered.** One pair, a host and optionally a database, updated
+after a run that reached its target from the values given as flags (before or
+after the command alike):
+
+| Remembered | Run | Uses | Remembered afterwards |
+|---|---|---|---|
+| testhost / testdb | `-H testhost "..."` | testhost / testdb | unchanged |
+| testhost / testdb | `-H other "..."` | other / its configured database | other, no database |
+| testhost / testdb | `-H other -d x "..."` | other / x | other / x |
+| testhost / testdb | `-d y "..."` | testhost / y | testhost / y |
+| testhost / testdb | `"..."` with `DB_QUERY_HOST=other` exported | other / its configured database | unchanged |
+| testhost / testdb | `-d y "..."` with `DB_QUERY_HOST=other` exported | other / y | unchanged |
+| nothing | `-H a "..."` | a / its configured database | a, no database |
+
+Nothing is written unless the run flagged `--host` or `--database`, and
+nothing is written when the host came from `DB_QUERY_HOST`: an exported host
+is a standing choice for that shell, and remembering it would leak it into
+every other terminal. A flagged host replaces the remembered host and, when it
+differs, drops the remembered database; a flagged database replaces the
+remembered database.
+
+**Reached.** A run writes only when its connection opened or it exited 0 (a
+schema answered from its cache never connects). The SQL's own outcome does not
+matter, but a mistyped host or database is never remembered.
+`Session.Opened` reports the first half.
+
+**Where it applies.** `query` (the short form of §13.22 and SQL on stdin
+included), `schema`, `introspect` and `databases`, and only when stdout is a
+terminal, by the unchanged §13.8 test. `list`, `hosts`, `version`,
+`completion` and `help` take no target. A run carrying `--dry-run`,
+`--precheck`, `DB_QUERY_DRY_RUN` or `DB_QUERY_PRECHECK` neither reads nor
+writes it: the precheck token binds the target, and the gate's dry run never
+sees a terminal, so the run it lets through must not see the remembered target
+either, or the two halves would resolve different targets. For that reason
+`runQuery` folds the environment into its precheck flags before setup rather
+than at the gate.
+
+**Completion (amends §13.9).** `__complete` reads the remembered host when
+neither the line nor `DB_QUERY_HOST` names one, and never writes. Completion
+never runs on a terminal, so without this exception `--database` would not
+complete after a run that relied on the remembered host.
+
+**Notice.** When a remembered value filled a gap, one line on stderr before
+the run sets up its target, so a remembered host that is no longer configured
+is named before the error it causes:
+
+```text
+db-query: testhost / testdb (remembered)
+db-query: testhost (remembered)                    when the target has no database
+```
+
+It is plain text in every output format: it only ever appears on a terminal,
+where no program parses stderr.
+
+**Storage.** `internal/remembered` owns the file and two pure rules: `Fill`
+(which gaps the remembered target fills) and `Next` (which pair a run leaves
+remembered). `internal/cli` applies them around `session.Setup` in the four
+commands; putting them inside `Setup` would make it learn whether the run is
+on a terminal, where each value came from and whether the run is gated, which
+is CLI policy. The file is `$XDG_CACHE_HOME/db-query/target/last.json`, else
+`~/.cache/db-query/target/last.json`, placed through `internal/cache` like the
+schema and database-list caches: JSON
+`{"host": "...", "database": "...", "config": "..."}` with `database` omitted
+when empty, in a 0700 directory with file mode 0600. `config` is the absolute
+path of the config file the run read: the same host label in another config
+file can be another server, so a run under another `--config` or
+`DB_QUERY_CONFIG`, and completion under it, sees nothing remembered. It is
+written to a temporary file beside it and renamed, so two terminals
+finishing at once leave one whole file and the last writer wins. A missing,
+unreadable or corrupt file, or one with no host, means nothing is remembered;
+a failed write is ignored, because the run's own result stands. Writing the
+target back into the config file was ruled out: nothing writes the hand-kept
+config (§4).
+
+**Accepted consequences.**
+
+- `> /dev/null` is a character device, so a command with stdout sent there
+  counts as a terminal. Gated query runs are excluded by the dry-run and
+  precheck rule, but an agent's `schema`, `introspect` or `databases` run with
+  stdout on `/dev/null` can still read and write the remembered target. The
+  notice makes any such change visible on the next manual run.
+- The gate injects a precheck token only into a run it allows. A query it sends
+  to the user for approval (a write db-query did not consent to), or lets
+  through unclassified on a readonly host, carries none, so with stdout on
+  `/dev/null` such a run can use a remembered database its dry run did not
+  see. db-query's own run-time gate still classifies the statement against the
+  target it actually runs on, and challenges a write it did not consent to on
+  `/dev/tty`, naming that target.
+- Piping or redirecting output (`| less`, `> out.csv`) ignores the remembered
+  target, so such a run needs `--host`.
+- A remembered host since removed or renamed in the config fails as an unknown
+  host after the notice has named it, and a remembered database since dropped
+  fails to connect the same way. The next flagged run replaces either.
+- A dry run typed by hand on a terminal does not use the remembered target, so
+  it needs `--host`.
