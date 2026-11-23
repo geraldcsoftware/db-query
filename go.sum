@@ -39,8 +39,8 @@ github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/mattn/go-runewidth v0.0.30 h1:+KUuiDA4fF0R1p5FeueHefjDm+GIM+kWfFnDjybOPgk=
 github.com/mattn/go-runewidth v0.0.30/go.mod h1:3qAiGCV4Koz/yuveO58qUefmUTRm8r0IGEXZ9jeHp/8=
-github.com/microsoft/go-mssqldb v1.11.2 h1:FCgeBIK8um2+X4tbun6Q71N1KsfyCDPKY41e1yGVjSE=
-github.com/microsoft/go-mssqldb v1.11.2/go.mod h1:CYgwG5AMXFojbjTg+GNP5G/y6uz1BhTyZaPqQWzkGnQ=
+github.com/microsoft/go-mssqldb v1.12.0 h1:Jwg/8jz2MKlFOYf4Oj7wMOQuTpCLrP4PIx0aINasMfw=
+github.com/microsoft/go-mssqldb v1.12.0/go.mod h1:iYsISdcqI4Tf8x/JwwkHfBu5pxtSD6lSJB8tCrOoo6E=
 github.com/pganalyze/pg_query_go/v6 v6.2.5 h1:i7dvkA5167th3rXtk0jv9+r5DeJd4GqeGOVKuMTda8s=
 github.com/pganalyze/pg_query_go/v6 v6.2.5/go.mod h1:JZoURQupTV7G8lS6OzKakgvp+xpwu7+dH5kA5WrikzM=
 github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c h1:+mdjkGKdHQG3305AYmdv1U2eRNDiU2ErMBj1gwrq8eQ=
